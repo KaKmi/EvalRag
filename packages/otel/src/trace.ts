@@ -23,8 +23,9 @@ export function resetTelemetryForTests(): void {
 
 export async function forceFlushTelemetry(timeoutMs = 2000): Promise<void> {
   if (!forceFlushHook) return;
+  // flush 是 best-effort：导出失败（如 Collector 不可达时 gRPC 快速 reject）不得向调用方抛错
   await Promise.race([
-    forceFlushHook(),
+    forceFlushHook().catch(() => undefined),
     new Promise<void>((resolve) => {
       setTimeout(resolve, timeoutMs);
     }),

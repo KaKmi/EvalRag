@@ -5,7 +5,12 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it } from "vitest";
-import { emitManualHelloSpan, resetTelemetryForTests } from "./trace";
+import {
+  emitManualHelloSpan,
+  forceFlushTelemetry,
+  resetTelemetryForTests,
+  setForceFlushHookForTelemetry,
+} from "./trace";
 
 describe("manual hello span", () => {
   afterEach(() => {
@@ -26,5 +31,11 @@ describe("manual hello span", () => {
     expect(result.spanId).toMatch(/^[a-f0-9]{16}$/);
     expect(exporter.getFinishedSpans().map((span) => span.name)).toContain("manual.hello");
     expect(trace.getSpan(context.active())).toBeUndefined();
+  });
+
+  it("does not throw when the flush hook rejects (collector unreachable)", async () => {
+    setForceFlushHookForTelemetry(() => Promise.reject(new Error("connect ECONNREFUSED")));
+    await expect(forceFlushTelemetry()).resolves.toBeUndefined();
+    await expect(emitManualHelloSpan()).resolves.toMatchObject({ name: "manual.hello" });
   });
 });
