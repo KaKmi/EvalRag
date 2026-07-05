@@ -1,0 +1,24 @@
+{
+  "name": "@codecrush/root",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "db:generate": "pnpm --filter @codecrush/backend db:generate",
+    "db:migrate": "pnpm --filter @codecrush/backend db:migrate"
+  },
+  "devDependencies": {
+    "eslint": "^10.6.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.4",
+    "turbo": "^2.10.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.62.1"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/zhaopengcheng/Downloads/**)",
+      "Bash(grep -oE '[\\\\x{4e00}-\\\\x{9fff}]{2,}' \"CodeCrushBot 单文件版.html\")"
+    ]
+  }
+}

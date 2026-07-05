@@ -1,0 +1,195 @@
+---
+title: "CodeCrushBot RAG 平台架构"
+description: "通用 RAG 平台的系统架构：NestJS 薄编排 + Postgres/pgvector + OTel→Collector→ClickHouse 可观测，本地优先、阿里云就绪。"
+category: "design"
+number: "001"
+status: draft
+services: [backend, frontend, observability, deploy]
+last_modified: "2026-07-04"
+---
+
+# 001 — CodeCrushBot RAG 平台架构
+
+## Status
+
+`draft` — 架构决策已通过 `/ship:arch-design` 完成（9/9 lens、6 项拒绝备选、6 项假设、7 项 revisit 触发器），尚未开始实现。实现启动后逐屏落地时，将本文相关章节推进为 `current`，并对照代码校验。
+
+## Summary
+
+CodeCrushBot 是一个**通用 RAG 平台**（课程问答只是示例 mock 数据）。它把一次问答拆成可配置、可追踪、可优化的流水线：模型接入 → 知识库/切片（固定语义策略）→ Agent 配置 → 问答/检索 → **Trace 追踪**。核心技术抉择：后端 NestJS 自研薄编排；数据面 Postgres+pgvector 单库；**可观测走 OpenTelemetry SDK → Collector → ClickHouse 导出器的标准 OTLP 链路**，从而"标准化、可迁移"（日后换 Jaeger/Tempo/SLS/ARMS 零改应用）。本地 docker-compose 优先，阿里云托管服务（Tier B）设计就绪、择期落地。
+
+## Boundaries
+
+> 反漂移边界。任何实现若越过这些边界，应先回来改本文，而不是让代码与设计各说各话。
+
+**In-scope（首期核心主链路）**
+- 模型接入（LLM/Embedding/Rerank 注册、密钥加密、连通性测试）
+- 知识库 / 文档 / 切片：**固定管线**（解析→语义切片→向量化→入索引），切片启用/禁用/查看，生命周期状态
+- Agent 配置（绑定 KB、三类模型、4 个 Prompt、检索参数、兜底转人工）
+- 问答/检索：RAG 编排 + 检索测试台
+- Trace 追踪：每次问答一条 OTLP trace，落 ClickHouse，列表 + 详情
+
+**Out-of-scope（首期明确不做，schema 不堵死）**
+- 评测集 / 评测管理 / 评测报告（里程碑 2）
+- 运行看板聚合图表（里程碑 2）
+- 多租户 / RBAC（当前单角色 admin + demo 用户）
+- **可配置的切片策略 / 通用数据处理工程**（切片固定为语义策略——这是产品刻意约束，非遗漏）
+- HA / 水平扩展 / 多区域
+
+**Invariants（不可违反的不变量）**
+1. **埋点绝不进入问答关键路径**：可观测组件（Collector/ClickHouse）故障不得导致问答失败或增加用户可感延迟。
+2. **应用只吐 OTLP，从不直写 ClickHouse**；ClickHouse 表结构由 Collector 导出器拥有，读侧只经由自有 VIEW 防腐层访问。
+3. **一切外部依赖藏在端口/连接串背后**（`ModelProviderPort` / `RetrieverPort` / `BlobStore`），保证本地自建 ↔ 阿里云托管服务可零改动切换。
+4. **模型 API Key 永不明文回传前端**，存储加密。
+5. `messages.trace_id` 外键必须写入，保证每条回答可一键回溯其 trace。
+
+## Context / 背景
+
+来源是一份低代码导出的单文件 UI 原型（`CodeCrushBot 单文件版.html`，约 15 屏），设计了完整的 RAG 平台管理台 + C 端问答页。原型自带 mock 数据，产品定位是**通用 RAG 平台**，重点三词：**可配置、可追踪、可优化**。用户特别指定：可追踪部分用 **ClickHouse** 存储，数据要**标准化、可迁移、符合 OTLP**。原型的 Trace 详情已画出 span 树（问题改写→意图识别→多路召回[向量+关键词]→重排→命中→生成），每个 span 带 `kind / tokens-in / tokens-out / cost / status`，并有"OTLP Span JSON"导出——与 OpenTelemetry GenAI 语义约定几乎 1:1。
+
+## Goals / Non-goals
+
+**Goals**：跑通一条"配置 → 问答 → 可追踪"的完整主链路；可观测数据标准化可迁移；前端 1:1 还原原型 UI；本地一键起、日后平滑上阿里云。
+
+**Non-goals**：见 Boundaries 的 Out-of-scope。核心是**不做通用数据工程**、不做高可用/高并发。
+
+## Requirements & 关键数字
+
+| 维度 | 值 | 依据 |
+|---|---|---|
+| 峰值 QPS | 持续 ≤10 / 突发 ≤50 | mock「近7日 1,284」≈180/天≈0.002 qps 均值，取 5000× 余量 |
+| 问答延迟 | p50 ~2–3s（生成 1.7s + 召回 0.35s 主导），30s 熔断 | mock span 耗时 + 失败样本 30.0s |
+| 平台自身开销 | <50ms，埋点异步 | Invariant 1 |
+| Trace 量 | ~10 span/问答；满负荷 ≈8.6M span/天 | ClickHouse 轻松，TTL 30 天 |
+| 向量规模 | ~100k 向量 × 1024 维 ≈ 400MB | 1000 文档 × 100 分块估算 → pgvector 足够 |
+| 一致性 | 配置事务（Postgres）/ trace 追加分析（ClickHouse） | 见数据模型 |
+
+结论：低 qps → **单实例后端 + 单 Postgres + 单 ClickHouse + 单 Collector 全部够用**，不上集群。
+
+## Design
+
+### 组件与模块（NestJS）
+
+`auth`（JWT）· `models`（模型注册 + `ModelProviderPort`，首个适配器 OpenAI 兼容，覆盖 DeepSeek/Qwen/GPT/Claude/vLLM）· `knowledge-bases` · `documents`（上传/生命周期）· `ingestion`（worker：解析→切片→向量化，固定管线）· `chunks` · `retrieval`（`RetrieverPort`：向量+关键词多路召回→融合→重排，**chat 与检索测试台共用**）· `agents` · `prompts`（版本/diff/发布/回滚/变量抽取）· `chat`（RAG 编排 + SSE 流式，产出完整 OTLP trace）· `traces`（只读 ClickHouse）· `conversations`。
+
+编排采用**自研薄编排**：每个流水线阶段 = 一个显式 span，不引入 LangChain.js（见 Alternatives）。
+
+### 数据模型
+
+**控制面 — Postgres + pgvector（单库，事务）**
+
+- `model_providers(id, type[llm/embedding/rerank], provider, name, base_url, api_key_enc, deployment_id, enabled)`
+- `knowledge_bases(id, name, desc, embedding_model_id)`
+- `documents(id, kb_id, name, type, size, status, stage, error, blob_key, created_at)`
+- `chunks(id, doc_id, kb_id, seq, text, token_count, section, enabled, embedding vector(1024), tsv tsvector)` — 向量(pgvector HNSW) + 关键词(FTS) 同表
+- `agents(id, name, desc, status, gen_model_id, light_model_id, rerank_model_id, prompt_*_ver_id×4, top_k, top_n, threshold, multi_recall, vec_weight, fallback_human, updated_at)`
+- `agent_kbs(agent_id, kb_id)`
+- `prompts(id, name, node[rewrite/intent/reply/fallback], current_version_id)`
+- `prompt_versions(id, prompt_id, version, body, variables jsonb, note, author, status[draft/prod/archived])`
+- `conversations(id, agent_id, user_id, title)` · `messages(id, conv_id, role, content, trace_id, confidence, citations jsonb)` — **`trace_id` 是可追踪关键外键**
+
+**分析面 — ClickHouse**：`otel_traces`（Collector 的 `clickhouseexporter` 建的标准表：TraceId/SpanId/ParentSpanId/SpanName/SpanKind/Duration/StatusCode/SpanAttributes(Map)/ResourceAttributes/Events…）+ **我们自有的读 VIEW**（隔离导出器 schema 漂移）。RAG 数据以属性承载：LLM span 用官方 `gen_ai.*`（`gen_ai.request.model` / `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` / `gen_ai.system`），RAG 专有用自定义 `rag.*`（`rag.retrieval.top_k` / `rag.chunk.scores` / `rag.citation.ids` / `rag.cost.usd` / `rag.prompt.version_id`）。命中分块/引用用 **span events + 只存 chunk_id 引用**，详情页回 Postgres 取正文——避免大段正文塞进 span 撑爆 trace。
+
+### 契约（先定契约，后写内部）
+
+- `RetrieverPort.retrieve(query, {kb, embedModel, topK, threshold, multi, weights, rerankModel, topN}) -> Hit[]`，`Hit = {chunkId, docId, text, section, vecScore, kwScore, rerankScore, finalScore}`
+- `ModelProviderPort`: `chat() / embed() / rerank()`
+- `BlobStore`: `put/get/delete`（本地卷 ↔ OSS 可换）
+- REST（对齐各屏资源）+ **SSE**（问答 token 流式）
+- **OTLP** = 可观测契约：应用 → Collector → ClickHouse
+
+### 可观测数据流（核心）
+
+```
+ NestJS 后端                    OTel Collector                 ClickHouse
+┌──────────────┐   OTLP/gRPC  ┌──────────────────┐  插入   ┌────────────────┐
+│ OTel SDK 埋点 │ ───────────► │ batch / 重试 /    │ ──────► │ otel_traces 表 │
+│ 每阶段=1 span │  (标准协议)   │ 脱敏 / 导出器      │         │ (导出器建, 标准) │
+└──────────────┘              └────────┬─────────┘         └───────┬────────┘
+   gen_ai.*/rag.* 属性                 │ 换导出器即可                │ traces 模块只读
+                                       └──► Jaeger/Tempo/SLS/ARMS    ▼ 自有 VIEW(防腐层)
+                                            (零改应用代码)         Trace 列表/详情 API
+```
+
+"标准化、可迁移"的落地含义：应用只按 OTLP 吐数据，存储/后端由 Collector 的 exporter 决定，日后换观测后端只在 Collector 加/换 exporter，**应用代码零改动**。
+
+## Failure modes
+
+- **生成超时 30s → 熔断**：trace 标 ERROR，返回兜底/转人工；transient 5xx 仅对幂等阶段（改写/embed）重试 1 次，生成不重试（省钱）。
+- **Collector / ClickHouse 挂**：SDK BatchSpanProcessor 有界队列 + Collector 磁盘持久队列重试；满则丢 span，**问答照常成功**（Invariant 1）。
+- **一路召回失败**（关键词挂）→ 降级纯向量、span 打标、继续。
+- **重新解析幂等**：re-ingest = 先删旧 chunk+向量再重写；pg-boss singleton key 保证单文档单 worker，杜绝重复向量。
+- **Postgres 挂** = 控制面不可用、chat 取不到配置 → 硬失败（单点，首期接受，见 Revisit）。
+
+## Rollout & operations
+
+**本地（优先，dev + 可作廉价 staging）**：`docker-compose up` 起 Postgres+pgvector · ClickHouse · OTel Collector · MinIO(可选，先本地卷) · backend · frontend。控制面迁移用 Drizzle；ClickHouse 表由导出器自动建 + 自有读 VIEW 初始化 SQL。
+
+**阿里云（Tier B，设计就绪、择期落地）**：本地自建组件 → 阿里云托管服务，仅改环境变量（Invariant 3）。
+
+```
+                    公网 443/TLS
+              ┌──────▼───────┐
+              │   ALB (WAF)  │  唯一公网入口
+              └──────┬───────┘
+      ┌──────────────┴──────── VPC 内网 ────────────────┐
+   ┌──▼───────────────┐  OTLP  ┌────────────────────┐   │
+   │ ECS/SAE          ├───────►│ OTel Collector(容器) │   │
+   │  NestJS(容器,ACR) │        └───┬──────────┬─────┘   │
+   └──┬────────┬──────┘        ┌────▼────┐ ┌───▼───────┐ │
+   ┌──▼──┐  ┌──▼──┐           │ApsaraDB │ │(可选)SLS/  │ │
+   │RDS  │  │ OSS │           │ClickHouse│ │ARMS(零改)  │ │
+   │PG+  │  │文档  │           └─────────┘ └───────────┘ │
+   │pgvec│  └─────┘   KMS 加密 API Key, RAM 角色免密访问   │
+   └─────┘   前端静态 → OSS 托管 + CDN                     │
+      └───────────────────────────────────────────────────┘
+```
+
+映射：Postgres+pgvector→RDS PG(开 pgvector) · ClickHouse→ApsaraDB ClickHouse · 本地卷→OSS · 环境变量密钥→KMS · 入口→ALB · 镜像→ACR · 前端→OSS+CDN。
+
+**发布/回滚**：ACR 推镜像 → 滚动更新；数据服务独立于发布；回滚=切回旧镜像 tag；DB 迁移前向兼容（先加列后用）。**"在工作"信号**：/health 全绿 + 测试问答 N 秒内出现在 Trace 列表 + 上传文档能走到 ready。
+
+## Security
+
+- 信任边界：浏览器↔后端（JWT + admin 接口鉴权）；后端↔LLM 厂商（出站，API Key=密钥）；后端↔存储（内网）。
+- 密钥：`api_key_enc` 应用层加密（阿里云用 KMS），返回前端掩码，永不回传明文（Invariant 4）。
+- **Trace 脱敏**：query/prompt/召回内容可能含 PII，导出前属性脱敏，Collector 层再加一道 redaction processor。
+- 阿里云：全服务 VPC 内网，仅 ALB 出公网；backend 用 RAM 角色免密访问 OSS/KMS。
+
+## Alternatives considered
+
+| 决策 | 选择 | 拒绝 | 放弃了什么 |
+|---|---|---|---|
+| 可观测 | OTel SDK→Collector→CH 导出器 | 应用直写 CH / 托管 APM(Langfuse) | 多一组件、读模型耦合导出器 schema（VIEW 防腐）—— 换标准可迁移 |
+| RAG 编排 | 自研薄编排 | LangChain.js / LlamaIndex.TS | 部分现成 loader —— 换干净可追踪 span + 全控 |
+| 数据存储 | Postgres+pgvector 单库 | Qdrant/Milvus / OpenSearch | 大规模 ANN/hybrid 极致性能 —— 换最小运维面 + 事务一致 + 可移植 SQL |
+| 异步入库 | pg-boss(跑在 PG) | BullMQ+Redis / 进程内 | Redis 生态 —— 换不加服务 + 持久 + 幂等 |
+| 前端 | React+Vite+TS+Ant Design | Vue / 保留低代码单文件 | —（自定义标签难维护） |
+| 流式 | SSE | WebSocket / 无 | 双向能力（用不上） |
+
+## Assumptions
+
+1. 前端 = React + Vite + TS + Ant Design（已确认）
+2. 规模 ≤10 qps 内部工具（已确认）；若转多租户 SaaS(×100) → 重估向量库 + HA
+3. 首个模型适配器 = OpenAI 兼容；dev 期可用 mock provider，真 key 由用户提供
+4. 评测 + 看板延到里程碑 2，schema 预留不堵死
+5. 对象存储先本地卷，后续换 MinIO/OSS
+6. span 保留 TTL 30 天（可配）
+7. 部署：本地 docker-compose 优先，阿里云 Tier B 择期落地
+
+## Revisit triggers
+
+- pgvector → 专用向量库：>5M 向量或 hybrid 召回质量不达标
+- 单机 → HA/多实例(SAE/ACK)：引入可用性 SLA
+- pg-boss → BullMQ/Kafka：入库 >100 doc/min
+- Collector 单点 → 网关集群：>50k span/s
+- 无 RBAC → 加：多团队
+- 固定切片 → 可配置：开放数据工程 scope
+- otel_traces schema 漂移 → VIEW 防腐层吸收；锁定 Collector 版本
+
+## References
+
+- 原型：`CodeCrushBot 单文件版.html`（15 屏 UI + mock 数据）
+- OpenTelemetry GenAI 语义约定（`gen_ai.*`）
+- OpenTelemetry Collector `clickhouseexporter`
+- 阿里云：RDS PostgreSQL(pgvector) / ApsaraDB for ClickHouse / OSS / KMS / ALB / ACR / SLS / ARMS
