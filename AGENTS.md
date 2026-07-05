@@ -28,22 +28,25 @@ pnpm lint         # ESLint + 依赖边界（必须 0）
 ## 结构
 
 ```
-apps/backend       NestJS 模块化单体：platform/{config,persistence,queue,storage,observability} + modules/<域>
-apps/frontend      React + Vite + antd
-packages/contracts Zod DTO + OTLP 属性常量（前后端共用，只依赖 zod）
-infra/             docker-compose（postgres+pgvector / clickhouse / otel-collector）
+apps/backend             NestJS 模块化单体：platform/{config,persistence,queue,storage,observability} + modules/<域>
+apps/frontend            React + Vite + antd
+packages/contracts       Zod API DTO（前后端唯一契约源，只依赖 zod）
+packages/otel-conventions OTLP/GenAI/rag 属性 key + span/observation 类型（前后端共用，零运行时依赖）
+packages/otel            仅后端：NodeSDK 接线、withSpan、trace.llm/retrieve/tool，发 OTLP
+infra/                   docker-compose（postgres+pgvector / clickhouse / otel-collector）+ clickhouse/views(读 VIEW SQL)
 ```
 
 ## 依赖边界（不可违反，ESLint 强制）
 
-1. **依赖方向朝下、无环**：`chat`(顶点) → … → `platform` → `contracts`(基座)。
-2. `apps/frontend` 只能 import `@codecrush/contracts`，**不得** import `apps/backend`。
+1. **依赖方向朝下、无环**：`chat`(顶点) → … → `platform` → `contracts` / `otel-conventions`(基座)。
+2. `apps/frontend` 只能 import `@codecrush/contracts` 与 `@codecrush/otel-conventions`（纯常量）；**不得** import `apps/backend` 或 `@codecrush/otel`（Node-only，进前端打包炸）。
 3. `packages/contracts` / `@codecrush/otel-conventions` 是地基，**只能依赖 `zod`**（或零依赖）；严禁 Node-only（`pg`/`fs`/`@opentelemetry/*`）或浏览器-only 依赖，否则前端打包会炸。
-4. 跨域模块只走对方 barrel 导出的 service/端口；**任何地方不得直接 import `adapters/`**（只能 DI）。
-5. `chat` 与 `traces` 无直接代码依赖：chat 写（OTLP）、traces 读（ClickHouse），经存储解耦。
-6. **埋点绝不进入问答关键路径**：可观测组件故障不得导致问答失败或增加用户可感延迟。
-7. 域内 `schema.ts` 是纯表定义，零 service 引用（防循环 import）。
-8. 迁移是显式命令（`pnpm db:migrate`），不在应用启动时静默执行。
+4. `@codecrush/otel` 仅后端运行时：只依赖 `@opentelemetry/*` 与 `@codecrush/otel-conventions`；**不得** import `@codecrush/contracts`、ClickHouse client 或 backend 模块（只返回中性 `SpanIdentity`，DTO 转换留在 `traces` 模块）。
+5. 跨域模块只走对方 barrel 导出的 service/端口；**任何地方不得直接 import `adapters/`**（只能 DI）。
+6. `chat` 与 `traces` 无直接代码依赖：chat 写（OTLP）、traces 读（ClickHouse），经存储解耦。
+7. **埋点绝不进入问答关键路径**：可观测组件故障不得导致问答失败或增加用户可感延迟。
+8. 域内 `schema.ts` 是纯表定义，零 service 引用（防循环 import）。
+9. 迁移是显式命令（`pnpm db:migrate`），不在应用启动时静默执行。
 
 ## 约定
 

@@ -17,7 +17,7 @@ last_modified: "2026-07-05"
 
 ## Summary
 
-定义整个仓库的代码组织:**pnpm + Turborepo 管理的 TS monorepo**，`apps/{backend,frontend}` + `packages/contracts`(Zod 单一契约源) + `infra/`。后端 **NestJS 模块化单体**，按 001 的域切模块 + 端口/适配器(DI 注入);**模块依赖规则用 ESLint 焊死**(不是口头约定);Drizzle 只管 Postgres DDL，ClickHouse DDL 归 Collector + 手写 VIEW;dev 用"infra 进 compose、应用跑主机热更"。
+定义整个仓库的代码组织:**pnpm + Turborepo 管理的 TS monorepo**，`apps/{backend,frontend}` + `packages/contracts`(Zod 单一契约源) + `packages/otel-conventions` / `packages/otel`(通用 trace 语义与 Node 发射层) + `infra/`。后端 **NestJS 模块化单体**，按 001 的域切模块 + 端口/适配器(DI 注入);**模块依赖规则用 ESLint 焊死**(不是口头约定);Drizzle 只管 Postgres DDL，ClickHouse DDL 归 Collector + 手写 VIEW;dev 用"infra 进 compose、应用跑主机热更"。
 
 ## Boundaries
 
@@ -70,7 +70,7 @@ rag-service/
 │  │  │  │  ├─ persistence/         # Drizzle client + 迁移入口
 │  │  │  │  ├─ queue/               # pg-boss 封装
 │  │  │  │  ├─ storage/             # BlobStore 端口 + LocalFs 适配器
-│  │  │  │  └─ observability/       # span 工厂 + gen_ai/rag 属性助手
+│  │  │  │  └─ observability/       # Nest provider wrapper, 调用 @codecrush/otel
 │  │  │  └─ modules/                # 业务域(001 划分)
 │  │  │     ├─ auth/ models/ knowledge-bases/ documents/
 │  │  │     ├─ ingestion/ chunks/ retrieval/ agents/
@@ -84,12 +84,14 @@ rag-service/
 │     └─ src/ app/(shell/路由) pages/(逐屏 mirror mock) components/
 │              api/(契约类型化 client + SSE) theme/(antd token 对齐 #1677ff)
 ├─ packages/
-│  ├─ contracts/                    # Zod schema = 前后端唯一契约源 + OTLP 属性常量
+│  ├─ contracts/                    # Zod schema = 前后端唯一 API 契约源
+│  ├─ otel-conventions/             # 前后端共享：OTel/GenAI/rag 属性 key、operation、span 类型
+│  ├─ otel/                         # 仅后端：NodeSDK 接线、withSpan、trace.llm/retrieve/tool
 │  └─ tsconfig/ eslint-config/      # 共享预设
 ├─ infra/
 │  ├─ docker-compose.yml            # profiles: infra(默认) / full
 │  ├─ postgres/init.sql             # create extension vector
-│  ├─ clickhouse/init/              # 读 VIEW(防腐层)
+│  ├─ clickhouse/views/             # 读 VIEW SQL(防腐层，M0.5 后置/lazy 执行)
 │  └─ collector/config.yaml         # otlp receiver → clickhouseexporter
 ├─ docs/  pnpm-workspace.yaml  turbo.json  .env.example
 ```
@@ -113,7 +115,7 @@ rag-service/
                   │
 ⑤ 基座        platform: config · persistence · queue · storage · observability
                   │
-⑥ 契约        contracts: Zod DTO + OTLP 属性常量(前后端共用)
+⑥ 契约        contracts: Zod DTO；otel-conventions: trace 语义常量(前后端共用)
 ```
 
 精确依赖边:
@@ -137,15 +139,32 @@ rag-service/
 
 ### 契约
 
-REST DTO 全部是 `packages/contracts` 的 Zod schema。后端控制器用 `ZodValidationPipe`(nestjs-zod),前端 `z.infer` 拿类型,OpenAPI 由 `zod-to-openapi` 生成。**一份 schema 同时喂"校验 + 类型 + 文档"**。OTLP 属性名(`gen_ai.*`/`rag.*`)也做成 contracts 常量,前后端共用防拼错。
+REST DTO 全部是 `packages/contracts` 的 Zod schema。后端控制器用 `ZodValidationPipe`(nestjs-zod),前端 `z.infer` 拿类型,OpenAPI 由 `zod-to-openapi` 生成。**一份 schema 同时喂"校验 + 类型 + 文档"**。OTLP 属性名(`gen_ai.*`/`rag.*`)放在 `packages/otel-conventions`，前端 Trace UI、后端埋点与 ClickHouse VIEW 共享同一词典防拼错。
 
 ### 持久化
 
-表定义**按域 co-locate**(`modules/<m>/schema.ts`,纯表定义),中央 `db/schema.ts` barrel re-export 给 drizzle-kit;迁移在 `apps/backend/drizzle/`。pgvector 用 drizzle `vector({dimensions:1024})` + HNSW 索引。**ClickHouse 不进 Drizzle**:表由 Collector 导出器建,VIEW 由 `infra/clickhouse/init` 手写。
+表定义**按域 co-locate**(`modules/<m>/schema.ts`,纯表定义),中央 `db/schema.ts` barrel re-export 给 drizzle-kit;迁移在 `apps/backend/drizzle/`。pgvector 用 drizzle `vector({dimensions:1024})` + HNSW 索引。**ClickHouse 不进 Drizzle**:表由 Collector 导出器建,VIEW SQL 由 `infra/clickhouse/views` 手写；因 exporter 表可能晚于 ClickHouse 容器启动创建，VIEW 由 M0.5 的显式初始化/懒加载步骤执行。
 
 ### config / 可观测接线
 
 `@nestjs/config` + Zod 在启动时校验 env(缺失 fail-fast)。密钥不进 env(按 001 加密存库,env 只放主加密密钥 + 连接串)。OTel NodeSDK 在 `tracing.ts`,通过 `node -r ./dist/tracing.js dist/main.js` **在 Nest bootstrap 前预加载**(否则自动埋点静默失效,见 Red-team)。**SDK 与共享约定的包化（`@codecrush/otel` + `@codecrush/otel-conventions`）见 §「通用 Telemetry SDK 与包边界」——该节修订了"可观测留后端模块"这一早期判断。**
+
+### Trace 包与物理层边界
+
+Trace 相关能力分两层，不合成一个大包：
+
+```
+通用语义/发射层:
+  packages/otel-conventions  # 属性 key、operation、span/observation 类型
+  packages/otel              # NodeSDK 初始化、withSpan、trace.llm/retrieve/tool，发 OTLP
+
+物理存储/读模型层:
+  infra/collector/config.yaml       # OTLP receiver -> ClickHouse exporter
+  infra/clickhouse/views/*.sql      # otel_traces 上的 VIEW SQL
+  apps/backend/src/modules/traces   # ClickHouse 只读查询 + Session/Trace/Observation API
+```
+
+**边界规则**：`@codecrush/otel` 只知道 OTel/OTLP，不 import ClickHouse client、不知道 `otel_traces` 表名、不拼前端 Trace API DTO；`traces` 模块可以依赖 `otel-conventions` 解释属性，但不依赖 `chat`。如果后续需要 trace-normalizer worker，再单独抽 `packages/trace-normalizer` 或独立 worker 进程，复用 `otel-conventions`，不要把它塞回 SDK。
 
 ### docker-compose
 
@@ -248,12 +267,12 @@ SDK **不以 RAG 阶段名（改写/意图/召回…）为基元**，而以 Open
 ### 落地时点
 
 - **M0.5 即建通用版**：原语覆盖 `llm/embeddings/tool/agent/retrieval/custom`（tool/agent 封装廉价，RAG 为首个消费方），将来上 agent 不重写。
-- **M0 不受影响**：M0 仅建 `contracts`，其 `otel.ts` 先放 `GEN_AI`/`RAG` 常量；M0.5 扩为完整通用词典并切出 `@codecrush/otel-conventions` + `@codecrush/otel`。
+- **M0 建包壳，M0.5 接线**：M0 可先建 `packages/otel-conventions` / `packages/otel` 的 package 边界与导出骨架；M0.5 再填完整词典、NodeSDK 初始化、OTLP exporter 与 `trace.*` 原语。`contracts` 不承载 OTLP 属性常量，只保留 API DTO。
 
 ### Revisit
 
-- conventions 可先内置于 `contracts`，被第三方复用或出现 Node-only 纯消费方时切出独立包。
 - 出现第二个 Node 部署物（如 ingestion worker 拆进程）→ `@codecrush/otel` 包价值进一步凸显。
+- VIEW 投影演进为 worker 后，抽 `packages/trace-normalizer` 复用 raw span → Observation/Trace 的转换，但仍不并入 `@codecrush/otel`。
 
 ## References
 

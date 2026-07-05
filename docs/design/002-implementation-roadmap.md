@@ -6,7 +6,7 @@ number: "002"
 status: draft
 services: [backend, frontend, observability, deploy]
 related: ["design/001"]
-last_modified: "2026-07-04"
+last_modified: "2026-07-05"
 ---
 
 # 002 — RAG 平台实现路线图（模块级）
@@ -70,7 +70,7 @@ M0 工程地基 ─┬─► M0.5 可观测最小闭环 ────────
 | # | 模块 | 大块内容 | 依赖 | 验收（可证伪） |
 |---|---|---|---|---|
 | **M0** | 代码架构 / 工程地基 | monorepo(NestJS 后端 + React 前端)；env/config 管理；端口抽象(`ModelProviderPort`/`RetrieverPort`/`BlobStore`)；docker-compose(Postgres+pgvector、ClickHouse、OTel Collector)；Drizzle 迁移；lint/日志 | — | `docker-compose up` 全绿；`/health` 200；迁移能跑 |
-| **M0.5** | 可观测最小闭环 | NestJS 接 OTel SDK；Collector 配 `clickhouseexporter`；自有读 VIEW；traces 读模块骨架 + 一条 hello span 端到端 | M0 | 手动打一条 span → Collector → ClickHouse → traces API 读出。最没底链路先验掉 |
+| **M0.5** | 可观测最小闭环 | NestJS 接 OTel SDK；Collector 配 `clickhouseexporter`；ClickHouse raw `otel_traces`；自有读 VIEW；traces 读模块骨架 + 一条 hello span 端到端。**首期不做 trace worker / 独立 observations 宽表** | M0 | 手动打一条 span → Collector → ClickHouse → traces API 读出。最没底链路先验掉 |
 
 ### 波次 B — 用户 & 骨架
 
