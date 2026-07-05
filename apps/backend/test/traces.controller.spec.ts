@@ -1,3 +1,4 @@
+import { BadRequestException } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import type { HelloTraceResponse, TraceDetailResponse } from "@codecrush/contracts";
 import { TracesController } from "../src/modules/traces/traces.controller";
@@ -41,5 +42,15 @@ describe("TracesController", () => {
     };
     const ctrl = await build({ getTrace: async () => detail } as Partial<TracesService>);
     await expect(ctrl.getTrace("391dae938234560b16bb63f51501cb6f")).resolves.toEqual(detail);
+  });
+
+  it("rejects malformed trace ids with 400 before hitting the service", async () => {
+    const getTrace = jest.fn();
+    const ctrl = await build({ getTrace } as Partial<TracesService>);
+    await expect(ctrl.getTrace("not-a-hex-id")).rejects.toBeInstanceOf(BadRequestException);
+    await expect(ctrl.getTrace("391dae938234560b16bb63f51501cb6f".slice(0, 31))).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(getTrace).not.toHaveBeenCalled();
   });
 });

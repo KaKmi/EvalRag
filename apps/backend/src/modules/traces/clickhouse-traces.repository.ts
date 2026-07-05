@@ -52,29 +52,37 @@ type ClickHouseTraceRow = {
 
 @Injectable()
 export class ClickHouseTracesRepository {
+  /** VIEW 已确认建好后置位，读路径不再重复 readFile + DDL（review P3-3） */
+  private viewsReady = false;
+
   constructor(@Inject(CLICKHOUSE) private readonly clickhouse: CodeCrushClickHouseClient) {}
 
-  async ensureTraceViews(): Promise<void> {
-    await this.waitForExporterTable();
-    const viewSql = await readFile(resolveTraceViewSqlPath(), "utf8");
-    await this.clickhouse.command({ query: viewSql });
+  private async exporterTableExists(): Promise<boolean> {
+    const result = await this.clickhouse.query({
+      query: "EXISTS TABLE otel_traces",
+      format: "JSONEachRow",
+    });
+    const rows = await result.json<{ result: 0 | 1 }>();
+    return rows[0]?.result === 1;
   }
 
-  private async waitForExporterTable(): Promise<void> {
-    for (let attempt = 1; attempt <= 20; attempt += 1) {
-      const result = await this.clickhouse.query({
-        query: "EXISTS TABLE otel_traces",
-        format: "JSONEachRow",
-      });
-      const rows = await result.json<{ result: 0 | 1 }>();
-      if (rows[0]?.result === 1) return;
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-    throw new Error("ClickHouse exporter table otel_traces was not created in time");
+  /**
+   * 确保防腐 VIEW 存在。返回 false = exporter 还没建 otel_traces（冷库），
+   * 调用方应返回空结果而不是等待/报错（review P3-3：原实现轮询 10s 后 500）。
+   */
+  async ensureTraceViews(): Promise<boolean> {
+    if (this.viewsReady) return true;
+    if (!(await this.exporterTableExists())) return false;
+    const viewSql = await readFile(resolveTraceViewSqlPath(), "utf8");
+    await this.clickhouse.command({ query: viewSql });
+    this.viewsReady = true;
+    return true;
   }
 
   async findByTraceId(traceId: string): Promise<TraceDetailResponse> {
-    await this.ensureTraceViews();
+    if (!(await this.ensureTraceViews())) {
+      return { traceId, spans: [] };
+    }
     const result = await this.clickhouse.query({
       query: `
         SELECT *
