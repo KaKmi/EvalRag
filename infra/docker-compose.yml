@@ -19,22 +19,27 @@ services:
     profiles: ["infra", "full"]
 
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:25.6
     ports:
       - "8123:8123"
       - "9000:9000"
     volumes:
       - chdata:/var/lib/clickhouse
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - ./clickhouse/users.d/codecrush-default-network.xml:/etc/clickhouse-server/users.d/codecrush-default-network.xml:ro
     ulimits:
       nofile:
         soft: 262144
         hard: 262144
-    # M0 不加 healthcheck（镜像未必自带 wget）；M0.5 接线时再补。M0 只要求 postgres healthy。
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     profiles: ["infra", "full"]
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.130.1
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
@@ -43,7 +48,7 @@ services:
       - "4318:4318"
     depends_on:
       clickhouse:
-        condition: service_started
+        condition: service_healthy
     profiles: ["infra", "full"]
 
 volumes:

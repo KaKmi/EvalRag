@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "db:generate": "pnpm --filter @codecrush/backend db:generate",
-    "db:migrate": "pnpm --filter @codecrush/backend db:migrate"
+    "db:migrate": "pnpm --filter @codecrush/backend db:migrate",
+    "observability:verify": "pnpm --filter @codecrush/backend observability:verify"
   },
   "devDependencies": {
     "eslint": "^10.6.0",

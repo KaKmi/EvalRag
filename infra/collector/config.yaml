@@ -5,14 +5,32 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-processors:
-  batch: {}
+
 exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    database: default
+    async_insert: true
+    ttl: 720h
+    compress: lz4
+    create_schema: true
+    traces_table_name: otel_traces
+    timeout: 5s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 1000
   debug:
     verbosity: normal
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 256
+
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [clickhouse, debug]

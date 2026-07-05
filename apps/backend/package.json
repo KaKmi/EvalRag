@@ -9,7 +9,8 @@
     "dev": "nest start --watch",
     "test": "jest",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "observability:verify": "node scripts/verify-observability.mjs"
   },
   "dependencies": {
     "@clickhouse/client": "^1.12.1",
