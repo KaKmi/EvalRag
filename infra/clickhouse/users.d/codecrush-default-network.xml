@@ -4,9 +4,9 @@
   (users.d/default-user.xml: networks = ::1 / 127.0.0.1)，导致 Collector 与后端经
   Docker/主机网络连接时报 REQUIRED_PASSWORD / AUTHENTICATION_FAILED。
 
-  这里把 ::/0 追加进 default 的 networks（合并而非替换），放开本地 infra 网络访问，
-  保持 M0 本地开发「default / 空密码」的简单姿态。生产/云上按 001 不变量走加密凭据 +
-  连接串，不使用本 dev 覆盖。
+  这里把 default 的 networks 覆盖为 ::/0（users.d 同名元素是替换语义，实测 system.users
+  只剩 ::/0），放开 Docker 内网/本机访问。配套约束：compose 将 8123/9000 只绑 127.0.0.1，
+  避免无密码 default 暴露到局域网。生产/云上按 001 不变量走加密凭据 + 连接串，不用本覆盖。
 -->
 <clickhouse>
   <users>

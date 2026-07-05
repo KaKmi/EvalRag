@@ -21,8 +21,10 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:25.6
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      # 只绑本机：users.d 放开了 default 用户网络限制，若发布到 0.0.0.0 会把无密码
+      # default 暴露到整个局域网（peer review Story 4 发现）。Collector 走 Docker 内网不受影响。
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     volumes:
       - chdata:/var/lib/clickhouse
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
