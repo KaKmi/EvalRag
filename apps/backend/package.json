@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "nest build",
-    "start": "nest start",
+    "start": "node -r ./dist/tracing.js dist/main.js",
+    "start:nest": "nest start",
     "dev": "nest start --watch",
     "test": "jest",
     "db:generate": "drizzle-kit generate",
@@ -12,6 +13,8 @@
   },
   "dependencies": {
     "@codecrush/contracts": "workspace:^",
+    "@codecrush/otel": "workspace:^",
+    "@codecrush/otel-conventions": "workspace:^",
     "@nestjs/common": "^11.1.27",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.1.27",
@@ -26,6 +29,8 @@
     "@nestjs/cli": "^11.0.23",
     "@nestjs/schematics": "^11.1.0",
     "@nestjs/testing": "^11.1.27",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-base": "^1.30.1",
     "@swc/core": "^1.15.43",
     "@swc/jest": "^0.2.39",
     "@types/jest": "^30.0.0",

@@ -5,6 +5,8 @@ module.exports = {
   testMatch: ["**/*.spec.ts"],
   moduleNameMapper: {
     "^@codecrush/contracts$": "<rootDir>/../../packages/contracts/src/index.ts",
+    "^@codecrush/otel$": "<rootDir>/../../packages/otel/src/index.ts",
+    "^@codecrush/otel-conventions$": "<rootDir>/../../packages/otel-conventions/src/index.ts",
   },
   transform: {
     "^.+\\.ts$": [
