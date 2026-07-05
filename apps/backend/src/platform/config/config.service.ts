@@ -15,4 +15,19 @@ export class AppConfigService {
   get databaseUrl(): string {
     return this.config.get("DATABASE_URL", { infer: true });
   }
+  get clickHouseUrl(): string {
+    return this.config.get("CLICKHOUSE_URL", { infer: true });
+  }
+  get clickHouseDatabase(): string {
+    return this.config.get("CLICKHOUSE_DATABASE", { infer: true });
+  }
+  get clickHouseUsername(): string {
+    return this.config.get("CLICKHOUSE_USERNAME", { infer: true });
+  }
+  get clickHousePassword(): string {
+    return this.config.get("CLICKHOUSE_PASSWORD", { infer: true });
+  }
+  get otelExporterOtlpEndpoint(): string | undefined {
+    return this.config.get("OTEL_EXPORTER_OTLP_ENDPOINT", { infer: true });
+  }
 }

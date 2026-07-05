@@ -12,6 +12,7 @@
     "db:migrate": "tsx src/db/migrate.ts"
   },
   "dependencies": {
+    "@clickhouse/client": "^1.12.1",
     "@codecrush/contracts": "workspace:^",
     "@codecrush/otel": "workspace:^",
     "@codecrush/otel-conventions": "workspace:^",
