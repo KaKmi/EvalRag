@@ -174,7 +174,7 @@ Story 5 Review follow-up — complete
   Open Questions（M9 收口，非阻塞）：TraceDetailPage 瀑布图分母用 max(durationMs) 而非 maxEnd-rootStart；buildDepth 无环保护；spans[0] 假定为最早。M9 接真实读模型前修。
 
 Story 6: "前端 API client + SSE 骨架" — complete (no individual review — non-security; covered by final review)
-  Commits: <TBD>
+  Commits: 69bc1c7
   Files (NEW):
     - apps/frontend/src/api/sse.ts (openChatStream: fetch + ReadableStream async generator，按 \n\n 切帧，仅解析 data: 行；非 EventSource 因需带 Authorization)
     - apps/frontend/src/api/sse.test.ts (7 tests: 跨 chunk 拼接 / token 序列 / Authorization 头 / 无 token / 非 2xx 抛错 / 跳过注释与 event 字段 / AbortSignal 透传 / 非法 payload Zod 拒绝)
