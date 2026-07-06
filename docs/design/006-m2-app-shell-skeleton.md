@@ -27,7 +27,7 @@ M2 把原型 `CodeCrushBot 单文件版.html`（15 屏，低代码 `DCLogic` 单
 
 * 前端 15 屏骨架（1:1 还原原型布局/导航/空态/mock 数据）
 
-  * 登录页（接 M1 `/auth/login`）
+  * 登录页（接 M1 `/api/auth/login`）
 
   * C 端问答页（三栏布局壳：会话列表 + 聊天 + 引用原文）
 
@@ -157,7 +157,7 @@ apps/frontend/src/
     ChatLayout.tsx           # C 端问答 shell：三栏（会话列表 + 聊天 + 引用面板）
     AuthGuard.tsx            # 登录守卫：无 token → 重定向 /login
   pages/
-    login/LoginPage.tsx      # 登录页（接 M1 /auth/login）
+    login/LoginPage.tsx      # 登录页（接 M1 /api/auth/login）
     chat/ChatPage.tsx        # C 端问答页
     admin/
       StartPage.tsx                   # 快速开始（6 步引导）
