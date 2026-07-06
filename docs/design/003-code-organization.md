@@ -72,7 +72,7 @@ rag-service/
 │  │  │  │  ├─ storage/             # BlobStore 端口 + LocalFs 适配器
 │  │  │  │  └─ observability/       # Nest provider wrapper, 调用 @codecrush/otel
 │  │  │  └─ modules/                # 业务域(001 划分)
-│  │  │     ├─ auth/ models/ knowledge-bases/ documents/
+│  │  │     ├─ auth/ users/ models/ knowledge-bases/ documents/
 │  │  │     ├─ ingestion/ chunks/ retrieval/ agents/
 │  │  │     └─ prompts/ chat/ traces/ conversations/
 │  │  │        每个: <m>.module.ts / .controller.ts / .service.ts
@@ -127,7 +127,8 @@ rag-service/
 - `documents` → `knowledge-bases`、`storage`、`queue`
 - `knowledge-bases` → `models`
 - `models` / `prompts` / `chunks` → 无域依赖(叶子),仅 `persistence`
-- `auth` → `persistence`、`config`(横切:全局 guard,别的模块不 import 它)
+- `auth` → `users`、`config`(横切:全局 guard,别的模块不 import 它;@Public()/principal 类型在 platform/security)
+- `users` → `persistence`(叶子;user 实体归属地,供 auth 校验凭据、未来 conversations.user_id 外键引用)
 - `traces` → `chunks`(读正文) + ClickHouse 读客户端;**与 `chat` 零代码依赖**
 - 所有域模块 → `platform` → `contracts`
 
