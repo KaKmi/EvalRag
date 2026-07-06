@@ -13,7 +13,7 @@ Story 1: "003 文档更新 + contracts 用户 DTO（M1a）" — complete
   Concerns: none
 
 Story 2: "users 数据层 + 迁移 + seed（M1a）" — complete
-  Commits: faf1892921600e8fecb66b941cb214948ea26175
+  Commits: 5f6c792fb48e1634b1e4f79378cc71f8306dbd3b
   Files:
     apps/backend/.env.example
     apps/backend/drizzle/0001_spooky_ultimatum.sql
@@ -40,3 +40,37 @@ Story 2: "users 数据层 + 迁移 + seed（M1a）" — complete
     UsersService.changeOwnPassword(userId: string, currentPassword: string, newPassword: string): Promise<void>
     UsersModule exports UsersService; command pnpm db:seed
   Concerns: pnpm v11 returned ERR_PNPM_IGNORED_BUILDS after installing native/dev tool packages, but backend can require argon2 and backend Jest/build/ESLint passed.
+
+Story 3: "登录 + 全局 guard + 用户端点（M1b）" — complete
+  Commits: pending
+  Files:
+    apps/backend/.env.example
+    apps/backend/package.json
+    apps/backend/src/app.module.ts
+    apps/backend/src/modules/auth/auth.controller.ts
+    apps/backend/src/modules/auth/auth.module.ts
+    apps/backend/src/modules/auth/auth.service.ts
+    apps/backend/src/modules/auth/jwt-auth.guard.ts
+    apps/backend/src/modules/health/health.controller.ts
+    apps/backend/src/modules/users/users.controller.ts
+    apps/backend/src/modules/users/users.module.ts
+    apps/backend/src/platform/config/config.schema.ts
+    apps/backend/src/platform/config/config.service.ts
+    apps/backend/src/platform/security/authenticated-user.ts
+    apps/backend/src/platform/security/public.decorator.ts
+    apps/backend/test/auth.service.spec.ts
+    apps/backend/test/config.schema.spec.ts
+    apps/backend/test/jwt-auth.guard.spec.ts
+    packages/contracts/src/auth.test.ts
+    packages/contracts/src/auth.ts
+    packages/contracts/src/index.ts
+    pnpm-lock.yaml
+  Produces:
+    POST /auth/login
+    GET /users/me
+    PATCH /users/me/password
+    global JwtAuthGuard
+    Public() decorator and AuthenticatedUser type
+    env JWT_SECRET/JWT_EXPIRES_IN
+    expiresInSeconds(expr: string): number
+  Concerns: none

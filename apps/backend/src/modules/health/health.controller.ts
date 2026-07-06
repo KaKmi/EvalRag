@@ -3,7 +3,9 @@ import { sql } from "drizzle-orm";
 import type { HealthResponse } from "@codecrush/contracts";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
+import { Public } from "../../platform/security/public.decorator";
 
+@Public()
 @Controller("health")
 export class HealthController {
   constructor(@Inject(DRIZZLE) private readonly db: DB) {}
