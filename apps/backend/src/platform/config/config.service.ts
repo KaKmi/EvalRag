@@ -30,4 +30,10 @@ export class AppConfigService {
   get otelExporterOtlpEndpoint(): string | undefined {
     return this.config.get("OTEL_EXPORTER_OTLP_ENDPOINT", { infer: true });
   }
+  get jwtSecret(): string {
+    return this.config.get("JWT_SECRET", { infer: true });
+  }
+  get jwtExpiresIn(): string {
+    return this.config.get("JWT_EXPIRES_IN", { infer: true });
+  }
 }

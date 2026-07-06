@@ -9,5 +9,7 @@ export const envSchema = z.object({
   CLICKHOUSE_USERNAME: z.string().default("default"),
   CLICKHOUSE_PASSWORD: z.string().default(""),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  JWT_SECRET: z.string().min(32),
+  JWT_EXPIRES_IN: z.string().default("12h"),
 });
 export type Env = z.infer<typeof envSchema>;
