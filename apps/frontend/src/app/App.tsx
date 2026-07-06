@@ -30,7 +30,7 @@ const Fallback = (
 /**
  * 路由根：14 条 admin 路由（覆盖 15 屏）+ /login + /chat + 通配重定向。
  * 路由表对齐 docs/design/006-m2-app-shell-skeleton.md。
- * admin 子路由与 /chat 均懒加载；/chat 由 ChatPage 渲染三栏 ChatLayout。
+ * admin 子路由与 /chat 均懒加载；/chat 由 ChatPage 内联三栏（Agent/会话 + 消息流 + 引用原文）。
  */
 export function App() {
   return (

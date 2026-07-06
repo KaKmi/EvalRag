@@ -36,8 +36,9 @@ it("renders admin sider with brand and 7 nav items when authenticated", async ()
       <App />
     </MemoryRouter>,
   );
-  // findByText 走 waitFor，在 act 内刷新 antd Menu/Layout 挂载后的异步状态 + 懒加载
-  expect(await screen.findByText("CodeCrushBot")).toBeInTheDocument();
+  // findByText 走 waitFor，在 act 内刷新 antd Layout 挂载后的异步状态 + 懒加载
+  // 品牌区文案为「控制台」（对齐原型），breadcrumb「CodeCrushBot 控制台」非精确匹配不会冲突
+  expect(await screen.findByText("控制台")).toBeInTheDocument();
   for (const label of NAV_LABELS) {
     expect(screen.getByText(label)).toBeInTheDocument();
   }
@@ -51,7 +52,7 @@ it("renders traces list on /admin/traces when authenticated", async () => {
     </MemoryRouter>,
   );
   // 用 traces mock 独有查询文案断言列表非空，规避菜单「Trace 追踪」与卡片标题重复匹配
-  expect(await screen.findByText("这款产品支持防水吗")).toBeInTheDocument();
+  expect(await screen.findByText("帮我把课退了")).toBeInTheDocument();
 });
 
 it("renders agents list on /admin/agents when authenticated", async () => {
@@ -61,7 +62,7 @@ it("renders agents list on /admin/agents when authenticated", async () => {
       <App />
     </MemoryRouter>,
   );
-  expect(await screen.findByText("售后客服 Agent")).toBeInTheDocument();
+  expect(await screen.findByText("售后支持")).toBeInTheDocument();
 });
 
 it("renders chat three-column layout on /chat when authenticated", async () => {
@@ -71,9 +72,10 @@ it("renders chat three-column layout on /chat when authenticated", async () => {
       <App />
     </MemoryRouter>,
   );
-  expect(await screen.findByText("会话列表")).toBeInTheDocument();
-  expect(screen.getByText("聊天")).toBeInTheDocument();
-  expect(screen.getByText("引用")).toBeInTheDocument();
+  // 三栏可识别：左品牌「CodeCrushBot」+ 左副标题「知识库 Agent」+ 右栏头「引用原文」
+  expect(await screen.findByText("CodeCrushBot")).toBeInTheDocument();
+  expect(screen.getByText("知识库 Agent")).toBeInTheDocument();
+  expect(screen.getByText("引用原文")).toBeInTheDocument();
 });
 
 it("protects /chat behind AuthGuard", async () => {
@@ -116,7 +118,7 @@ it("stores token and navigates to /admin on successful login", async () => {
   const form = document.querySelector("form")!;
   fireEvent.submit(form);
   await waitFor(() => expect(localStorage.getItem("token")).toBe("tok-123"));
-  // 断言导航落点：nav("/admin") 后 AdminLayout 渲染，Sider 品牌字「CodeCrushBot」出现。
+  // 断言导航落点：nav("/admin") 后 AdminLayout 渲染，Sider 品牌字「控制台」出现。
   // 否则即便 nav 被删/写错，token 断言仍通过——回归不被捕获（AC 2 重定向部分）。
-  expect(await screen.findByText("CodeCrushBot")).toBeInTheDocument();
+  expect(await screen.findByText("控制台")).toBeInTheDocument();
 });

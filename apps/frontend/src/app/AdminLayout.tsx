@@ -1,4 +1,4 @@
-import { Button, Layout, Menu } from "antd";
+import { Avatar, Button, Layout } from "antd";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 const { Header, Sider, Content } = Layout;
@@ -24,15 +24,37 @@ const PREFIX_KEYS = [
   "/admin/traces",
 ];
 
+const PAGE_TITLES: Record<string, string> = {
+  "/admin": "快速开始",
+  "/admin/dashboard": "运行看板",
+  "/admin/models": "模型接入",
+  "/admin/knowledge-bases": "知识库",
+  "/admin/prompts": "Prompt 管理",
+  "/admin/agents": "Agent 管理",
+  "/admin/retrieval-test": "检索测试",
+  "/admin/traces": "Trace 追踪",
+  "/admin/evalsets": "评测集",
+  "/admin/evaluations": "评测管理",
+};
+
 function getSelectedKey(pathname: string): string {
   if (pathname === "/admin") return "/admin";
   return PREFIX_KEYS.find((k) => pathname === k || pathname.startsWith(`${k}/`)) ?? "";
+}
+
+function getPageTitle(pathname: string): string {
+  if (PAGE_TITLES[pathname]) return PAGE_TITLES[pathname];
+  for (const k of PREFIX_KEYS) {
+    if (pathname.startsWith(`${k}/`)) return PAGE_TITLES[k] ?? "";
+  }
+  return "";
 }
 
 export function AdminLayout() {
   const loc = useLocation();
   const navigate = useNavigate();
   const selectedKey = getSelectedKey(loc.pathname);
+  const pageTitle = getPageTitle(loc.pathname);
 
   const handleLogout = () => {
     localStorage.removeItem("token");
@@ -41,42 +63,89 @@ export function AdminLayout() {
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
-      <Sider theme="dark" width={220} style={{ overflow: "auto" }}>
-        <div
-          style={{
-            padding: 16,
-            color: "#fff",
-            fontWeight: 600,
-            fontSize: 18,
-            whiteSpace: "nowrap",
-          }}
-        >
-          CodeCrushBot
+      <Sider theme="dark" width={208} style={{ background: "#001529" }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: 16, height: 56 }}>
+            <div
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                background: "#1677ff",
+                color: "#fff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontWeight: 700,
+                fontSize: 11,
+              }}
+            >
+              CC
+            </div>
+            <div style={{ color: "#fff", fontSize: 15, fontWeight: 600 }}>控制台</div>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+            {NAV_ITEMS.map((item) => {
+              const on = selectedKey === item.key;
+              return (
+                <Link key={item.key} to={item.key} style={{ textDecoration: "none" }}>
+                  <div
+                    style={{
+                      padding: "9px 16px",
+                      borderRadius: 6,
+                      fontSize: 14,
+                      color: on ? "#fff" : "rgba(255,255,255,.65)",
+                      background: on ? "#1677ff" : "transparent",
+                    }}
+                  >
+                    {item.label}
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+          <Link
+            to="/chat"
+            style={{
+              margin: 8,
+              padding: "9px 16px",
+              borderRadius: 6,
+              fontSize: 13,
+              color: "rgba(255,255,255,.65)",
+              border: "1px solid rgba(255,255,255,.2)",
+              textAlign: "center",
+              textDecoration: "none",
+              display: "block",
+            }}
+          >
+            ← 返回问答页
+          </Link>
         </div>
-        <Menu
-          theme="dark"
-          mode="inline"
-          selectedKeys={selectedKey ? [selectedKey] : []}
-          items={NAV_ITEMS.map((item) => ({
-            key: item.key,
-            label: <Link to={item.key}>{item.label}</Link>,
-          }))}
-        />
       </Sider>
       <Layout>
         <Header
           style={{
+            height: 56,
             background: "#fff",
-            padding: "0 16px",
+            borderBottom: "1px solid #f0f0f0",
             display: "flex",
-            justifyContent: "space-between",
             alignItems: "center",
+            padding: "0 24px",
+            gap: 8,
           }}
         >
-          <span style={{ fontWeight: 600 }}>管理后台</span>
-          <Button onClick={handleLogout}>退出</Button>
+          <div style={{ fontSize: 13, color: "rgba(0,0,0,.45)" }}>CodeCrushBot 控制台</div>
+          <div style={{ fontSize: 13, color: "rgba(0,0,0,.25)" }}>/</div>
+          <div style={{ fontSize: 13, fontWeight: 500 }}>{pageTitle}</div>
+          <div style={{ flex: 1 }} />
+          <Avatar size={28} style={{ background: "#87d068", fontSize: 12 }}>
+            刘
+          </Avatar>
+          <Button type="text" size="small" onClick={handleLogout} style={{ color: "rgba(0,0,0,.45)" }}>
+            退出
+          </Button>
         </Header>
-        <Content style={{ margin: 16 }}>
+        <Content style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
           <Outlet />
         </Content>
       </Layout>
