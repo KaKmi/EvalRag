@@ -99,18 +99,18 @@ state = {
 | -- | --------- | ---------------- | ------------------------------------------ |
 | 1  | 登录        | (loggedIn=false) | 邮箱+密码+演示账号                                 |
 | 2  | C 端问答     | section='chat'   | 三栏：会话列表+聊天+引用原文，可信度/兜底/转人工                 |
-| 3  | 控制台       | 'start'          | 快速开始 6 步引导 + 运行看板（今日问答量/平均耗时/兜底率/热门问题）     |
-| 4  | Agent 管理  | 'agent'          | 列表(名称/简介/状态/更新时间) + 编辑抽屉(模型设置/绑定KB/Prompt) |
-| 5  | 知识库管理     | 'kb'             | 知识库列表                                      |
-| 6  | 知识库文档     | 'kbdoc'          | 文档列表+上传，入库流程(解析→切片→向量化→索引)                 |
-| 7  | 文档切片      | 'chunk'          | 切片查看+启用/禁用                                 |
-| 8  | 检索测试      | 'retrieval'      | 测试台(查询/阈值/多路召回/重排/结果)                      |
-| 9  | Prompt 管理 | 'prompt'         | 列表+版本管理+diff+发布/回滚                         |
-| 10 | 评测集       | 'evalset'        | **占位**（原型文字："评测集与评测管理已在规划中"）               |
-| 11 | 评测管理      | 'evaladmin'      | **占位**                                     |
-| 12 | 评测报告      | 'evalreport'     | **占位**                                     |
-| 13 | Trace 追踪  | 'trace'          | 列表(采样/失败率/P95/筛选)                          |
-| 14 | Trace 详情  | 'tracedetail'    | span 树/瀑布图(改写→意图→召回→重排→生成)                 |
+| 3  | 快速开始      | 'start'          | 6 步引导 + 去配置跳转                              |
+| 4  | 运行看板      | 'dashboard'      | stats/agentDist/hotQs（今日问答量/平均耗时/兜底率/热门问题）  |
+| 5  | Agent 管理  | 'agents'         | 列表(名称/简介/状态/更新时间) + 编辑抽屉(模型设置/绑定KB/Prompt) |
+| 6  | 知识库管理     | 'kb'             | 知识库列表                                      |
+| 7  | 知识库文档     | 'kbdoc'(子视图)     | 文档列表+上传，入库流程(解析→切片→向量化→索引)                 |
+| 8  | 文档切片      | 'chunk'(子视图)     | 切片查看+启用/禁用                                 |
+| 9  | 检索测试      | 'retrieval'      | 测试台(查询/阈值/多路召回/重排/结果)                      |
+| 10 | Prompt 管理 | 'prompts'        | 列表+版本管理+diff+发布/回滚                         |
+| 11 | 评测集       | 'evalsets'       | **占位**（原型文字："评测集与评测管理已在规划中"）               |
+| 12 | 评测运行+报告   | 'evals'          | 列表 + 报告详情子视图（`reportId` 切换），**占位**          |
+| 13 | Trace 追踪  | 'traces'         | 列表(采样/失败率/P95/筛选)                          |
+| 14 | Trace 详情  | 'tracedetail'(子视图) | span 树/瀑布图(改写→意图→召回→重排→生成)                 |
 | 15 | 模型调用管理    | 'llm'            | 模型列表+测试连接+新接入                              |
 
 ### 现有代码现状
@@ -136,12 +136,12 @@ state = {
 | 屏数                  | 15                                                                                   | 原型 labels + state          |
 | 新增前端文件              | \~40（15 页 + 5 共享组件 + 3 API + mocks + theme）                                          | 逐屏 mirror                  |
 | 新增后端 skeleton 模块    | 10（models/kb/documents/chunks/ingestion/retrieval/agents/prompts/chat/conversations） | 003 §模块依赖图                 |
-| 新增 contracts schema | \~10                                                                                 | 每模块一个                      |
+| 新增 contracts schema | \~11                                                                                 | 每模块一个 + evalsets/evals 拆分  |
 | 新增后端文件              | \~30（每模块 3 文件）                                                                       | module/controller/service  |
-| 路由数                 | 13（含嵌套）                                                                              | 见路由表                       |
+| 路由数                 | 14（含嵌套）                                                                              | 见路由表                       |
 | 前端打包预算              | < 500KB gzipped                                                                      | antd 6 tree-shake + 15 页骨架 |
 | 增量构建                | < 5s                                                                                 | 003 构建预算                   |
-| 新运行时依赖              | nestjs-zod + zod-to-openapi（后端 only）                                                 | 003 已预告                    |
+| 新运行时依赖              | nestjs-zod（含 swagger 集成，后端 only）                                                     | 003 已修订                    |
 
 结论：规模中等，单 milestone 可完成。
 
@@ -160,14 +160,16 @@ apps/frontend/src/
     login/LoginPage.tsx      # 登录页（接 M1 /auth/login）
     chat/ChatPage.tsx        # C 端问答页
     admin/
-      DashboardPage.tsx              # 控制台（快速开始 + 运行看板占位）
+      StartPage.tsx                   # 快速开始（6 步引导）
+      DashboardPage.tsx               # 运行看板占位（stats/agentDist/hotQs）
       AgentsPage.tsx                 # Agent 管理（列表 + 编辑抽屉壳）
       KnowledgeBasesPage.tsx         # 知识库管理
       DocumentsPage.tsx              # 知识库文档
       ChunksPage.tsx                 # 文档切片
       RetrievalTestPage.tsx          # 检索测试
       PromptsPage.tsx                # Prompt 管理（版本 + diff 壳）
-      EvaluationPage.tsx             # 评测占位（3 屏合一：原型文字"已在规划中"）
+      EvalSetsPage.tsx               # 评测集占位（M11）
+      EvalsPage.tsx                  # 评测运行 + 报告详情子视图（M11）
       TracesPage.tsx                 # Trace 追踪列表
       TraceDetailPage.tsx            # Trace 详情（span 树壳）
       ModelsPage.tsx                 # 模型调用管理
@@ -189,21 +191,24 @@ apps/frontend/src/
 /login                                              → LoginPage（公开）
 /chat                                               → ChatPage（AuthGuard 保护）
 /admin                                              → AdminLayout（AuthGuard 保护，嵌套路由）
-  index    /admin                                   → DashboardPage
+  index    /admin                                   → StartPage（快速开始 6 步）
+           /admin/dashboard                         → DashboardPage（运行看板占位）
            /admin/agents                            → AgentsPage
            /admin/knowledge-bases                   → KnowledgeBasesPage
            /admin/knowledge-bases/:kbId/documents   → DocumentsPage
            /admin/knowledge-bases/:kbId/documents/:docId/chunks → ChunksPage
            /admin/retrieval-test                    → RetrievalTestPage
            /admin/prompts                           → PromptsPage
-           /admin/evaluations                       → EvaluationPage（占位）
+           /admin/evalsets                          → EvalSetsPage（占位）
+           /admin/evaluations                       → EvalsPage（列表 + 报告子视图）
+           /admin/evaluations/:reportId             → EvalsPage（报告详情）
            /admin/traces                            → TracesPage
            /admin/traces/:traceId                   → TraceDetailPage
            /admin/models                            → ModelsPage
 *                                                   → 重定向到 /admin
 ```
 
-13 条路由，覆盖 15 屏（评测 3 屏合一占位页）。
+14 条路由，覆盖 15 屏（start/dashboard 拆分；evalsets/evals 拆分；评测报告为 evals 子路由）。
 
 **路由深度决策**：`/admin/knowledge-bases/:kbId/documents/:docId/chunks` 是 4 层嵌套——这是有意的，因为原型里"知识库→文档→切片"是逐级下钻的导航路径，深层路由让 URL 可分享、可回退。其他管理页保持 1-2 层。
 
@@ -221,14 +226,14 @@ apps/frontend/src/
 | retrieval       | `/retrieval`       | `POST /test` → `{hits:[]}` 占位                                   |
 | agents          | `/agents`          | `GET /` → `[]`，`POST /` → 201，`GET /:id` → 404 占位               |
 | prompts         | `/prompts`         | `GET /` → `[]`，`GET /:id/versions` → `[]`                       |
-| chat            | `/chat`            | `POST /` → 501（SSE 未实现），`GET /conversations` → `[]`             |
+| chat            | `/chat`            | `POST /` → mock SSE 流（`text/event-stream`，假 token/citation/done 事件），`GET /conversations` → `[]` |
 | conversations   | `/conversations`   | `GET /` → `[]`，`GET /:id` → 404                                 |
 
 已有模块不改动（health/traces/users/auth），但 `traces.controller.ts` 的手动校验可顺手迁到 `ZodValidationPipe`（`traces.controller.ts:18` 注释预告）。
 
 ### 契约扩展（packages/contracts/src/）
 
-新增 10 个文件，每个遵循 `users.ts` 模式（`z.object` + `export type`）：
+新增 11 个文件，每个遵循 `users.ts` 模式（`z.object` + `export type`）：
 
 ```
 packages/contracts/src/
@@ -239,19 +244,21 @@ packages/contracts/src/
   retrieval.ts           # RetrievalRequestSchema, RetrievalHitSchema
   agents.ts              # AgentSchema, AgentConfigSchema
   prompts.ts             # PromptSchema, PromptVersionSchema
-  chat.ts                # ChatRequestSchema, SSEEventSchema（M8 用）
+  chat.ts                # ChatRequestSchema, ChatStreamEventSchema（M8 用）
   conversations.ts       # ConversationSchema, MessageSchema
+  evalsets.ts            # EvalSetSchema
+  evals.ts               # EvalRunSchema
   pagination.ts          # PaginatedResponseSchema<T>（通用）
   index.ts               # 追加 re-export 全部新 schema
 ```
 
 ### OpenAPI 自动生成
 
-引入 `nestjs-zod`（提供 `ZodValidationPipe` + `createZodDto` + OpenAPI 注册）+ `@nestjs/swagger`（Swagger UI 托管）：
+引入 `nestjs-zod`（提供 `ZodValidationPipe` + `createZodDto` + 自带 `@nestjs/swagger` 集成，`cleanupOpenApiDoc`）：
 
 * 后端 `main.ts` 启用 `SwaggerModule.setup('/api/docs', app, document)`
 
-* OpenAPI document 由 `nestjs-zod` 从 Zod schema 自动生成（`zod-to-openapi` 底层）
+* OpenAPI document 由 `nestjs-zod` 自带的 swagger 集成从 Zod schema 自动生成（不再单独引入 `zod-to-openapi`，003 已同步修订）
 
 * 暴露端点：`GET /api/docs`（Swagger UI）+ `GET /api/docs-json`（OpenAPI JSON）
 
@@ -324,7 +331,7 @@ export function createSSEClient(url: string, onEvent: (data: unknown) => void): 
 | 后端校验    | nestjs-zod `ZodValidationPipe`        | 手动 `safeParse`（M1 方式）   | 灵活性 —— 换声明式 + 自动 OpenAPI（003 已定方向）    |
 | OpenAPI | nestjs-zod 自动生成                       | `@nestjs/swagger` 手动装饰器 | 装饰器细粒度 —— 换"一份 schema 喂校验+类型+文档"（003） |
 | 状态管理    | 纯 React hooks                         | Redux/Zustand           | 全局状态管理 —— 骨架不需要，M7+ 按需                |
-| 评测页     | 单个占位页（3 屏合一）                          | 3 个独立路由                 | 路由精度 —— M11 再拆，原型本身是占位                |
+| 评测页     | evalsets + evals 2 页（报告为 evals 子路由）              | 3 个独立路由 / 1 个占位页        | 路由精度 —— 原型 evalsets/evals 是独立 adminPage；报告是 evals 子视图 |
 | C 端问答页  | M2 建布局壳                               | M2 跳过                   | 骨架完整性 —— 路线图要求 15 屏可点开                |
 | 路由深度    | kb/:kbId/documents/:docId/chunks（4 层） | 扁平化 + query param       | URL 简洁 —— 换可分享/可回退的导航路径               |
 
