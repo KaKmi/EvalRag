@@ -271,7 +271,7 @@ describe("M2 request schemas (skeleton DTOs)", () => {
     expect(CreateModelRequestSchema.parse(rest).enabled).toBe(true);
     expect(() => CreateModelRequestSchema.parse({ ...rest, type: "vision" })).toThrow();
   });
-  it("CreateKnowledgeBaseRequestSchema omits id/counts/status/updatedAt", () => {
+  it("CreateKnowledgeBaseRequestSchema omits id/counts/status/progress/updatedAt", () => {
     const { id: _a, docsCount: _b, chunksCount: _c, status: _d, updatedAt: _e, ...rest } = valid.kb;
     void _a;
     void _b;
@@ -279,6 +279,11 @@ describe("M2 request schemas (skeleton DTOs)", () => {
     void _d;
     void _e;
     expect(CreateKnowledgeBaseRequestSchema.parse(rest).name).toBe(valid.kb.name);
+    // progress 由后端构建时填，客户端不可覆盖（omit + strip）
+    expect(
+      (CreateKnowledgeBaseRequestSchema.parse({ ...rest, progress: 62 }) as Record<string, unknown>)
+        .progress,
+    ).toBeUndefined();
   });
   it("CreateDocumentRequestSchema omits id/counts/status/updatedAt", () => {
     const { id: _a, chunksCount: _b, status: _c, updatedAt: _d, ...rest } = valid.doc;

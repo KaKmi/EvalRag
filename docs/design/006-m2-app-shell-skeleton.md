@@ -37,7 +37,7 @@ M2 把原型 `CodeCrushBot 单文件版.html`（15 屏，低代码 `DCLogic` 单
 
 * contracts 扩展：10 个新 Zod schema 文件（models/kb/documents/chunks/retrieval/agents/prompts/chat/conversations + 通用分页）
 
-* OpenAPI 自动生成（nestjs-zod → `/api/openapi.json` + Swagger UI）
+* OpenAPI 自动生成（nestjs-zod → `/api/docs-json` + Swagger UI）
 
 * SSE 客户端骨架（`api/sse.ts`，封装 `EventSource`，不实现真实流式）
 
@@ -298,7 +298,7 @@ export function createSSEClient(url: string, onEvent: (data: unknown) => void): 
 
 * `pnpm --filter @codecrush/frontend dev` → 浏览器打开 → 15 屏可点开、跳转通
 
-* `pnpm --filter @codecrush/backend dev` → `curl /api/docs` 返回 OpenAPI JSON
+* `pnpm --filter @codecrush/backend dev` → `curl /api/docs-json` 返回 OpenAPI JSON
 
 * `pnpm lint` → 0 boundary 违规
 

@@ -79,7 +79,7 @@ export class PromptsService {
   createVersion(promptId: string, req: CreatePromptVersionRequest): PromptVersion {
     this.get(promptId); // 校验 prompt 存在
     const existing = MOCK_VERSIONS.filter((v) => v.promptId === promptId);
-    const nextVersion = existing.length + 1;
+    const nextVersion = existing.reduce((m, v) => Math.max(m, v.version), 0) + 1;
     // M2 桩：仅回显，不持久化。M6 接 Prompt 版本管理与 diff。
     // version/status 由后端分配（新建版本一律 draft），不由客户端决定。
     return {

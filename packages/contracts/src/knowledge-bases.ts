@@ -24,6 +24,7 @@ export const CreateKnowledgeBaseRequestSchema = KnowledgeBaseSchema.omit({
   docsCount: true,
   chunksCount: true,
   status: true,
+  progress: true,
   updatedAt: true,
 });
 export type CreateKnowledgeBaseRequest = z.infer<typeof CreateKnowledgeBaseRequestSchema>;

@@ -1,75 +1,59 @@
-# M2 Story 5 Review — 前端 13 页 + mock 数据
+# Code Review — M2 (final diff coverage, 轻量对抗档)
 
-> 独立静态审查。范围 `git diff 46fffa4..HEAD`（Story 5 impl `ee761e1` + docs SHA）。
-> worktree 干净（仅未跟踪 `review-story3.md` / `scratch/`，不在 diff 内）。
-> 审查契约：只报 spec/AC 违反、运行时错误/行为破坏、数据不一致、安全/信任边界、接口破坏、
-> 「测试通过但真实行为错误」类发现。不报风格/命名/未来推测/重构建议/antd 弃用警告。
+## Scope
 
-## 审查覆盖
+- Base: `origin/main`
+- HEAD: `1b6c4af` (Story 7 SHA follow-up) + worktree P3 fixes (this commit)
+- Scope: full M2 diff (`feat/m2-app-shell` branch) — Stories 0–7
+- Spec: `.ship/tasks/m2/plan/spec.md` (10 AC)
+- Mode: 轻量对抗档 — host 自查 plan 代替 execution drill（依据 CLAUDE.md 分级：M2 是 CRUD/骨架型）；3 个并行子代理按子系统审查（contracts+backend / frontend / config+Story7），合并为本文。
 
-- 全量读取 diff 内全部 30 个文件（9 mock + StatusTag + 15 页 + App/ChatLayout/App.test + 删除旧 LoginPage）。
-- 对照 `packages/contracts/src/` 全部相关 schema 校验 mock 形状与字段使用。
-- 路由表对照 `spec.md` / `006` 路由表。
-- 依赖边界：`grep @codecrush/otel apps/frontend/src` 与 `grep apps/backend apps/frontend/src` 均无命中；无残留 `pages/LoginPage` 引用。
+## Verdict
 
-## Findings
+**DONE** — 0 P1 / 0 P2 / 4 P3（全部已修复）。10 AC 全验证（见 dev-ledger Story 7）。test/lint/build 全绿。
 
-### P3-1 · 登录测试名声称校验「navigates to /admin」但未断言导航
+## Findings（全部 P3，已修复）
 
-- **文件**：`apps/frontend/src/app/App.test.tsx:88-119`
-- **观察**：测试名 `stores token and navigates to /admin on successful login`，但测试体唯一断言是
-  `await waitFor(() => expect(localStorage.getItem("token")).toBe("tok-123"))`（App.test.tsx:118）。
-  全程未对导航结果做任何 DOM/location 断言（既未断言 AdminLayout 的 `CodeCrushBot` 品牌，也未断言 StartPage 内容或路由位置）。
-- **触发**：`fireEvent.submit(form)` → `onFinish` → `fetch` mock → `localStorage.setItem` → `nav("/admin", { replace: true })`。
-  即便 `nav("/admin")` 被删掉、写错目标、或被注释，`localStorage.getItem("token")` 仍为 `"tok-123"`，测试依旧通过。
-- **影响**：导航回归不被捕获。AC 2「登录成功 → 重定向 `/admin`」的「重定向」部分无测试覆盖；
-  `LoginPage.tsx:34` 的 `nav("/admin", { replace: true })` 行为事实上正确，但无测试约束。
-- **修复方向**：在 token 断言后补一条导航落点断言，例如
-  `await screen.findByText("CodeCrushBot")`（AdminLayout 品牌，登录后必渲染），
-  或用 `MemoryRouter` + test route 检查 location.pathname === "/admin"。
+### P3-1: Prompt 版本号计算可产生倒退/重复
+- File: `apps/backend/src/modules/prompts/prompts.service.ts:82`
+- Trigger: `createVersion` 用 `existing.length + 1` 算下一版本号。当历史版本被删除或版本号不连续（mock 数据 `p2` 有 v3、`p4` 有 v2，但若未来插入高版本再删除低版本），`length+1` 会小于现存最大 version，导致新版本号倒退；同 prompt 并发创建（M6 持久化后）也会撞号。
+- Impact: Prompt 版本号唯一性/单调性破坏，diff 与回滚定位错版本。M2 是 mock 桩不持久化，影响潜伏到 M6。
+- Fix: 改为 `existing.reduce((m, v) => Math.max(m, v.version), 0) + 1`——取现存最大 version +1，保证单调且不撞号。
+- Status: **fixed**（本提交）
 
-## Open Questions（非 finding，M9 注意）
+### P3-2: CreateKnowledgeBaseRequest 未 omit `progress`，客户端可覆盖后端构建进度
+- File: `packages/contracts/src/knowledge-bases.ts:22`（omit 列表）
+- Trigger: `CreateKnowledgeBaseRequestSchema = KnowledgeBaseSchema.omit({id, docsCount, chunksCount, status, updatedAt})`，漏了 `progress`。`progress` 语义是「构建进度百分比」，由后端在 building 态填；客户端 POST 时可塞 `progress: 100` 伪造「已完成」。
+- Impact: 信任边界泄漏——客户端能影响后端状态字段。M2 后端是 skeleton 不读该字段，但 M4 入库管线接真后会沿契约形状直接写入。
+- Fix: omit 列表加 `progress: true`。Zod 默认 strip 已 omit 的 key，客户端传入也会被丢弃。
+- Test: `m2-schemas.test.ts:274` 加强断言——`parse({...rest, progress: 62}).progress === undefined`，锁定「客户端塞 progress 被 strip」。
+- Status: **fixed**（本提交）
 
-1. **TraceDetailPage 瀑布图分母**（`apps/frontend/src/pages/admin/TraceDetailPage.tsx:33,57-59`）：
-   `total = Math.max(...spans.map(s => s.durationMs), 1)`，用「最大单 span 时长」当时间轴分母，
-   而非 `max(startTime+durationMs) - rootStart`。对当前 mock 恰好正确（root span `rag.orchestrate`
-   时长 1240ms 最大且起点=rootStart，故 `maxEnd-rootStart === max(durationMs)`，所有 bar 落在 0–100%）。
-   但 M9 接真实读模型后，若 root 不是最长 span、或某子 span 终点超过 root 终点，会出现 `leftPct+widthPct>100%`
-   甚至 `leftPct>100%`（bar 溢出/错位）。M2 不构成 bug，M9 落地前修。
-2. **`buildDepth` 无环保护**（`TraceDetailPage.tsx:8-23`）：按 `parentSpanId` 回溯，若存在环会无限循环挂页。
-   mock 无环，M2 安全；M9 真实 span 需加 visited 集合或深度上限。
-3. **`spans[0]` 假定为根/最早**（`TraceDetailPage.tsx:32`）：`rootStart = new Date(spans[0].startTime)`。
-   mock 中 spans[0] 确为最早，M2 正确；M9 若 spans 未按 startTime 排序，`rootStart` 偏晚会导致 `leftPct` 为负。
-   （page 注释已声明「M9 接真实读模型」，上述三点属同一 M9 收口项。）
+### P3-3: PagePlaceholder.tsx 死代码
+- File: `apps/frontend/src/components/PagePlaceholder.tsx`（整个文件）
+- Trigger: grep 全 `apps/frontend/src` 仅命中自身定义（line 3 interface + line 12 function），无任何 import。Story 5 后所有占位页改用 `React.lazy` 真实页面，该通用占位组件被遗弃。
+- Impact: 死代码漂移——后续读者误以为还在用，或误改无效果。
+- Fix: 删除文件。
+- Status: **fixed**（本提交）
 
-## 结论
+### P3-4: 006 设计文档 OpenAPI 路径与实现不一致
+- File: `docs/design/006-m2-app-shell-skeleton.md:40` 与 `:301`
+- Trigger: line 40 写 `nestjs-zod → /api/openapi.json`，line 301 写 `curl /api/docs 返回 OpenAPI JSON`；但实现（Story 1 `app-bootstrap.ts`）是 Swagger UI 在 `/api/docs`、OpenAPI JSON 在 `/api/docs-json`。line 263 已正确区分两者，line 40/301 漂移。
+- Impact: 文档与实现不一致——按文档 curl `/api/docs` 拿到 HTML 而非 JSON；设计权威失真。
+- Fix: line 40 `/api/openapi.json` → `/api/docs-json`；line 301 `curl /api/docs` → `curl /api/docs-json`。
+- Status: **fixed**（本提交）
 
-Story 5 实现质量高：路由表与 spec/006 完全对齐；mock 与 contracts 经 tsc 校验形状一致（含 `ModelProvider.role`、
-`RetrievalHit.docName` 等 spec 未列但契约已含的字段）；依赖边界零违规；React.lazy + Suspense 接线正确
-（15 页均默认导出）；AuthGuard 覆盖 /admin 与 /chat；LoginPage 走 `/api/auth/login` + `LoginResponseSchema.parse` + token 存储 + 跳转，行为正确。
+## Diagnosis
 
-唯一发现为 P3 测试缺口（登录导航未断言）。无 P1/P2。建议修复 P3-1 后进入 `/ship:qa`。
+无单一根因。4 个 P3 分属 4 类：版本号算法（P3-1）、契约 omit 遗漏（P3-2）、重构遗留死代码（P3-3）、文档漂移（P3-4）。均为低影响、易修，M2 skeleton 阶段不暴露真实故障，但 M4/M6 接真后会放大——现修最经济。
 
-## Follow-up（review 修复运行时暴露的额外问题）
+## Verification
 
-修复 P3-1 后跑测试，登录导航测试日志中出现 React 重复 key 警告：
-`Encountered two children with the same key, /admin/knowledge-bases`。
+- `pnpm lint` → 0 boundary 违规，0 error
+- `pnpm test` → 8/8 tasks green（backend 60 / frontend 16 / contracts 52，含加强后的 m2-schemas 42）
+- `pnpm build` → 5/5 tasks green
+- 10 AC 验证见 `dev-ledger.md` Story 7（QA 18/18 + login-check + curl SSE/OpenAPI）
 
-### P3-2 · StartPage 快速开始链接列表重复 key
+## Open Questions
 
-- **文件**：`apps/frontend/src/pages/admin/StartPage.tsx:24`
-- **观察**：`STEPS.map((s) => <Link key={s.to} .../>)`，但步骤 2「创建知识库」与步骤 3「上传文档」
-  的 `to` 均为 `/admin/knowledge-bases`，导致两个 `<Link>` 同 key。
-- **触发**：登录成功 → `nav("/admin")` → AdminLayout 渲染 → StartPage 挂载 → 链接列表 map。
-- **影响**：React 重复 key 警告；理论上可能导致子节点被复用/忽略。当前 mock 下视觉无异常，
-  但属真实缺陷。
-- **来源**：Story 4（app shell）遗留，非 Story 5 diff 内。轻量对抗档 Story 4 未做每 story 审，
-  此处由 Story 5 review 的测试运行间接暴露。
-- **修复**：`key={s.title}`（title 在 STEPS 内唯一）。已提交 `349a2b4`。
-
-### 修复状态
-
-- P3-1（登录导航断言）：已修复，commit `f15e895`。测试 7/7 绿。
-- P3-2（StartPage 重复 key）：已修复，commit `349a2b4`。测试 7/7 绿，重复 key 警告消失。
-- 剩余 stderr 均为 antd 6 弃用警告（`List` / `Steps.direction` / `Steps.items.description` / `Drawer.width`），
-  非本任务范围（contracts/antd 升级收口），不计入 finding。
+无。M2 收尾，可交付。

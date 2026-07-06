@@ -235,3 +235,14 @@ Story 7: "Vite proxy + 集成验证" — complete (no individual review — non-
     - /favicon.ico 返回 404（项目无 favicon，浏览器自动请求，非 AC、非阻塞）。M3+ 视觉打磨可补。
     - typed client（getAgents 等）M2 仍无页面调用（M3+ 接真后端首次验证）。
     - 工作树中部分修复（antd 弃用迁移、vite alias、qa-script chrome channel）为本会话期间并行出现并经我核验一致后纳入 Story 7 提交（test/lint/build/QA 全绿）。
+
+Final review (轻量对抗档收尾，覆盖全量 diff):
+  Artifacts: .ship/tasks/m2/review.md
+  Verdict: DONE — 0 P1 / 0 P2 / 4 P3（全部已修复）
+  Findings + fixes:
+    - P3-1 prompts.service.ts:82 版本号 length+1 → reduce max+1（防倒退/撞号）
+    - P3-2 knowledge-bases.ts omit 漏 progress → 加 progress:true；m2-schemas.test.ts:274 加强断言锁定 strip
+    - P3-3 PagePlaceholder.tsx 死代码 → 删除
+    - P3-4 006 文档 OpenAPI 路径漂移（line 40 /api/openapi.json、line 301 curl /api/docs）→ /api/docs-json
+  Gates: lint 0 / test 8/8 (backend 60 + frontend 16 + contracts 52) / build 5/5
+  M2 收尾完成，可交付。
