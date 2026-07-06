@@ -18,6 +18,17 @@ Claude Code 专用指引。**先读 [`AGENTS.md`](AGENTS.md)**（环境、命令
 - **按里程碑分波推进**（M0 → M0.5 → M1 …），一波一个 design→dev 闭环，不要一次规划全部。
 - 恢复：`.ship/tasks/<task>/dev-ledger.md` 记录已完成 story，优先信它与 `git log`，勿重复实现。
 
+### 对抗强度分级（用户已拍板，2026-07-05）
+
+按任务性质选档，开工时向用户说明用哪档（用户可否决）：
+
+- **完整对抗**——架构性任务（引入新模块边界/存储 schema 决策/安全信任面/编排内核，如 M4 入库管线、M5 检索、M8 RAG 编排+SSE、M9 trace 读模型）：
+  design = peer 独立调查 + diff + execution drill；dev = 每 story 独立 peer review。
+- **轻量对抗**——CRUD/骨架/配置型任务（如 M2 页面骨架、M3 模型接入、M6 Prompt、M7 Agent 配置、M10 看板）：
+  design = peer 独立调查 + diff，**跳过 execution drill**（host 自查 plan 代替，理由记入 report card）；
+  dev = **不做每 story 审**，整个任务收尾跑一次 review 覆盖全量 diff；仅涉及安全/数据完整性的个别 story 单独审。
+- 判定依据：是否新增模块边界、是否碰存储 schema、是否在信任边界上动刀。拿不准取高档。
+
 ## 提交/推送纪律
 
 - 仅在用户明确要求时提交或推送。
