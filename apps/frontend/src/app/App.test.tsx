@@ -116,4 +116,7 @@ it("stores token and navigates to /admin on successful login", async () => {
   const form = document.querySelector("form")!;
   fireEvent.submit(form);
   await waitFor(() => expect(localStorage.getItem("token")).toBe("tok-123"));
+  // 断言导航落点：nav("/admin") 后 AdminLayout 渲染，Sider 品牌字「CodeCrushBot」出现。
+  // 否则即便 nav 被删/写错，token 断言仍通过——回归不被捕获（AC 2 重定向部分）。
+  expect(await screen.findByText("CodeCrushBot")).toBeInTheDocument();
 });
