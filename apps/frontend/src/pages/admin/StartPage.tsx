@@ -21,7 +21,8 @@ export default function StartPage() {
       />
       <div style={{ marginTop: 16 }}>
         {STEPS.map((s) => (
-          <Link key={s.to} to={s.to}>
+          // 用 title 作 key：步骤 2/3 都指向 /admin/knowledge-bases，用 to 会撞 key。
+          <Link key={s.title} to={s.to}>
             <Button style={{ marginRight: 8, marginBottom: 8 }}>去配置：{s.title}</Button>
           </Link>
         ))}
