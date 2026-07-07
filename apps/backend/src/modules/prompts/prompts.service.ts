@@ -1,93 +1,129 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import type {
-  CreatePromptVersionRequest,
-  Prompt,
-  PromptVersion,
+import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  extractVars,
+  type CreatePromptRequest,
+  type CreatePromptVersionRequest,
+  type Prompt,
+  type PromptVersion,
 } from "@codecrush/contracts";
-
-const MOCK_PROMPTS: Prompt[] = [
-  { id: "p1", name: "问题改写-通用", node: "rewrite", currentVersionId: "pv1" },
-  { id: "p2", name: "意图识别-通用", node: "intent", currentVersionId: "pv2" },
-  { id: "p3", name: "回复生成-通用", node: "reply", currentVersionId: "pv3" },
-  { id: "p4", name: "兜底回复-通用", node: "fallback", currentVersionId: "pv4" },
-];
-
-const MOCK_VERSIONS: PromptVersion[] = [
-  {
-    id: "pv1",
-    promptId: "p1",
-    version: 7,
-    body: "你是一个问题改写器，请将用户问题改写为更利于检索的形式...",
-    variables: ["query"],
-    note: "通用版",
-    author: "admin",
-    status: "prod",
-  },
-  {
-    id: "pv1-draft",
-    promptId: "p1",
-    version: 8,
-    body: "你是一个问题改写器（实验版）...",
-    variables: ["query"],
-    note: "实验：增加槽位抽取",
-    author: "admin",
-    status: "draft",
-  },
-  {
-    id: "pv2",
-    promptId: "p2",
-    version: 3,
-    body: "请识别用户意图，输出意图标签...",
-    variables: ["query"],
-    status: "prod",
-  },
-  {
-    id: "pv3",
-    promptId: "p3",
-    version: 5,
-    body: "基于以下检索结果回答用户问题...",
-    variables: ["query", "context"],
-    status: "prod",
-  },
-  {
-    id: "pv4",
-    promptId: "p4",
-    version: 2,
-    body: "抱歉，未找到相关信息，转人工...",
-    variables: [],
-    status: "prod",
-  },
-];
+import { PromptsRepository } from "./prompts.repository";
+import type { PromptRow, PromptVersionRow } from "./schema";
 
 @Injectable()
 export class PromptsService {
-  list(): Prompt[] {
-    return MOCK_PROMPTS;
+  constructor(private readonly repo: PromptsRepository) {}
+
+  async list(): Promise<Prompt[]> {
+    return (await this.repo.findPrompts()).map(toPrompt);
   }
 
-  get(id: string): Prompt {
-    const prompt = MOCK_PROMPTS.find((p) => p.id === id);
-    if (!prompt) throw new NotFoundException(`prompt ${id} not found`);
-    return prompt;
+  async get(id: string): Promise<Prompt> {
+    const r = await this.repo.findPromptById(id);
+    if (!r) throw new NotFoundException(`prompt ${id} not found`);
+    return toPrompt(r);
   }
 
-  listVersions(promptId: string): PromptVersion[] {
-    this.get(promptId); // 校验 prompt 存在
-    return MOCK_VERSIONS.filter((v) => v.promptId === promptId);
-  }
-
-  createVersion(promptId: string, req: CreatePromptVersionRequest): PromptVersion {
-    this.get(promptId); // 校验 prompt 存在
-    const existing = MOCK_VERSIONS.filter((v) => v.promptId === promptId);
-    const nextVersion = existing.reduce((m, v) => Math.max(m, v.version), 0) + 1;
-    // M2 桩：仅回显，不持久化。M6 接 Prompt 版本管理与 diff。
-    // version/status 由后端分配（新建版本一律 draft），不由客户端决定。
-    return {
-      ...req,
-      id: `pv-${promptId}-${nextVersion}`,
-      promptId,
-      version: nextVersion,
+  // 建 Prompt + 自动起 v1 draft（无 tx，对齐 users.service 范式；测试支配——见 dev-ledger concerns）
+  async createPrompt(req: CreatePromptRequest, actorEmail: string): Promise<Prompt> {
+    const p = await this.repo.insertPrompt({
+      name: req.name,
+      node: req.node,
+      currentVersionId: null,
+      updatedBy: actorEmail,
+    });
+    await this.repo.insertVersion({
+      promptId: p.id,
+      version: 1,
+      body: req.body,
+      variables: extractVars(req.body),
+      note: req.note,
+      author: actorEmail,
       status: "draft",
-    };
+    });
+    return toPrompt(p);
   }
+
+  async listVersions(promptId: string): Promise<PromptVersion[]> {
+    await this.get(promptId);
+    return (await this.repo.findVersions(promptId)).map(toVersion);
+  }
+
+  // 出新版本：max+1 + unique(promptId,version) 兜底；撞号 retry 一次（D8）
+  async createVersion(
+    promptId: string,
+    req: CreatePromptVersionRequest,
+    actorEmail: string,
+  ): Promise<PromptVersion> {
+    await this.get(promptId);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const next =
+        (await this.repo.findVersions(promptId)).reduce((m, v) => Math.max(m, v.version), 0) + 1;
+      try {
+        const row = await this.repo.insertVersion({
+          promptId,
+          version: next,
+          body: req.body,
+          variables: extractVars(req.body),
+          note: req.note,
+          author: actorEmail,
+          status: "draft",
+        });
+        return toVersion(row);
+      } catch (e) {
+        if (isUniqueViolation(e) && attempt === 0) continue;
+        if (isUniqueViolation(e)) throw new ConflictException("version 冲突，重试失败");
+        throw e;
+      }
+    }
+    throw new ConflictException("version 冲突，重试失败");
+  }
+
+  // 发布/回滚统一入口：draft→prod（publish）/ archived→prod（rollback）。
+  // 已 prod → 409（D15）；版本不存在或不属于该 prompt → 404。
+  async promote(
+    promptId: string,
+    versionId: string,
+    actorEmail: string,
+  ): Promise<PromptVersion> {
+    const v = await this.repo.findVersionById(versionId);
+    if (!v || v.promptId !== promptId) {
+      throw new NotFoundException(`version ${versionId} not found`);
+    }
+    if (v.status === "prod") throw new ConflictException("该版本已是生产版本");
+    return toVersion(await this.repo.publishVersion(promptId, versionId, actorEmail));
+  }
+}
+
+function toPrompt(row: PromptRow): Prompt {
+  return {
+    id: row.id,
+    name: row.name,
+    node: row.node as Prompt["node"],
+    currentVersionId: row.currentVersionId ?? null,
+    updatedAt: row.updatedAt.toISOString(),
+    updatedBy: row.updatedBy,
+  };
+}
+
+function toVersion(row: PromptVersionRow): PromptVersion {
+  return {
+    id: row.id,
+    promptId: row.promptId,
+    version: row.version,
+    body: row.body,
+    variables: row.variables,
+    note: row.note ?? undefined,
+    author: row.author,
+    status: row.status as PromptVersion["status"],
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function isUniqueViolation(e: unknown): boolean {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    "code" in e &&
+    (e as { code: string }).code === "23505"
+  );
 }
