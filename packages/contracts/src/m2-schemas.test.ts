@@ -10,6 +10,7 @@ import {
   CreateDocumentRequestSchema,
   CreateKnowledgeBaseRequestSchema,
   CreateModelRequestSchema,
+  CreatePromptRequestSchema,
   CreatePromptVersionRequestSchema,
   DocumentListResponseSchema,
   DocumentSchema,
@@ -105,7 +106,14 @@ const valid = {
     multi: true,
     fallbackHuman: true,
   },
-  prompt: { id: "p1", name: "问题改写-通用", node: "rewrite", currentVersionId: "pv1" },
+  prompt: {
+    id: "p1",
+    name: "问题改写-通用",
+    node: "rewrite",
+    currentVersionId: "pv1",
+    updatedAt: "2026-07-01T00:00:00.000Z",
+    updatedBy: "demo@codecrush.local",
+  },
   promptVersion: {
     id: "pv1",
     promptId: "p1",
@@ -115,7 +123,9 @@ const valid = {
     note: "通用版",
     author: "admin",
     status: "prod",
+    createdAt: "2026-07-01T00:00:00.000Z",
   },
+  createPromptReq: { name: "新 Prompt", node: "rewrite", body: "你好 {query}", note: "test" },
   chatReq: { agentId: "aftersale", query: "怎么退货" },
   conv: { id: "c1", agentId: "aftersale", title: "退货咨询" },
   msg: { id: "m1", convId: "c1", role: "user", content: "怎么退货" },
@@ -158,6 +168,9 @@ describe("M2 contracts — positive cases", () => {
   });
   it("PromptSchema accepts a valid prompt", () => {
     expect(PromptSchema.parse(valid.prompt)).toEqual(valid.prompt);
+  });
+  it("PromptSchema accepts currentVersionId:null (未发布)", () => {
+    expect(PromptSchema.parse({ ...valid.prompt, currentVersionId: null }).currentVersionId).toBeNull();
   });
   it("PromptVersionSchema accepts a valid version", () => {
     expect(PromptVersionSchema.parse(valid.promptVersion)).toEqual(valid.promptVersion);
@@ -209,6 +222,18 @@ describe("M2 contracts — negative cases", () => {
   });
   it("PromptSchema rejects unknown node", () => {
     expect(() => PromptSchema.parse({ ...valid.prompt, node: "summary" })).toThrow();
+  });
+  it("PromptSchema rejects currentVersionId:undefined (nullable 非 optional)", () => {
+    const { currentVersionId: _v, ...rest } = valid.prompt;
+    void _v;
+    expect(() => PromptSchema.parse(rest)).toThrow();
+  });
+  it("PromptSchema rejects missing updatedAt/updatedBy", () => {
+    expect(() => PromptSchema.parse({ ...valid.prompt, updatedAt: undefined })).toThrow();
+    expect(() => PromptSchema.parse({ ...valid.prompt, updatedBy: undefined })).toThrow();
+  });
+  it("PromptVersionSchema rejects missing createdAt", () => {
+    expect(() => PromptVersionSchema.parse({ ...valid.promptVersion, createdAt: undefined })).toThrow();
   });
   it("ChatRequestSchema rejects empty query", () => {
     expect(() => ChatRequestSchema.parse({ agentId: "a", query: "" })).toThrow();
@@ -320,18 +345,45 @@ describe("M2 request schemas (skeleton DTOs)", () => {
     expect(UpdateAgentRequestSchema.parse({ name: "新名字" }).name).toBe("新名字");
     expect(UpdateAgentRequestSchema.parse({}).name).toBeUndefined();
   });
-  it("CreatePromptVersionRequestSchema omits id/promptId/version/status (后端分配)", () => {
-    const { id: _a, promptId: _b, version: _c, status: _d, ...rest } = valid.promptVersion;
-    void _a;
-    void _b;
-    void _c;
-    void _d;
-    const parsed = CreatePromptVersionRequestSchema.parse(rest);
+  it("CreatePromptRequestSchema accepts { name, node, body, note? }", () => {
+    const parsed = CreatePromptRequestSchema.parse(valid.createPromptReq);
+    expect(parsed.name).toBe("新 Prompt");
+    expect(parsed.node).toBe("rewrite");
+    expect(parsed.body).toBe("你好 {query}");
+    expect(parsed.note).toBe("test");
+    // 客户端塞 id/currentVersionId/updatedAt/updatedBy 被 strip（后端分配）
+    expect(
+      (
+        CreatePromptRequestSchema.parse({ ...valid.createPromptReq, id: "x" }) as Record<
+          string,
+          unknown
+        >
+      ).id,
+    ).toBeUndefined();
+  });
+  it("CreatePromptVersionRequestSchema = { body, note? } (variables/author 服务端填)", () => {
+    const parsed = CreatePromptVersionRequestSchema.parse({
+      body: valid.promptVersion.body,
+      note: "v2",
+    });
     expect(parsed.body).toBe(valid.promptVersion.body);
-    expect(parsed.variables).toEqual(["query"]);
-    // 拒绝客户端塞 status/version（后端分配）—— 多余 key 被 zod 默认 strip，但若客户端传非法值在 strict 下应拒
-    // 这里验证 status/version 不在 parse 结果里
-    expect((parsed as Record<string, unknown>).status).toBeUndefined();
-    expect((parsed as Record<string, unknown>).version).toBeUndefined();
+    expect(parsed.note).toBe("v2");
+    // variables 由后端 extractVars 计算、author 来自 JWT —— 客户端不可塞
+    expect(
+      (
+        CreatePromptVersionRequestSchema.parse({ body: "x", variables: ["hack"] }) as Record<
+          string,
+          unknown
+        >
+      ).variables,
+    ).toBeUndefined();
+    expect(
+      (
+        CreatePromptVersionRequestSchema.parse({ body: "x", author: "hack" }) as Record<
+          string,
+          unknown
+        >
+      ).author,
+    ).toBeUndefined();
   });
 });

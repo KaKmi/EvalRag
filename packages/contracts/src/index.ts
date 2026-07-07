@@ -9,6 +9,7 @@ export * from "./chunks";
 export * from "./retrieval";
 export * from "./agents";
 export * from "./prompts";
+export * from "./prompt-template";
 export * from "./chat";
 export * from "./conversations";
 export * from "./evalsets";

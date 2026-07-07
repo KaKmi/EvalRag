@@ -6,36 +6,58 @@ export type PromptNode = z.infer<typeof PromptNodeSchema>;
 export const PromptVersionStatusSchema = z.enum(["draft", "prod", "archived"]);
 export type PromptVersionStatus = z.infer<typeof PromptVersionStatusSchema>;
 
+// M6: currentVersionId 改 nullable（未发布时为 null）；读侧补 updatedAt/updatedBy（发布/回滚时刷新）
 export const PromptSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   node: PromptNodeSchema,
-  currentVersionId: z.string().min(1),
+  currentVersionId: z.string().min(1).nullable(),
+  updatedAt: z.string().datetime(),
+  updatedBy: z.string().min(1),
 });
 export type Prompt = z.infer<typeof PromptSchema>;
 
+// M6: body 改 min(1)（空 prompt 无意义）；author 改必填（来自 JWT，不再 optional）；补 createdAt
 export const PromptVersionSchema = z.object({
   id: z.string().min(1),
   promptId: z.string().min(1),
   version: z.number().int().positive(),
-  body: z.string(),
+  body: z.string().min(1),
   variables: z.array(z.string()),
   note: z.string().optional(),
-  author: z.string().optional(),
+  author: z.string().min(1),
   status: PromptVersionStatusSchema,
+  createdAt: z.string().datetime(),
 });
 export type PromptVersion = z.infer<typeof PromptVersionSchema>;
 
 export const PromptVersionListResponseSchema = z.array(PromptVersionSchema);
 export type PromptVersionListResponse = z.infer<typeof PromptVersionListResponseSchema>;
 
-export const CreatePromptVersionRequestSchema = PromptVersionSchema.omit({
-  id: true,
-  promptId: true,
-  version: true,
-  status: true,
+export const PromptListResponseSchema = z.array(PromptSchema);
+export type PromptListResponse = z.infer<typeof PromptListResponseSchema>;
+
+// M6: 建 Prompt（自动起 v1 draft）。body 用于首版本，note 可选
+export const CreatePromptRequestSchema = z.object({
+  name: z.string().min(1),
+  node: PromptNodeSchema,
+  body: z.string().min(1),
+  note: z.string().optional(),
+});
+export type CreatePromptRequest = z.infer<typeof CreatePromptRequestSchema>;
+
+// M6: 出新版本。variables 由后端 extractVars 计算、author 来自 JWT，故 DTO 仅 { body, note? }
+export const CreatePromptVersionRequestSchema = z.object({
+  body: z.string().min(1),
+  note: z.string().optional(),
 });
 export type CreatePromptVersionRequest = z.infer<typeof CreatePromptVersionRequestSchema>;
 
-export const PromptListResponseSchema = z.array(PromptSchema);
-export type PromptListResponse = z.infer<typeof PromptListResponseSchema>;
+// M6: 发布/回滚响应（draft→prod / archived→prod）
+export const PublishPromptVersionResponseSchema = z.object({
+  promptId: z.string().min(1),
+  versionId: z.string().min(1),
+  version: z.number().int().positive(),
+  status: PromptVersionStatusSchema,
+});
+export type PublishPromptVersionResponse = z.infer<typeof PublishPromptVersionResponseSchema>;
