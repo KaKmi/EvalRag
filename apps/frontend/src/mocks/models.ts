@@ -51,7 +51,7 @@ export const PROTOCOL_OPTIONS: Record<ModelType, ProtocolOption[]> = {
       protocol: "openai_compat",
       label: "OpenAI 兼容",
       base: "https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compatible-api/v1",
-      note: "/v1/reranks 扁平协议——阿里云百炼 qwen3-rerank（compatible-api，替换域名中的 WorkspaceId）及其他兼容网关",
+      note: "/v1/reranks 扁平协议——阿里云百炼 workspace 域名（qwen3-rerank，替换域名中的 WorkspaceId）及其他兼容网关；百炼新版网关请选此协议",
     },
     {
       protocol: "cohere",
@@ -69,7 +69,7 @@ export const PROTOCOL_OPTIONS: Record<ModelType, ProtocolOption[]> = {
       protocol: "dashscope",
       label: "阿里云 DashScope",
       base: "https://dashscope.aliyuncs.com/api/v1",
-      note: "DashScope 原生 text-rerank（qwen3-rerank / qwen3-vl-rerank / gte-rerank-v2；百炼 workspace 域名 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1 亦可）",
+      note: "DashScope 原生 text-rerank，input/parameters 包裹体（gte-rerank-v2 / qwen3-rerank）——仅适用 dashscope.aliyuncs.com 老网关；百炼 workspace 域名（*.maas.aliyuncs.com）要扁平体，请选「OpenAI 兼容」",
     },
   ],
   embedding: [
