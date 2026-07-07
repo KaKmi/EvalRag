@@ -21,10 +21,18 @@ import {
   type MessageListResponse,
   ModelProviderListResponseSchema,
   type ModelProviderListResponse,
+  CreatePromptRequestSchema,
+  type CreatePromptRequest,
+  CreatePromptVersionRequestSchema,
+  type CreatePromptVersionRequest,
   PromptListResponseSchema,
   type PromptListResponse,
+  PromptSchema,
+  type Prompt,
   PromptVersionListResponseSchema,
   type PromptVersionListResponse,
+  PromptVersionSchema,
+  type PromptVersion,
   RetrievalTestRequestSchema,
   type RetrievalTestRequest,
   RetrievalTestResponseSchema,
@@ -142,6 +150,44 @@ export const getPromptVersions = (promptId: string): Promise<PromptVersionListRe
     `/api/prompts/${encodeURIComponent(promptId)}/versions`,
     PromptVersionListResponseSchema,
   );
+
+// M6 写操作：建 Prompt / 出新版本 / 发布 / 回滚（author 由后端从 JWT 填，D6）
+export async function createPrompt(req: CreatePromptRequest): Promise<Prompt> {
+  return postJson("/api/prompts", req, CreatePromptRequestSchema, PromptSchema);
+}
+export async function createPromptVersion(
+  promptId: string,
+  req: CreatePromptVersionRequest,
+): Promise<PromptVersion> {
+  return postJson(
+    `/api/prompts/${encodeURIComponent(promptId)}/versions`,
+    req,
+    CreatePromptVersionRequestSchema,
+    PromptVersionSchema,
+  );
+}
+export async function publishPromptVersion(
+  promptId: string,
+  versionId: string,
+): Promise<PromptVersion> {
+  const resp = await apiFetch(
+    `/api/prompts/${encodeURIComponent(promptId)}/versions/${encodeURIComponent(versionId)}/publish`,
+    { method: "POST" },
+  );
+  if (!resp.ok) throw new Error(`publish failed: ${resp.status}`);
+  return PromptVersionSchema.parse(await resp.json());
+}
+export async function rollbackPromptVersion(
+  promptId: string,
+  versionId: string,
+): Promise<PromptVersion> {
+  const resp = await apiFetch(
+    `/api/prompts/${encodeURIComponent(promptId)}/versions/${encodeURIComponent(versionId)}/rollback`,
+    { method: "POST" },
+  );
+  if (!resp.ok) throw new Error(`rollback failed: ${resp.status}`);
+  return PromptVersionSchema.parse(await resp.json());
+}
 
 // retrieval — @Controller("retrieval")
 export const testRetrieval = (body: RetrievalTestRequest): Promise<RetrievalTestResponse> =>

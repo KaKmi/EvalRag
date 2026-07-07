@@ -65,6 +65,32 @@ it("renders agents list on /admin/agents when authenticated", async () => {
   expect(await screen.findByText("售后支持")).toBeInTheDocument();
 });
 
+it("loads PromptsPage from real /api/prompts on /admin/prompts (M6)", async () => {
+  localStorage.setItem("token", "fake-token");
+  // mock fetch：GET /api/prompts 返空数组，其余 404。证明页面挂载调真 API 而非本地 mock。
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _opts?: RequestInit) => {
+    const u = typeof input === "string" ? input : input.toString();
+    if (u.includes("/api/prompts")) {
+      return { ok: true, status: 200, json: async () => [] } as unknown as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as unknown as Response;
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+
+  render(
+    <MemoryRouter initialEntries={["/admin/prompts"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  // 空列表态出现 = 页面已挂载且消费了 API 响应
+  expect(await screen.findByText(/暂无 Prompt/)).toBeInTheDocument();
+  // 关键断言：挂载时确实调用了 /api/prompts（非本地 mock）
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.map(c => String(c[0]));
+    expect(calls.some(u => u.includes("/api/prompts"))).toBe(true);
+  });
+});
+
 it("renders chat three-column layout on /chat when authenticated", async () => {
   localStorage.setItem("token", "fake-token");
   render(

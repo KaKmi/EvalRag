@@ -39,7 +39,7 @@
 - 注：tsc 仍红（M2 controller 调 2-arg createVersion，签名变了），e2e prompts 块红（inMemoryRepo 未 override + 依赖 mock p1），属级联，Story 4 修。
 
 ### Story 4 — Controller 扩展 + e2e 重写
-- Commit: （本提交）
+- Commit: `f30cacc` `feat(backend): wire PromptsController with create/publish/rollback endpoints + AuthedRequest`
 - 改动：
   - `apps/backend/src/modules/prompts/prompts.controller.ts`（重写）：加 `POST /`（createPrompt）、`POST /:id/versions/:versionId/publish`、`POST /:id/versions/:versionId/rollback` 三端点（D2 双端点委托同一 promote）；`@Req() req: AuthedRequest`（`{ user: AuthenticatedUser }`）取 `req.user.email` 传 service（D6）；所有方法改 async/Promise。
   - `apps/backend/test/skeleton.e2e.spec.ts`：overrideProvider(PromptsRepository).useValue(inMemoryPromptsRepo)（DB-free）；inMemoryPromptsRepo 维护两数组 + 8 方法（含 publishVersion 单事务语义：archive 旧 prod → set 新 prod → 刷 prompt.currentVersionId/updatedBy/updatedAt）；prompts 块重写为 7 测试（建 prompt → v1 draft → publish v1 → 已 prod 409 → v2 publish + v1 archived + updatedBy 推进 → rollback v1 → D6 拒绝伪造 author）；OpenAPI 块加 `POST /api/prompts`、`publish`、`rollback` 三 path 断言。
@@ -50,6 +50,20 @@
   - AuthedRequest = `{ user: AuthenticatedUser }`（最小结构类型，guard 保证 user 已挂）。
 - 验证：tsc 0 errors；jest 14 suites / 76 passed（含 prompts 块 7 + service spec 12 + OpenAPI 断言）；lint 0。
 - 级联红全修复：Story 3 的 tsc/e2e 红在 Story 4 清零。
+
+### Story 5 — 前端接通（client + PromptsPage + mocks 清理）
+- Commit: `<TBD>` `feat(frontend): wire PromptsPage to real backend + shared prompt-template functions`
+- 改动：
+  - `apps/frontend/src/api/client.ts`：加 `createPrompt` / `createPromptVersion` / `publishPromptVersion` / `rollbackPromptVersion` 四写函数（请求体无 author，D6 服务端从 JWT 填）。
+  - `apps/frontend/src/mocks/prompts.ts`（重写）：删 mock 数据（PROMPT_ROWS/BODIES/V/VERS）+ 本地纯函数（detectVars/previewBody/lineDiff/bodyOf，迁 contracts）；保留 UI 常量 NODE_TAGS/NODE_META/VAR_PH/STV；`PromptNode`/`PromptVersionStatus` 改 `z.infer` 对齐契约英文 enum；加 `NODE_LABEL`（rewrite→问题改写…）/`STATUS_LABEL`（draft→草稿…）中文映射；删 `审批中/灰度中`（契约无）。
+  - `apps/frontend/src/pages/admin/PromptsPage.tsx`（重写）：`useEffect(getPrompts)` 挂载调真 API；新建抽屉 → `createPrompt`；编辑抽屉 → `getPromptVersions` 取 prod body → `createPromptVersion`（出新 draft）；版本管理抽屉 → `getPromptVersions` + `diffPromptBodies`（共享）+ `publishPromptVersion`/`rollbackPromptVersion`；变量识别 `extractVars` + 预览 `renderTemplate`（共享）；列表列改 `NODE_LABEL[node]` + 状态徽标（currentVersionId!=null→生产中/草稿）+ `updatedBy · formatDateTime(updatedAt)`；"绑定 Agent" tab 空态"M7 接入后展示"。
+  - `apps/frontend/src/app/App.test.tsx`：+1 测试 `loads PromptsPage from real /api/prompts`（mock fetch 返 []，断言挂载调 `/api/prompts` + 空列表态）。
+- 决策：
+  - 列表"当前版本"列显状态徽标（生产中/草稿）而非版本号：`Prompt` 契约无 version 字段，版本号在版本抽屉显；避免 N+1 拉 versions。
+  - 编辑抽屉基于 prod 版本 body 起新 draft（`createPromptVersion`），非原地改；与后端"出新版本"语义一致。
+  - `actOnVersion` 统一 draft→publish / archived→rollback，版本列表项与 diff 底部按钮共用；从 useMemo 移出 `onPublishSel` 避免 exhaustive-deps 警告。
+- 验证：tsc 0 errors；frontend 17 tests passed（+1 M6）；lint 0；build OK（PromptsPage chunk 21.04 kB）。
+- 跨 story 回归：`pnpm test` 93 passed（backend 76 + frontend 17）+ `pnpm lint` 0 + `pnpm build` 5/5 successful。
 
 ### 数据丢失与恢复（事故记录）
 - 另一 M3 开发窗口暂停时跑了一次 `git reset`（reflog `HEAD@{0}: reset: moving to HEAD`），把 Story 1 全部未提交工作（prompts.ts/index.ts/m2-schemas.test.ts 改动 + 新建 prompt-template.ts/test）连同 M3 WIP 一起冲掉，且未建 stash。
