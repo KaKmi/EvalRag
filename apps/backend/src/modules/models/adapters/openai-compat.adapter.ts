@@ -42,7 +42,8 @@ export class OpenAiCompatAdapter implements ModelProviderPort {
           ok: false,
           latencyMs,
           statusCode: resp.status,
-          error: upstreamError(resp.status, json),
+          // 上游 message 可能回显请求里的 key（部分兼容网关如此），必须擦除
+          error: redactSecret(upstreamError(resp.status, json), config.apiKey),
         };
       }
       if (!shapeOk(config.type, json)) {
@@ -56,7 +57,7 @@ export class OpenAiCompatAdapter implements ModelProviderPort {
         : err instanceof Error
           ? err.message
           : String(err);
-      return { ok: false, latencyMs, error };
+      return { ok: false, latencyMs, error: redactSecret(error, config.apiKey) };
     } finally {
       clearTimeout(timer);
     }
@@ -91,7 +92,12 @@ function shapeOk(type: ModelType, json: unknown): boolean {
   return Array.isArray(o.results) || Array.isArray(o.data);
 }
 
-// 脱敏：只取 status + 上游 message 截断（≤200 字符），不含 headers/apiKey/完整 body
+// 明文 key 擦除：error message 中出现的 apiKey 一律替换（全局约束：key 不得出现在任何 error message）
+function redactSecret(message: string, secret: string): string {
+  return secret ? message.split(secret).join("[REDACTED]") : message;
+}
+
+// 脱敏：只取 status + 上游 message 截断（≤200 字符），不含 headers/完整 body
 function upstreamError(status: number, json: unknown): string {
   let message = "";
   if (typeof json === "object" && json !== null) {

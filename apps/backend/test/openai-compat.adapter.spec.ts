@@ -89,6 +89,15 @@ describe("OpenAiCompatAdapter.testConnection", () => {
     expect(r.error).not.toContain("sk-test12345678");
   });
 
+  it("上游 message 回显 apiKey → 被擦除为 [REDACTED]", async () => {
+    fetchMock.mockResolvedValue(
+      okJson({ error: { message: "Invalid API key sk-test12345678 provided" } }, 401),
+    );
+    const r = await adapter.testConnection(cfg());
+    expect(r.error).not.toContain("sk-test12345678");
+    expect(r.error).toContain("[REDACTED]");
+  });
+
   it("网络错误（fetch reject）→ ok:false 不抛", async () => {
     fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
     const r = await adapter.testConnection(cfg());
