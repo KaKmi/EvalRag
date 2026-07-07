@@ -66,7 +66,7 @@
 - 跨 story 回归：`pnpm test` 93 passed（backend 76 + frontend 17）+ `pnpm lint` 0 + `pnpm build` 5/5 successful。
 
 ### Story 6 — 收尾验证 + seed + review
-- Commit: `<TBD>` `chore(m6): seed default prompts + document dc.html prototype + review pass`
+- Commit: `eebe80e` `chore(m6): seed default prompts + document dc.html prototype + review pass`
 - 改动：
   - `apps/backend/src/db/seed.ts`：扩展加 4 默认 Prompt（rewrite/intent/reply/fallback 各 v1 prod，D9 optional）；`onConflictDoNothing({target: prompts.name}).returning()` → 已存在跳过；新建则 insert v1 prod + update currentVersionId（保 demo 连续性，对齐 M2 mock 4 prod 版本）。
   - `.gitignore`：加 `CodeCrushBot.dc.html`（前端 UI 原型 HTML，不进仓库/打包）。
