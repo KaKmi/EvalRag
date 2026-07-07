@@ -1,9 +1,11 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Req } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query, Req } from "@nestjs/common";
 import { createZodDto } from "nestjs-zod";
 import {
   CreatePromptRequestSchema,
   CreatePromptVersionRequestSchema,
+  PromptListQuerySchema,
   type Prompt,
+  type PromptListResponse,
   type PromptVersion,
 } from "@codecrush/contracts";
 import type { AuthenticatedUser } from "../../platform/security/authenticated-user";
@@ -19,9 +21,10 @@ type AuthedRequest = { user: AuthenticatedUser };
 export class PromptsController {
   constructor(private readonly promptsService: PromptsService) {}
 
+  // query param 经 PromptListQuerySchema 解析（z.coerce.number() 转 number + 默认值 + search trim）
   @Get()
-  list(): Promise<Prompt[]> {
-    return this.promptsService.list();
+  list(@Query() raw: Record<string, unknown>): Promise<PromptListResponse> {
+    return this.promptsService.list(PromptListQuerySchema.parse(raw ?? {}));
   }
 
   @Get(":id")
@@ -69,5 +72,12 @@ export class PromptsController {
     @Req() req: AuthedRequest,
   ): Promise<PromptVersion> {
     return this.promptsService.promote(id, versionId, req.user.email);
+  }
+
+  // 删除 prompt：仅草稿（未发布）可删；已启用 → 409
+  @Delete(":id")
+  @HttpCode(204)
+  delete(@Param("id") id: string): Promise<void> {
+    return this.promptsService.delete(id);
   }
 }

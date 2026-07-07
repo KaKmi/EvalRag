@@ -4,17 +4,25 @@ import {
   type CreatePromptRequest,
   type CreatePromptVersionRequest,
   type Prompt,
+  type PromptListQuery,
+  type PromptListResponse,
   type PromptVersion,
 } from "@codecrush/contracts";
-import { PromptsRepository } from "./prompts.repository";
-import type { PromptRow, PromptVersionRow } from "./schema";
+import { PromptsRepository, type PromptListRow } from "./prompts.repository";
+import type { PromptVersionRow } from "./schema";
 
 @Injectable()
 export class PromptsService {
   constructor(private readonly repo: PromptsRepository) {}
 
-  async list(): Promise<Prompt[]> {
-    return (await this.repo.findPrompts()).map(toPrompt);
+  async list(q: PromptListQuery): Promise<PromptListResponse> {
+    const { items, total } = await this.repo.findPrompts(q);
+    return {
+      items: items.map(toPrompt),
+      total,
+      page: q.page,
+      pageSize: q.pageSize,
+    };
   }
 
   async get(id: string): Promise<Prompt> {
@@ -40,7 +48,10 @@ export class PromptsService {
       author: actorEmail,
       status: "draft",
     });
-    return toPrompt(p);
+    // 重新查带聚合的行（currentVersionNumber:null + versionCount:1），保证返回契约完整
+    const row = await this.repo.findPromptById(p.id);
+    if (!row) throw new Error(`createPrompt: prompt ${p.id} vanished after insert`);
+    return toPrompt(row);
   }
 
   async listVersions(promptId: string): Promise<PromptVersion[]> {
@@ -92,14 +103,26 @@ export class PromptsService {
     if (v.status === "prod") throw new ConflictException("该版本已是生产版本");
     return toVersion(await this.repo.publishVersion(promptId, versionId, actorEmail));
   }
+
+  // 删除 prompt：仅草稿（currentVersionId === null）可删；已启用（线上运行中）→ 409
+  async delete(promptId: string): Promise<void> {
+    const r = await this.repo.findPromptById(promptId);
+    if (!r) throw new NotFoundException(`prompt ${promptId} not found`);
+    if (r.currentVersionId !== null) {
+      throw new ConflictException("已启用的 Prompt 不可删除，请先停用");
+    }
+    await this.repo.deletePrompt(promptId);
+  }
 }
 
-function toPrompt(row: PromptRow): Prompt {
+function toPrompt(row: PromptListRow): Prompt {
   return {
     id: row.id,
     name: row.name,
     node: row.node as Prompt["node"],
     currentVersionId: row.currentVersionId ?? null,
+    currentVersionNumber: row.currentVersionNumber,
+    versionCount: row.versionCount,
     updatedAt: row.updatedAt.toISOString(),
     updatedBy: row.updatedBy,
   };

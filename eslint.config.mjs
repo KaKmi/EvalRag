@@ -9,6 +9,8 @@ export default tseslint.config(
       "**/.turbo/**",
       "apps/backend/drizzle/**",
       "**/*.config.*",
+      // 前端 UI 原型参考目录（非源码，仅供页面还原参考，见 AGENTS.md「原型参考」）
+      "RAG知识库问答系统设计/**",
     ],
   },
   // 让 ESLint flat config 处理 .ts/.tsx（默认只处理 .js/.mjs/.cjs）

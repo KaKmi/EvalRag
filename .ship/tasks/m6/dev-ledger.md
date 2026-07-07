@@ -84,3 +84,31 @@
 - 另一 M3 开发窗口暂停时跑了一次 `git reset`（reflog `HEAD@{0}: reset: moving to HEAD`），把 Story 1 全部未提交工作（prompts.ts/index.ts/m2-schemas.test.ts 改动 + 新建 prompt-template.ts/test）连同 M3 WIP 一起冲掉，且未建 stash。
 - 未跟踪文件不在 git 对象库，无法 fsck 恢复。从对话上下文完整重建 4 文件 + 5 处 m2-schemas 编辑，重新验证 67 tests/build/lint 全绿后立即提交锁定。
 - 教训：多窗口并行开发同一仓库时，提交节奏要快（每 story 完成立即 commit），避免长时间持留未提交改动。
+
+### 验收修复轮 — 方案 A 后端 join 聚合 + antd 重写 + 变量预览 bug
+- 触发：手动验收对照原型（`RAG知识库问答系统设计/`）发现 3 个差距——列设计与原型出入（5 列 vs 原型 6 列）、变量预览不替换、UI 未用 antd。
+- 方案 A（用户拍板）：后端 list/get 端点 join 聚合 `currentVersionNumber`（nullable）+ `versionCount`，前端一次请求拿全，避免 N+1，契约单一来源。
+- 改动：
+  - `packages/contracts/src/prompts.ts`：`PromptSchema` 加 `currentVersionNumber: z.number().int().positive().nullable()` + `versionCount: z.number().int().nonnegative()`。
+  - `packages/contracts/src/m2-schemas.test.ts`：fixture 加两字段 + 正例（未发布两字段 null）+ 2 反例（缺字段/负 versionCount）。
+  - `apps/backend/src/modules/prompts/prompts.repository.ts`：新增 `PromptListRow` 类型 + `PROMPT_AGG_SELECT`（含 `sql<number|null>` 子查询取 currentVersionNumber + `sql<number>` COUNT 子查询取 versionCount）；`findPrompts`/`findPromptById` 改用 `.select(PROMPT_AGG_SELECT)` 返回 `PromptListRow`（含 createdAt 透传）。
+  - `apps/backend/src/modules/prompts/prompts.service.ts`：`toPrompt(row: PromptListRow)` 透传两聚合字段；`createPrompt` insert + insertVersion 后调 `repo.findPromptById` 取聚合行（保证返回契约完整）。
+  - `apps/backend/test/prompts.service.spec.ts`：引 `promptListRow` 常量；createPrompt 测加 `findPromptById` mock + 两字段断言；list 测加聚合断言。
+  - `apps/backend/test/skeleton.e2e.spec.ts`：`inMemoryPromptsRepo` 加 `toListRow` 计算聚合；POST/publish/v2-publish 三测加 `currentVersionNumber`/`versionCount` 断言。
+  - `apps/frontend/src/pages/admin/PromptsPage.tsx`：antd v6 重写（Table/Drawer/Button/Tag/Input/Select/Space/Popconfirm/Tabs/Alert）；8 列（Prompt 名称|所属节点|所属 agent|当前版本|状态|更新人|更新时间|操作）；「所属 agent」占位 `—`（M7 补真实关联）；操作列条件渲染（编辑恒显 / 版本历史 `versionCount>1` / 发布 `currentVersionId===null` 走 Popconfirm）；Drawer 用 `size={number}` 替代弃用的 `width`。
+  - `apps/frontend/src/pages/admin/PromptsPage.tsx` 变量预览 bug 修复：`pfDetected = extractVars(pf.body)`（不带花括号，`["context"]`），与 `renderTemplate` 的 `vars["context"]` 查找一致；显示变量名用 `{${v}}`；`VAR_PH` key 带花括号故用 `{${v}}` 查。
+  - `eslint.config.mjs`：ignores 加 `RAG知识库问答系统设计/**`（原型参考目录，非源码）。
+- 验证：contracts 69 + backend 76 + frontend 17 测试通过；tsc 0 errors；lint 0 errors；build 5/5 successful。
+- 未提交：待用户确认后按 Conventional Commits 提交。
+
+### 验收修复轮（续）— versionCount=0 相关子查询列名遮蔽 bug
+
+- 触发：浏览器验收 curl `GET /api/prompts` 发现 `currentVersionNumber: 1`（正确）但 `versionCount: 0`（应为 1+）。直接 psql `SELECT COUNT(*) FROM prompt_versions WHERE prompt_id = p.id` 返回 1，DB 数据正确，定位到 drizzle SQL 生成层。
+- 根因（用 `.toSQL()` 诊断脚本确认）：drizzle 的 `sql` 模板里 `${prompts.id}` 渲染成**未限定的 `"id"`**，而非 `"prompts"."id"`。在相关子查询 `SELECT COUNT(*) FROM prompt_versions WHERE prompt_id = "id"` 中，内层 `prompt_versions` 也有 `id` 列，Postgres 把 `"id"` 解析到**内层** `prompt_versions.id`，于是条件变成 `prompt_versions.prompt_id = prompt_versions.id`（不同 UUID，恒 false）→ COUNT=0。
+  - `currentVersionNumber` 侥幸正常：内层 `prompt_versions` 没有 `current_version_id` 列，Postgres 回退到外层 `prompts.current_version_id`，且内层 `"id"` 正好指 `prompt_versions.id`（恰为所需 join 条件）——纯运气。
+- 修复：`prompts.repository.ts` 的 `PROMPT_AGG_SELECT` 两个子查询的外层引用显式限定为 `"prompts"."id"` / `"prompts"."current_version_id"`（raw 文本嵌入 `sql` 模板，因外层表恒为 `prompts`）。加注释说明原因。
+- 验证：
+  - 诊断脚本（临时 `scripts/diag-prompts-sql.ts`，验证后已删）确认生成 SQL 为 `WHERE "prompt_id" = "prompts"."id"`，返回 `versionCount: 1/2`（与实际一致）。
+  - `curl GET /api/prompts`（带 demo token）返回 6 行，`currentVersionNumber` 与 `versionCount` 均正确。
+  - backend 76 + frontend 17 测试通过；tsc 0；lint 0；build 5/5。
+- 教训：drizzle `sql` 模板插值 `${table.col}` **不保证带表名限定**，相关子查询里若内外表有同名列必被内层遮蔽。相关子查询一律显式限定外层列引用，或改用 `alias` + `.from(alias)`。

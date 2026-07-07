@@ -22,6 +22,8 @@ import {
   MessageSchema,
   ModelProviderSchema,
   PaginatedResponseSchema,
+  PromptListQuerySchema,
+  PromptListResponseSchema,
   PromptSchema,
   PromptVersionSchema,
   RetrievalTestRequestSchema,
@@ -111,6 +113,8 @@ const valid = {
     name: "问题改写-通用",
     node: "rewrite",
     currentVersionId: "pv1",
+    currentVersionNumber: 7,
+    versionCount: 3,
     updatedAt: "2026-07-01T00:00:00.000Z",
     updatedBy: "demo@codecrush.local",
   },
@@ -169,8 +173,14 @@ describe("M2 contracts — positive cases", () => {
   it("PromptSchema accepts a valid prompt", () => {
     expect(PromptSchema.parse(valid.prompt)).toEqual(valid.prompt);
   });
-  it("PromptSchema accepts currentVersionId:null (未发布)", () => {
-    expect(PromptSchema.parse({ ...valid.prompt, currentVersionId: null }).currentVersionId).toBeNull();
+  it("PromptSchema accepts currentVersionId:null + currentVersionNumber:null (未发布)", () => {
+    const p = PromptSchema.parse({
+      ...valid.prompt,
+      currentVersionId: null,
+      currentVersionNumber: null,
+    });
+    expect(p.currentVersionId).toBeNull();
+    expect(p.currentVersionNumber).toBeNull();
   });
   it("PromptVersionSchema accepts a valid version", () => {
     expect(PromptVersionSchema.parse(valid.promptVersion)).toEqual(valid.promptVersion);
@@ -231,6 +241,13 @@ describe("M2 contracts — negative cases", () => {
   it("PromptSchema rejects missing updatedAt/updatedBy", () => {
     expect(() => PromptSchema.parse({ ...valid.prompt, updatedAt: undefined })).toThrow();
     expect(() => PromptSchema.parse({ ...valid.prompt, updatedBy: undefined })).toThrow();
+  });
+  it("PromptSchema rejects missing currentVersionNumber/versionCount", () => {
+    expect(() => PromptSchema.parse({ ...valid.prompt, currentVersionNumber: undefined })).toThrow();
+    expect(() => PromptSchema.parse({ ...valid.prompt, versionCount: undefined })).toThrow();
+  });
+  it("PromptSchema rejects negative versionCount", () => {
+    expect(() => PromptSchema.parse({ ...valid.prompt, versionCount: -1 })).toThrow();
   });
   it("PromptVersionSchema rejects missing createdAt", () => {
     expect(() => PromptVersionSchema.parse({ ...valid.promptVersion, createdAt: undefined })).toThrow();
@@ -385,5 +402,53 @@ describe("M2 request schemas (skeleton DTOs)", () => {
         >
       ).author,
     ).toBeUndefined();
+  });
+  it("PromptListQuerySchema 接受空对象（默认 page=1/pageSize=10）+ coerce string→number", () => {
+    expect(PromptListQuerySchema.parse({})).toEqual({
+      page: 1,
+      pageSize: 10,
+      search: undefined,
+      node: undefined,
+      status: undefined,
+    });
+    expect(PromptListQuerySchema.parse({ page: "2", pageSize: "20" })).toMatchObject({
+      page: 2,
+      pageSize: 20,
+    });
+  });
+  it("PromptListQuerySchema search 空白串→undefined，非空→trim", () => {
+    expect(PromptListQuerySchema.parse({ search: "   " }).search).toBeUndefined();
+    expect(PromptListQuerySchema.parse({ search: " x " }).search).toBe("x");
+  });
+  it("PromptListQuerySchema rejects page=0 / pageSize 越界 / 非法 node / 非法 status", () => {
+    expect(() => PromptListQuerySchema.parse({ page: "0" })).toThrow();
+    expect(() => PromptListQuerySchema.parse({ pageSize: "0" })).toThrow();
+    expect(() => PromptListQuerySchema.parse({ pageSize: "101" })).toThrow();
+    expect(() => PromptListQuerySchema.parse({ node: "summary" })).toThrow();
+    expect(() => PromptListQuerySchema.parse({ status: "archived" })).toThrow();
+  });
+  it("PromptListResponseSchema 接受 { items, total, page, pageSize }", () => {
+    const res = PromptListResponseSchema.parse({
+      items: [valid.prompt],
+      total: 1,
+      page: 1,
+      pageSize: 10,
+    });
+    expect(res.items).toHaveLength(1);
+    expect(res.total).toBe(1);
+  });
+  it("PromptListResponseSchema rejects 缺 total/page / 非法 item / 负 total", () => {
+    expect(() => PromptListResponseSchema.parse({ items: [], page: 1, pageSize: 10 })).toThrow();
+    expect(() =>
+      PromptListResponseSchema.parse({
+        items: [{ ...valid.prompt, versionCount: -1 }],
+        total: 1,
+        page: 1,
+        pageSize: 10,
+      }),
+    ).toThrow();
+    expect(() =>
+      PromptListResponseSchema.parse({ items: [], total: -1, page: 1, pageSize: 10 }),
+    ).toThrow();
   });
 });

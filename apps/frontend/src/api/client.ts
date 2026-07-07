@@ -27,6 +27,7 @@ import {
   type CreatePromptVersionRequest,
   PromptListResponseSchema,
   type PromptListResponse,
+  type PromptNode,
   PromptSchema,
   type Prompt,
   PromptVersionListResponseSchema,
@@ -143,8 +144,21 @@ export const getMessages = (convId: string): Promise<MessageListResponse> =>
   getJson(`/api/conversations/${encodeURIComponent(convId)}/messages`, MessageListResponseSchema);
 
 // prompts — @Controller("prompts")
-export const getPrompts = (): Promise<PromptListResponse> =>
-  getJson("/api/prompts", PromptListResponseSchema);
+export async function getPrompts(query: {
+  page: number;
+  pageSize: number;
+  search?: string;
+  node?: PromptNode;
+  status?: "prod" | "draft";
+}): Promise<PromptListResponse> {
+  const params = new URLSearchParams();
+  params.set("page", String(query.page));
+  params.set("pageSize", String(query.pageSize));
+  if (query.search) params.set("search", query.search);
+  if (query.node) params.set("node", query.node);
+  if (query.status) params.set("status", query.status);
+  return getJson(`/api/prompts?${params.toString()}`, PromptListResponseSchema);
+}
 export const getPromptVersions = (promptId: string): Promise<PromptVersionListResponse> =>
   getJson(
     `/api/prompts/${encodeURIComponent(promptId)}/versions`,
@@ -187,6 +201,16 @@ export async function rollbackPromptVersion(
   );
   if (!resp.ok) throw new Error(`rollback failed: ${resp.status}`);
   return PromptVersionSchema.parse(await resp.json());
+}
+
+// 删除 prompt（仅草稿可删；已启用后端返 409。204 无响应体）
+export async function deletePrompt(promptId: string): Promise<void> {
+  const resp = await apiFetch(`/api/prompts/${encodeURIComponent(promptId)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) {
+    throw new Error(`delete failed: ${resp.status} ${resp.statusText}`);
+  }
 }
 
 // retrieval — @Controller("retrieval")

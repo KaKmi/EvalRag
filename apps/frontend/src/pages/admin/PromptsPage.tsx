@@ -1,4 +1,17 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import {
+  Alert,
+  Button,
+  Drawer,
+  Input,
+  Popconfirm,
+  Select,
+  Space,
+  Table,
+  Tabs,
+  Tag,
+  type TableColumnsType,
+} from "antd";
 import {
   diffPromptBodies,
   extractVars,
@@ -10,6 +23,7 @@ import {
 import {
   createPrompt,
   createPromptVersion,
+  deletePrompt,
   getPromptVersions,
   getPrompts,
   publishPromptVersion,
@@ -18,70 +32,23 @@ import {
 import {
   NODE_LABEL,
   NODE_META,
-  NODE_TAGS,
   STATUS_LABEL,
   STV,
   VAR_PH,
 } from "../../mocks/prompts";
-import { tagOf } from "../../mocks/agents";
 
-/** Prompt 管理：列表 + 编辑抽屉（变量识别/预览）+ 版本管理抽屉（Diff/绑定）。M6 接真实 /api/prompts。 */
+/**
+ * Prompt 管理（M6，接真实 /api/prompts）。
+ * 列表 8 列 + 编辑抽屉（变量识别/预览）+ 版本管理抽屉（Diff/绑定 Agent）。
+ * UI 用 antd v6；「所属 agent」列占位（M7 Agent 实体建好后补真实关联）。
+ */
 
-const COLS = "1fr 130px 110px 190px 150px";
-
-const btnPrimary: CSSProperties = {
-  height: 32,
-  padding: "0 16px",
-  background: "#1677ff",
-  color: "#fff",
-  borderRadius: 6,
-  display: "flex",
-  alignItems: "center",
-  fontSize: 13,
-  cursor: "pointer",
-  userSelect: "none",
-};
-
-const btnGhost: CSSProperties = {
-  height: 36,
-  padding: "0 18px",
-  border: "1px solid #d9d9d9",
-  borderRadius: 6,
-  display: "flex",
-  alignItems: "center",
-  fontSize: 14,
-  cursor: "pointer",
-  userSelect: "none",
-};
-
-const overlay: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,.45)",
-  zIndex: 50,
-};
-
-const linkBlue: CSSProperties = { color: "#1677ff", cursor: "pointer" };
-
-const inputStyle: CSSProperties = {
-  height: 38,
-  padding: "0 12px",
-  border: "1px solid #d9d9d9",
-  borderRadius: 6,
-  fontSize: 14,
-  outline: "none",
-  width: "100%",
-};
-
-const selectStyle: CSSProperties = {
-  height: 38,
-  padding: "0 10px",
-  border: "1px solid #d9d9d9",
-  borderRadius: 6,
-  fontSize: 14,
-  outline: "none",
-  background: "#fff",
-  width: "100%",
+/** antd Tag 预设色板 key（与 mocks/agents TAGS 对齐语义，但直接用 antd 内置色名）。 */
+const NODE_TAG_COLOR: Record<PromptNode, string> = {
+  rewrite: "blue",
+  intent: "purple",
+  reply: "green",
+  fallback: "gold",
 };
 
 const mono: CSSProperties = { fontFamily: "ui-monospace, Menlo, monospace" };
@@ -119,6 +86,15 @@ export default function PromptsPage() {
   const [rows, setRows] = useState<Prompt[]>([]);
   const [loading, setLoading] = useState(true);
   const [listErr, setListErr] = useState("");
+  const [publishingId, setPublishingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [filterNode, setFilterNode] = useState<PromptNode | "all">("all");
+  const [filterStatus, setFilterStatus] = useState<"all" | "prod" | "draft">("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [total, setTotal] = useState(0);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
   const [drawer, setDrawer] = useState(false);
   const [pf, setPf] = useState<PromptDraft | null>(null);
@@ -133,21 +109,40 @@ export default function PromptsPage() {
   const [pvSelVer, setPvSelVer] = useState<string | null>(null);
   const [pvTab, setPvTab] = useState<"diff" | "bind">("diff");
 
-  const refreshList = async () => {
+  // 后端真分页 + 条件查询：search/name+updatedBy、node、status(prod/draft)
+  const refreshList = useCallback(async () => {
     setLoading(true);
     setListErr("");
     try {
-      setRows(await getPrompts());
+      const res = await getPrompts({
+        page,
+        pageSize,
+        search: debouncedSearch || undefined,
+        node: filterNode === "all" ? undefined : filterNode,
+        status: filterStatus === "all" ? undefined : filterStatus,
+      });
+      setRows(res.items);
+      setTotal(res.total);
     } catch (e) {
       setListErr(e instanceof Error ? e.message : "加载失败");
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, pageSize, debouncedSearch, filterNode, filterStatus]);
 
+  // 分页/筛选/搜索变化 → 后端查询
   useEffect(() => {
     void refreshList();
-  }, []);
+  }, [refreshList]);
+
+  // 搜索输入 debounce 300ms + 回第 1 页
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
 
   const refreshVersions = async (promptId: string) => {
     setVerLoading(true);
@@ -217,9 +212,7 @@ export default function PromptsPage() {
           : prev,
       );
     } catch (e) {
-      setPf(prev =>
-        prev ? { ...prev, verLabel: "加载版本失败" } : prev,
-      );
+      setPf(prev => (prev ? { ...prev, verLabel: "加载版本失败" } : prev));
       void e;
     }
   };
@@ -256,6 +249,42 @@ export default function PromptsPage() {
     if (!pf) return;
     const body = pf.body ? pf.body + (/\s$/.test(pf.body) ? "" : " ") + v : v;
     patchPf({ body });
+  };
+
+  // 列表「发布」按钮：发布最新草稿版本（currentVersionId === null 时显示）
+  const publishLatestDraft = async (promptId: string) => {
+    setPublishingId(promptId);
+    setListErr("");
+    try {
+      const vs = await getPromptVersions(promptId);
+      const draft = [...vs]
+        .sort((a, b) => b.version - a.version)
+        .find(v => v.status === "draft");
+      if (!draft) {
+        setListErr("无可发布的草稿版本");
+        return;
+      }
+      await publishPromptVersion(promptId, draft.id);
+      await refreshList();
+    } catch (e) {
+      setListErr(e instanceof Error ? e.message : "发布失败");
+    } finally {
+      setPublishingId(null);
+    }
+  };
+
+  // 列表「删除」按钮：仅草稿（currentVersionId === null）显示；Popconfirm 二次确认
+  const deletePromptById = async (promptId: string) => {
+    setDeletingId(promptId);
+    setListErr("");
+    try {
+      await deletePrompt(promptId);
+      await refreshList();
+    } catch (e) {
+      setListErr(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   // 版本管理抽屉：发布 draft 或回滚 archived
@@ -319,8 +348,125 @@ export default function PromptsPage() {
   }, [verPromptId, rows, versions, pvSelVer]);
 
   const pfMeta = pf ? NODE_META[pf.node] : null;
-  const pfDetected = pf ? extractVars(pf.body).map(v => `{${v}}`) : [];
+  // hasFilter 用于 emptyText 区分（搜索/筛选无结果 vs 无数据）
+  const hasFilter = search !== "" || filterNode !== "all" || filterStatus !== "all";
+  const resetFilters = () => {
+    setSearch("");
+    setDebouncedSearch("");
+    setFilterNode("all");
+    setFilterStatus("all");
+    setPage(1);
+  };
+  // M6 fix: extractVars 返回不带花括号的 key（["context"]），与 renderTemplate 的 vars 查找一致；
+  // 显示变量名时再加花括号；VAR_PH 的 key 带花括号，故用 `{${v}}` 查。
+  const pfDetected = pf ? extractVars(pf.body) : [];
   const pfPreview = pf ? renderTemplate(pf.body, pf.varExamples) : "";
+
+  const columns: TableColumnsType<Prompt> = [
+    {
+      title: "Prompt 名称",
+      dataIndex: "name",
+      key: "name",
+      width: 220,
+      render: (name: string) => <span style={{ fontWeight: 500 }}>{name}</span>,
+    },
+    {
+      title: "所属节点",
+      dataIndex: "node",
+      key: "node",
+      width: 110,
+      render: (_: unknown, r: Prompt) => (
+        <Tag color={NODE_TAG_COLOR[r.node]}>{NODE_LABEL[r.node]}</Tag>
+      ),
+    },
+    {
+      title: "所属 agent",
+      key: "agent",
+      width: 120,
+      render: () => <span style={{ color: "rgba(0,0,0,.35)" }}>—</span>,
+    },
+    {
+      title: "当前版本",
+      key: "version",
+      width: 100,
+      render: (_: unknown, r: Prompt) =>
+        r.currentVersionNumber != null ? (
+          <span style={{ ...mono }}>{verLabel(r.currentVersionNumber)}</span>
+        ) : (
+          <span style={{ color: "rgba(0,0,0,.35)" }}>—</span>
+        ),
+    },
+    {
+      title: "状态",
+      key: "status",
+      width: 100,
+      render: (_: unknown, r: Prompt) =>
+        r.currentVersionId === null ? (
+          <Tag color="purple">草稿</Tag>
+        ) : (
+          <Tag color="green">线上运行中</Tag>
+        ),
+    },
+    {
+      title: "更新人",
+      dataIndex: "updatedBy",
+      key: "updatedBy",
+      width: 160,
+      render: (who: string) => <span style={{ color: "rgba(0,0,0,.65)" }}>{who}</span>,
+    },
+    {
+      title: "更新时间",
+      key: "updatedAt",
+      width: 130,
+      render: (_: unknown, r: Prompt) => formatDateTime(r.updatedAt),
+    },
+    {
+      title: "操作",
+      key: "action",
+      width: 220,
+      render: (_: unknown, r: Prompt) => (
+        <Space size="small">
+          <Button type="link" size="small" onClick={() => void openEdit(r)}>
+            编辑
+          </Button>
+          {r.versionCount > 1 && (
+            <Button type="link" size="small" onClick={() => setVerPromptId(r.id)}>
+              版本历史
+            </Button>
+          )}
+          {r.currentVersionId === null && (
+            <Popconfirm
+              title="确认发布该 Prompt 的最新草稿版本？"
+              okText="发布"
+              cancelText="取消"
+              onConfirm={() => publishLatestDraft(r.id)}
+            >
+              <Button
+                type="link"
+                size="small"
+                loading={publishingId === r.id}
+              >
+                发布
+              </Button>
+            </Popconfirm>
+          )}
+          {r.currentVersionId === null && (
+            <Popconfirm
+              title="确认删除该草稿 Prompt？此操作不可撤销。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+              onConfirm={() => deletePromptById(r.id)}
+            >
+              <Button type="link" size="small" danger loading={deletingId === r.id}>
+                删除
+              </Button>
+            </Popconfirm>
+          )}
+        </Space>
+      ),
+    },
+  ];
 
   return (
     <div>
@@ -333,275 +479,228 @@ export default function PromptsPage() {
         }}
       >
         <div style={{ fontSize: 16, fontWeight: 600 }}>Prompt 管理</div>
-        <div onClick={openNew} style={btnPrimary}>
+        <Button type="primary" onClick={openNew}>
           ＋ 新建 Prompt
-        </div>
+        </Button>
       </div>
 
-      <div
-        style={{
-          background: "#fff",
-          border: "1px solid #f0f0f0",
-          borderRadius: 8,
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: COLS,
-            padding: "12px 16px",
-            background: "#fafafa",
-            borderBottom: "1px solid #f0f0f0",
-            fontSize: 13,
-            fontWeight: 600,
-            color: "rgba(0,0,0,.65)",
+      <Space style={{ marginBottom: 16 }} wrap>
+        <Input.Search
+          placeholder="搜索名称或更新人"
+          allowClear
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={{ width: 240 }}
+        />
+        <Select<PromptNode | "all">
+          value={filterNode}
+          onChange={v => {
+            setFilterNode(v);
+            setPage(1);
           }}
-        >
-          <div>Prompt 名称</div>
-          <div>所属节点</div>
-          <div>状态</div>
-          <div>更新人 / 时间</div>
-          <div>操作</div>
-        </div>
-        {loading ? (
-          <div style={{ padding: 32, textAlign: "center", color: "rgba(0,0,0,.45)", fontSize: 13 }}>
-            加载中…
+          style={{ width: 140 }}
+          options={[
+            { value: "all" as const, label: "全部节点" },
+            ...(Object.keys(NODE_LABEL) as PromptNode[]).map(n => ({
+              value: n,
+              label: NODE_LABEL[n],
+            })),
+          ]}
+        />
+        <Select<"all" | "prod" | "draft">
+          value={filterStatus}
+          onChange={v => {
+            setFilterStatus(v);
+            setPage(1);
+          }}
+          style={{ width: 120 }}
+          options={[
+            { value: "all" as const, label: "全部状态" },
+            { value: "prod" as const, label: "生产中" },
+            { value: "draft" as const, label: "草稿" },
+          ]}
+        />
+        {hasFilter && <Button onClick={resetFilters}>重置</Button>}
+      </Space>
+
+      {listErr && (
+        <Alert
+          type="error"
+          message={listErr}
+          showIcon
+          closable
+          onClose={() => setListErr("")}
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
+      <Table<Prompt>
+        rowKey="id"
+        columns={columns}
+        dataSource={rows}
+        loading={loading}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          showTotal: t => `共 ${t} 条`,
+          onChange: (p, ps) => {
+            setPage(p);
+            setPageSize(ps);
+          },
+        }}
+        size="middle"
+        locale={{
+          emptyText: hasFilter
+            ? "无匹配的 Prompt"
+            : "暂无 Prompt，点击右上角「新建 Prompt」创建",
+        }}
+      />
+
+      {/* 编辑 / 新建抽屉 */}
+      <Drawer
+        open={drawer}
+        onClose={() => setDrawer(false)}
+        size={720}
+        title={
+          <Space>
+            <span>{pf?.isNew ? "新建 Prompt" : "编辑 Prompt"}</span>
+            {pf && (
+              <Tag
+                style={{ fontSize: 12, color: "rgba(0,0,0,.55)", background: "#f5f5f5", border: "1px solid #e8e8e8" }}
+              >
+                {pf.verLabel}
+              </Tag>
+            )}
+          </Space>
+        }
+        footer={
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              {pfErr ? (
+                <span style={{ fontSize: 13, color: "#ff4d4f" }}>{pfErr}</span>
+              ) : (
+                <span style={{ fontSize: 13, color: "rgba(0,0,0,.45)" }}>{pf?.updatedByLabel}</span>
+              )}
+            </div>
+            <Space>
+              <Button onClick={() => setDrawer(false)}>取消</Button>
+              <Button type="primary" loading={pfSaving} onClick={() => void save()}>
+                {pf?.isNew ? "创建 Prompt" : "保存为新版本"}
+              </Button>
+            </Space>
           </div>
-        ) : listErr ? (
-          <div style={{ padding: 32, textAlign: "center", color: "#ff4d4f", fontSize: 13 }}>
-            {listErr}
-          </div>
-        ) : rows.length === 0 ? (
-          <div style={{ padding: 32, textAlign: "center", color: "rgba(0,0,0,.35)", fontSize: 13 }}>
-            暂无 Prompt，点击右上角「新建 Prompt」创建第一个
-          </div>
-        ) : (
-          rows.map(r => {
-            const t = tagOf(NODE_TAGS[r.node]);
-            const isProd = r.currentVersionId != null;
-            const st = isProd ? STV.prod : STV.draft;
-            return (
+        }
+      >
+        {pf && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            <div style={{ display: "flex", gap: 14 }}>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>Prompt 名称</div>
+                <Input
+                  value={pf.name}
+                  onChange={e => patchPf({ name: e.target.value })}
+                  placeholder="如：售后回复生成"
+                />
+              </div>
+              <div style={{ width: 200, flex: "none", display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>所属节点</div>
+                <Select<PromptNode>
+                  value={pf.node}
+                  onChange={v => patchPf({ node: v })}
+                  style={{ width: "100%" }}
+                  options={(Object.keys(NODE_LABEL) as PromptNode[]).map(n => ({
+                    value: n,
+                    label: NODE_LABEL[n],
+                  }))}
+                />
+              </div>
+            </div>
+            {pfMeta && (
               <div
-                key={r.id}
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: COLS,
-                  padding: "12px 16px",
-                  borderBottom: "1px solid #f0f0f0",
-                  fontSize: 13,
-                  alignItems: "center",
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "flex-start",
+                  background: "#fafafa",
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 6,
+                  padding: "9px 12px",
+                  marginTop: -8,
                 }}
               >
-                <div style={{ fontWeight: 500 }}>{r.name}</div>
-                <div>
-                  <span
-                    style={{
-                      fontSize: 12,
-                      lineHeight: "20px",
-                      padding: "0 8px",
-                      borderRadius: 4,
-                      background: t.bg,
-                      color: t.c,
-                      border: `1px solid ${t.bd}`,
-                    }}
-                  >
-                    {NODE_LABEL[r.node]}
-                  </span>
-                </div>
-                <div>
-                  <span
-                    style={{
-                      fontSize: 12,
-                      lineHeight: "20px",
-                      padding: "0 8px",
-                      borderRadius: 4,
-                      background: st.bg,
-                      color: st.c,
-                      border: `1px solid ${st.bd}`,
-                    }}
-                  >
-                    {isProd ? STATUS_LABEL.prod : STATUS_LABEL.draft}
-                  </span>
-                </div>
-                <div style={{ color: "rgba(0,0,0,.55)" }}>
-                  {r.updatedBy} · {formatDateTime(r.updatedAt)}
-                </div>
-                <div style={{ display: "flex", gap: 12, fontSize: 13 }}>
-                  <span style={linkBlue} onClick={() => void openEdit(r)}>
-                    编辑
-                  </span>
-                  <span
-                    style={linkBlue}
-                    onClick={() => {
-                      setVerPromptId(r.id);
-                    }}
-                  >
-                    版本历史
-                  </span>
+                <span style={{ fontSize: 12, lineHeight: "18px", color: "#1677ff", flex: "none" }}>ⓘ</span>
+                <div style={{ fontSize: 12, color: "rgba(0,0,0,.5)", lineHeight: 1.6 }}>{pfMeta.hint}</div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>Prompt 内容</div>
+                <div style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>
+                  用 <span style={mono}>{`{变量名}`}</span> 插入动态内容
                 </div>
               </div>
-            );
-          })
-        )}
-      </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>推荐变量</span>
+                {pfMeta?.vars.map(v => (
+                  <Tag
+                    key={v}
+                    color="blue"
+                    style={{ cursor: "pointer", userSelect: "none", ...mono }}
+                    onClick={() => insertVar(v)}
+                  >
+                    + {v}
+                  </Tag>
+                ))}
+              </div>
+              <Input.TextArea
+                value={pf.body}
+                onChange={e => patchPf({ body: e.target.value })}
+                placeholder="在此编写 Prompt 模板…"
+                autoSize={{ minRows: 8, maxRows: 14 }}
+                style={{ ...mono, fontSize: 13, lineHeight: 1.8 }}
+              />
+            </div>
 
-      {drawer && pf && (
-        <>
-          <div onClick={() => setDrawer(false)} style={overlay} />
-          <div style={drawerRight(720)}>
-            <div style={drawerHeader}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>
-                  {pf.isNew ? "新建 Prompt" : "编辑 Prompt"}
-                </div>
-                <span
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>变量</div>
+                <Tag
                   style={{
-                    fontSize: 12,
-                    lineHeight: "20px",
-                    padding: "0 8px",
-                    borderRadius: 4,
+                    fontSize: 11,
+                    lineHeight: "18px",
+                    padding: "0 7px",
+                    borderRadius: 9,
                     background: "#f5f5f5",
-                    color: "rgba(0,0,0,.55)",
+                    color: "rgba(0,0,0,.5)",
                     border: "1px solid #e8e8e8",
                   }}
                 >
-                  {pf.verLabel}
-                </span>
+                  自动识别 {pfDetected.length}
+                </Tag>
               </div>
-              <div onClick={() => setDrawer(false)} style={closeBtn}>
-                ×
-              </div>
-            </div>
-            <div style={drawerBody}>
-              <div style={{ display: "flex", gap: 14 }}>
-                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
-                  <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>Prompt 名称</div>
-                  <input
-                    value={pf.name}
-                    onChange={e => patchPf({ name: e.target.value })}
-                    placeholder="如：售后回复生成"
-                    style={inputStyle}
-                  />
-                </div>
-                <div style={{ width: 200, flex: "none", display: "flex", flexDirection: "column", gap: 6 }}>
-                  <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>所属节点</div>
-                  <select
-                    value={pf.node}
-                    onChange={e => patchPf({ node: e.target.value as PromptNode })}
-                    style={selectStyle}
-                  >
-                    {(Object.keys(NODE_TAGS) as PromptNode[]).map(n => (
-                      <option key={n} value={n}>
-                        {NODE_LABEL[n]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              {pfMeta && (
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 8,
-                    alignItems: "flex-start",
-                    background: "#fafafa",
-                    border: "1px solid #f0f0f0",
-                    borderRadius: 6,
-                    padding: "9px 12px",
-                    marginTop: -8,
-                  }}
-                >
-                  <span style={{ fontSize: 12, lineHeight: "18px", color: "#1677ff", flex: "none" }}>
-                    ⓘ
-                  </span>
-                  <div style={{ fontSize: 12, color: "rgba(0,0,0,.5)", lineHeight: 1.6 }}>{pfMeta.hint}</div>
-                </div>
-              )}
-
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>Prompt 内容</div>
-                  <div style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>
-                    用 <span style={mono}>{`{变量名}`}</span> 插入动态内容
-                  </div>
-                </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                  <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>推荐变量</span>
-                  {pfMeta?.vars.map(v => (
-                    <div
-                      key={v}
-                      onClick={() => insertVar(v)}
-                      style={{
-                        fontSize: 12,
-                        lineHeight: "24px",
-                        height: 24,
-                        padding: "0 9px",
-                        borderRadius: 6,
-                        border: "1px solid #91caff",
-                        background: "#e6f4ff",
-                        color: "#1677ff",
-                        cursor: "pointer",
-                        ...mono,
-                        userSelect: "none",
-                      }}
-                    >
-                      + {v}
-                    </div>
-                  ))}
-                </div>
-                <textarea
-                  value={pf.body}
-                  onChange={e => patchPf({ body: e.target.value })}
-                  placeholder="在此编写 Prompt 模板…"
-                  style={{
-                    height: 220,
-                    padding: "12px 14px",
-                    border: "1px solid #d9d9d9",
-                    borderRadius: 6,
-                    fontSize: 13,
-                    lineHeight: 1.8,
-                    outline: "none",
-                    resize: "none",
-                    ...mono,
-                  }}
-                />
-              </div>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>变量</div>
-                  <span
+              {pfDetected.length > 0 ? (
+                <div style={{ border: "1px solid #f0f0f0", borderRadius: 8, overflow: "hidden" }}>
+                  <div
                     style={{
-                      fontSize: 11,
-                      lineHeight: "18px",
-                      padding: "0 7px",
-                      borderRadius: 9,
-                      background: "#f5f5f5",
-                      color: "rgba(0,0,0,.5)",
-                      border: "1px solid #e8e8e8",
+                      display: "grid",
+                      gridTemplateColumns: "190px 1fr",
+                      padding: "9px 14px",
+                      background: "#fafafa",
+                      borderBottom: "1px solid #f0f0f0",
+                      fontSize: 12,
+                      color: "rgba(0,0,0,.55)",
                     }}
                   >
-                    自动识别 {pfDetected.length}
-                  </span>
-                </div>
-                {pfDetected.length > 0 ? (
-                  <div style={{ border: "1px solid #f0f0f0", borderRadius: 8, overflow: "hidden" }}>
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "190px 1fr",
-                        padding: "9px 14px",
-                        background: "#fafafa",
-                        borderBottom: "1px solid #f0f0f0",
-                        fontSize: 12,
-                        color: "rgba(0,0,0,.55)",
-                      }}
-                    >
-                      <div>变量</div>
-                      <div>示例值 · 用于预览</div>
-                    </div>
-                    {pfDetected.map(v => (
+                    <div>变量</div>
+                    <div>示例值 · 用于预览</div>
+                  </div>
+                  {pfDetected.map(v => {
+                    const varKey = `{${v}}`; // 显示用带花括号
+                    const placeholder = VAR_PH[varKey] || "示例值";
+                    return (
                       <div
                         key={v}
                         style={{
@@ -613,441 +712,292 @@ export default function PromptsPage() {
                           gap: 10,
                         }}
                       >
-                        <div style={{ ...mono, fontSize: 12.5, color: "#1677ff" }}>{v}</div>
-                        <input
+                        <div style={{ ...mono, fontSize: 12.5, color: "#1677ff" }}>{varKey}</div>
+                        <Input
+                          size="small"
                           value={pf.varExamples[v] || ""}
                           onChange={e =>
                             patchPf({
                               varExamples: { ...pf.varExamples, [v]: e.target.value },
                             })
                           }
-                          placeholder={VAR_PH[v] || "示例值"}
-                          style={{
-                            height: 30,
-                            padding: "0 10px",
-                            border: "1px solid #e8e8e8",
-                            borderRadius: 5,
-                            fontSize: 12.5,
-                            outline: "none",
-                          }}
+                          placeholder={placeholder}
                         />
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div
-                    style={{
-                      border: "1px dashed #e8e8e8",
-                      borderRadius: 8,
-                      padding: 14,
-                      textAlign: "center",
-                      fontSize: 12,
-                      color: "rgba(0,0,0,.35)",
-                    }}
-                  >
-                    暂未检测到变量，在内容里用 {`{变量名}`} 语法插入即可自动识别
-                  </div>
-                )}
-              </div>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>预览</div>
-                  <div style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>已用示例值填充变量</div>
+                    );
+                  })}
                 </div>
+              ) : (
                 <div
                   style={{
-                    border: "1px solid #f0f0f0",
+                    border: "1px dashed #e8e8e8",
                     borderRadius: 8,
-                    background: "#fafafa",
-                    padding: "12px 14px",
-                    ...mono,
-                    fontSize: 12.5,
-                    lineHeight: 1.9,
-                    color: "rgba(0,0,0,.8)",
-                    whiteSpace: "pre-wrap",
-                    maxHeight: 200,
-                    overflowY: "auto",
+                    padding: 14,
+                    textAlign: "center",
+                    fontSize: 12,
+                    color: "rgba(0,0,0,.35)",
                   }}
                 >
-                  {pfPreview}
+                  暂未检测到变量，在内容里用 {`{变量名}`} 语法插入即可自动识别
                 </div>
-              </div>
+              )}
+            </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>
-                  版本说明 <span style={{ color: "rgba(0,0,0,.4)" }}>记录本次修改，便于回溯</span>
-                </div>
-                <input
-                  value={pf.note}
-                  onChange={e => patchPf({ note: e.target.value })}
-                  placeholder="如：补充引用标注要求，扩展兜底话术"
-                  style={{ ...inputStyle, height: 36, fontSize: 13 }}
-                />
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>预览</div>
+                <div style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>已用示例值填充变量</div>
               </div>
-            </div>
-            <div style={drawerFooterSpace}>
-              <div>
-                {pfErr ? (
-                  <span style={{ fontSize: 13, color: "#ff4d4f" }}>{pfErr}</span>
-                ) : (
-                  <span style={{ fontSize: 13, color: "rgba(0,0,0,.45)" }}>{pf.updatedByLabel}</span>
-                )}
-              </div>
-              <div style={{ display: "flex", gap: 12 }}>
-                <div onClick={() => setDrawer(false)} style={btnGhost}>
-                  取消
-                </div>
-                <div
-                  onClick={() => void save()}
-                  style={{ ...btnPrimary, opacity: pfSaving ? 0.6 : 1, pointerEvents: pfSaving ? "none" : "auto" }}
-                >
-                  {pfSaving ? "保存中…" : pf.isNew ? "创建 Prompt" : "保存为新版本"}
-                </div>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-
-      {verPromptId && ver && (
-        <>
-          <div onClick={() => setVerPromptId(null)} style={overlay} />
-          <div style={drawerRight(760)}>
-            <div style={drawerHeader}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>版本管理</div>
-                <span style={{ fontSize: 13, color: "rgba(0,0,0,.55)" }}>{ver.prompt?.name ?? "—"}</span>
-                {ver.prompt && (
-                  <span
-                    style={{
-                      fontSize: 12,
-                      lineHeight: "20px",
-                      padding: "0 8px",
-                      borderRadius: 4,
-                      background: "#f5f5f5",
-                      color: "rgba(0,0,0,.55)",
-                      border: "1px solid #e8e8e8",
-                    }}
-                  >
-                    {NODE_LABEL[ver.prompt.node]}
-                  </span>
-                )}
-              </div>
-              <div onClick={() => setVerPromptId(null)} style={closeBtn}>
-                ×
-              </div>
-            </div>
-            <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
               <div
                 style={{
-                  width: 264,
-                  flex: "none",
-                  borderRight: "1px solid #f0f0f0",
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 8,
+                  background: "#fafafa",
+                  padding: "12px 14px",
+                  ...mono,
+                  fontSize: 12.5,
+                  lineHeight: 1.9,
+                  color: "rgba(0,0,0,.8)",
+                  whiteSpace: "pre-wrap",
+                  maxHeight: 200,
                   overflowY: "auto",
-                  padding: 14,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 10,
                 }}
               >
-                <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)", padding: "0 2px" }}>
-                  版本历史 · 点击对比
-                </div>
-                {verLoading ? (
-                  <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)", padding: 8 }}>加载中…</div>
-                ) : ver.versions.length === 0 ? (
-                  <div style={{ fontSize: 12, color: "rgba(0,0,0,.35)", padding: 8 }}>暂无版本</div>
-                ) : (
-                  ver.versions.map(v => {
-                    const st = STV[v.status];
-                    const selected = (ver.selVersion?.id ?? null) === v.id;
-                    const isProd = v.status === "prod";
-                    const actionLabel = !isProd
-                      ? v.status === "draft"
-                        ? "发布上线"
-                        : "回滚到此版本"
-                      : null;
-                    return (
+                {pfPreview}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>
+                版本说明 <span style={{ color: "rgba(0,0,0,.4)" }}>记录本次修改，便于回溯</span>
+              </div>
+              <Input
+                value={pf.note}
+                onChange={e => patchPf({ note: e.target.value })}
+                placeholder="如：补充引用标注要求，扩展兜底话术"
+              />
+            </div>
+          </div>
+        )}
+      </Drawer>
+
+      {/* 版本管理抽屉 */}
+      <Drawer
+        open={verPromptId !== null}
+        onClose={() => setVerPromptId(null)}
+        size={760}
+        title={
+          <Space>
+            <span>版本管理</span>
+            <span style={{ fontSize: 13, color: "rgba(0,0,0,.55)" }}>{ver?.prompt?.name ?? "—"}</span>
+            {ver?.prompt && <Tag color={NODE_TAG_COLOR[ver.prompt.node]}>{NODE_LABEL[ver.prompt.node]}</Tag>}
+          </Space>
+        }
+        styles={{ body: { padding: 0 } }}
+      >
+        {ver && (
+          <div style={{ display: "flex", minHeight: "100%" }}>
+            <div
+              style={{
+                width: 264,
+                flex: "none",
+                borderRight: "1px solid #f0f0f0",
+                overflowY: "auto",
+                padding: 14,
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)", padding: "0 2px" }}>
+                版本历史 · 点击对比
+              </div>
+              {verLoading ? (
+                <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)", padding: 8 }}>加载中…</div>
+              ) : ver.versions.length === 0 ? (
+                <div style={{ fontSize: 12, color: "rgba(0,0,0,.35)", padding: 8 }}>暂无版本</div>
+              ) : (
+                ver.versions.map(v => {
+                  const st = STV[v.status];
+                  const selected = (ver.selVersion?.id ?? null) === v.id;
+                  return (
+                    <div
+                      key={v.id}
+                      onClick={() => setPvSelVer(v.id)}
+                      style={{
+                        border: `1px solid ${selected ? "#1677ff" : "#f0f0f0"}`,
+                        background: selected ? "#e6f4ff" : "#fff",
+                        borderRadius: 8,
+                        padding: "10px 12px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, ...mono }}>{verLabel(v.version)}</span>
+                        <span
+                          style={{
+                            fontSize: 11,
+                            lineHeight: "18px",
+                            padding: "0 7px",
+                            borderRadius: 9,
+                            background: st.bg,
+                            color: st.c,
+                            border: `1px solid ${st.bd}`,
+                          }}
+                        >
+                          {STATUS_LABEL[v.status]}
+                        </span>
+                      </div>
                       <div
-                        key={v.id}
-                        onClick={() => setPvSelVer(v.id)}
+                        style={{ fontSize: 12, color: "rgba(0,0,0,.6)", lineHeight: 1.5, marginBottom: 5 }}
+                      >
+                        {v.note || "（无说明）"}
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(0,0,0,.35)" }}>
+                        {v.author} · {formatDateTime(v.createdAt)}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+              <Tabs
+                activeKey={pvTab}
+                onChange={k => setPvTab(k as "diff" | "bind")}
+                style={{ padding: "0 20px" }}
+                items={[
+                  { key: "diff", label: "版本 Diff" },
+                  { key: "bind", label: "绑定 Agent" },
+                ]}
+              />
+              {verErr && (
+                <div style={{ padding: "8px 20px 0", fontSize: 12, color: "#ff4d4f" }}>{verErr}</div>
+              )}
+              <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px", minHeight: 0 }}>
+                {pvTab === "diff" ? (
+                  <>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        marginBottom: 12,
+                        fontSize: 13,
+                      }}
+                    >
+                      <span style={{ color: "rgba(0,0,0,.55)" }}>对比</span>
+                      <span style={{ ...mono, fontWeight: 600 }}>{ver.diffFrom}</span>
+                      <span style={{ color: "rgba(0,0,0,.35)" }}>（生产）→</span>
+                      <span style={{ ...mono, fontWeight: 600, color: "#1677ff" }}>{ver.diffTo}</span>
+                      <div style={{ flex: 1 }} />
+                      <span style={{ fontSize: 12, color: "#52c41a" }}>+{ver.adds}</span>
+                      <span style={{ fontSize: 12, color: "#ff4d4f" }}>−{ver.dels}</span>
+                    </div>
+                    {ver.sameVer ? (
+                      <div style={{ padding: 40, textAlign: "center", color: "rgba(0,0,0,.35)", fontSize: 13 }}>
+                        选中的是当前生产版本，请在左侧选择其他版本进行对比。
+                      </div>
+                    ) : ver.selVersion == null ? (
+                      <div style={{ padding: 40, textAlign: "center", color: "rgba(0,0,0,.35)", fontSize: 13 }}>
+                        暂无版本可对比。
+                      </div>
+                    ) : (
+                      <div
                         style={{
-                          border: `1px solid ${selected ? "#1677ff" : "#f0f0f0"}`,
-                          background: selected ? "#e6f4ff" : "#fff",
+                          border: "1px solid #f0f0f0",
                           borderRadius: 8,
-                          padding: "10px 12px",
-                          cursor: "pointer",
+                          overflow: "hidden",
+                          ...mono,
+                          fontSize: 12.5,
+                          lineHeight: 1.9,
                         }}
                       >
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-                          <span style={{ fontSize: 13, fontWeight: 600, ...mono }}>{verLabel(v.version)}</span>
-                          <span
-                            style={{
-                              fontSize: 11,
-                              lineHeight: "18px",
-                              padding: "0 7px",
-                              borderRadius: 9,
-                              background: st.bg,
-                              color: st.c,
-                              border: `1px solid ${st.bd}`,
-                            }}
-                          >
-                            {STATUS_LABEL[v.status]}
-                          </span>
-                        </div>
-                        <div
-                          style={{ fontSize: 12, color: "rgba(0,0,0,.6)", lineHeight: 1.5, marginBottom: 5 }}
-                        >
-                          {v.note || "（无说明）"}
-                        </div>
-                        <div style={{ fontSize: 11, color: "rgba(0,0,0,.35)" }}>
-                          {v.author} · {formatDateTime(v.createdAt)}
-                        </div>
-                        {actionLabel && (
-                          <div
-                            onClick={e => {
-                              e.stopPropagation();
-                              void actOnVersion(v);
-                            }}
-                            style={{
-                              fontSize: 12,
-                              color: "#1677ff",
-                              cursor: "pointer",
-                              fontWeight: 500,
-                              marginTop: 8,
-                            }}
-                          >
-                            {actionLabel}
+                        {ver.diff.map((d, i) => (
+                          <div key={i} style={{ display: "flex", background: d.bg }}>
+                            <span
+                              style={{
+                                flex: "none",
+                                width: 22,
+                                textAlign: "center",
+                                color: d.signC,
+                                userSelect: "none",
+                              }}
+                            >
+                              {d.sign}
+                            </span>
+                            <span
+                              style={{
+                                flex: 1,
+                                whiteSpace: "pre-wrap",
+                                color: d.color,
+                                paddingRight: 12,
+                              }}
+                            >
+                              {d.text}
+                            </span>
                           </div>
-                        )}
+                        ))}
                       </div>
-                    );
-                  })
-                )}
-              </div>
-
-              <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ display: "flex", gap: 4, padding: "16px 20px 0" }}>
-                  <div onClick={() => setPvTab("diff")} style={tabStyle(pvTab === "diff")}>
-                    版本 Diff
-                  </div>
-                  <div onClick={() => setPvTab("bind")} style={tabStyle(pvTab === "bind")}>
-                    绑定 Agent
-                  </div>
-                </div>
-                {verErr && (
-                  <div style={{ padding: "8px 20px 0", fontSize: 12, color: "#ff4d4f" }}>{verErr}</div>
-                )}
-                <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px", minHeight: 0 }}>
-                  {pvTab === "diff" ? (
-                    <>
+                    )}
+                    {ver.canPublishSel && ver.selVersion && (
                       <div
                         style={{
                           display: "flex",
                           alignItems: "center",
-                          gap: 10,
-                          marginBottom: 12,
-                          fontSize: 13,
+                          justifyContent: "space-between",
+                          gap: 12,
+                          marginTop: 16,
+                          borderTop: "1px solid #f0f0f0",
+                          paddingTop: 16,
                         }}
                       >
-                        <span style={{ color: "rgba(0,0,0,.55)" }}>对比</span>
-                        <span style={{ ...mono, fontWeight: 600 }}>{ver.diffFrom}</span>
-                        <span style={{ color: "rgba(0,0,0,.35)" }}>（生产）→</span>
-                        <span style={{ ...mono, fontWeight: 600, color: "#1677ff" }}>{ver.diffTo}</span>
-                        <div style={{ flex: 1 }} />
-                        <span style={{ fontSize: 12, color: "#52c41a" }}>+{ver.adds}</span>
-                        <span style={{ fontSize: 12, color: "#ff4d4f" }}>−{ver.dels}</span>
+                        <div style={{ fontSize: 12, color: "rgba(0,0,0,.5)", lineHeight: 1.6 }}>
+                          {ver.selVersion.status === "draft"
+                            ? "发布后原生产版本将自动归档，可随时回滚。"
+                            : "回滚后原生产版本将自动归档，可再次回滚。"}
+                        </div>
+                        <Popconfirm
+                          title={
+                            ver.selVersion.status === "draft"
+                              ? `确认发布 ${verLabel(ver.selVersion.version)} 为生产版本？`
+                              : `确认回滚到 ${verLabel(ver.selVersion.version)}？`
+                          }
+                          description="原生产版本将自动归档。"
+                          okText="确认"
+                          cancelText="取消"
+                          onConfirm={() => void actOnVersion(ver.selVersion!)}
+                        >
+                          <Button type="primary">{ver.publishSelLabel}</Button>
+                        </Popconfirm>
                       </div>
-                      {ver.sameVer ? (
-                        <div
-                          style={{
-                            padding: 40,
-                            textAlign: "center",
-                            color: "rgba(0,0,0,.35)",
-                            fontSize: 13,
-                          }}
-                        >
-                          选中的是当前生产版本，请在左侧选择其他版本进行对比。
-                        </div>
-                      ) : ver.selVersion == null ? (
-                        <div
-                          style={{
-                            padding: 40,
-                            textAlign: "center",
-                            color: "rgba(0,0,0,.35)",
-                            fontSize: 13,
-                          }}
-                        >
-                          暂无版本可对比。
-                        </div>
-                      ) : (
-                        <div
-                          style={{
-                            border: "1px solid #f0f0f0",
-                            borderRadius: 8,
-                            overflow: "hidden",
-                            ...mono,
-                            fontSize: 12.5,
-                            lineHeight: 1.9,
-                          }}
-                        >
-                          {ver.diff.map((d, i) => (
-                            <div key={i} style={{ display: "flex", background: d.bg }}>
-                              <span
-                                style={{
-                                  flex: "none",
-                                  width: 22,
-                                  textAlign: "center",
-                                  color: d.signC,
-                                  userSelect: "none",
-                                }}
-                              >
-                                {d.sign}
-                              </span>
-                              <span
-                                style={{
-                                  flex: 1,
-                                  whiteSpace: "pre-wrap",
-                                  color: d.color,
-                                  paddingRight: 12,
-                                }}
-                              >
-                                {d.text}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {ver.canPublishSel && (
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: 12,
-                            marginTop: 16,
-                            borderTop: "1px solid #f0f0f0",
-                            paddingTop: 16,
-                          }}
-                        >
-                          <div style={{ fontSize: 12, color: "rgba(0,0,0,.5)", lineHeight: 1.6 }}>
-                            确认变更后可直接发布上线，原生产版本将自动归档，可随时回滚。
-                          </div>
-                          <div
-                            onClick={() => {
-                              if (ver.selVersion) void actOnVersion(ver.selVersion);
-                            }}
-                            style={{ ...btnPrimary, height: 34 }}
-                          >
-                            {ver.publishSelLabel}
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <div
-                        style={{
-                          fontSize: 13,
-                          color: "rgba(0,0,0,.6)",
-                          lineHeight: 1.7,
-                          marginBottom: 16,
-                        }}
-                      >
-                        以下 Agent 版本绑定了该 Prompt。发布新版本前请确认对这些 Agent 的影响。
-                      </div>
-                      <div
-                        style={{
-                          padding: 40,
-                          textAlign: "center",
-                          color: "rgba(0,0,0,.35)",
-                          fontSize: 13,
-                          border: "1px dashed #e8e8e8",
-                          borderRadius: 8,
-                        }}
-                      >
-                        M7 Agent 管理接入后展示绑定关系
-                      </div>
-                    </>
-                  )}
-                </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 13, color: "rgba(0,0,0,.6)", lineHeight: 1.7, marginBottom: 16 }}>
+                      以下 Agent 版本绑定了该 Prompt。发布新版本前请确认对这些 Agent 的影响。
+                    </div>
+                    <div
+                      style={{
+                        padding: 40,
+                        textAlign: "center",
+                        color: "rgba(0,0,0,.35)",
+                        fontSize: 13,
+                        border: "1px dashed #e8e8e8",
+                        borderRadius: 8,
+                      }}
+                    >
+                      M7 Agent 管理接入后展示绑定关系
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </div>
-        </>
-      )}
+        )}
+      </Drawer>
     </div>
   );
-}
-
-function drawerRight(width: number): CSSProperties {
-  return {
-    position: "fixed",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    width,
-    background: "#fff",
-    zIndex: 51,
-    display: "flex",
-    flexDirection: "column",
-    boxShadow: "-4px 0 16px rgba(0,0,0,.12)",
-  };
-}
-
-const drawerHeader: CSSProperties = {
-  height: 56,
-  flex: "none",
-  borderBottom: "1px solid #f0f0f0",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  padding: "0 24px",
-};
-
-const drawerBody: CSSProperties = {
-  flex: 1,
-  overflowY: "auto",
-  padding: 24,
-  minHeight: 0,
-  display: "flex",
-  flexDirection: "column",
-  gap: 20,
-};
-
-const drawerFooterSpace: CSSProperties = {
-  flex: "none",
-  borderTop: "1px solid #f0f0f0",
-  padding: "14px 24px",
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-};
-
-const closeBtn: CSSProperties = {
-  fontSize: 18,
-  color: "rgba(0,0,0,.45)",
-  cursor: "pointer",
-  width: 28,
-  height: 28,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  borderRadius: 4,
-};
-
-function tabStyle(on: boolean): CSSProperties {
-  return {
-    height: 32,
-    padding: "0 14px",
-    borderRadius: 6,
-    fontSize: 13,
-    cursor: "pointer",
-    userSelect: "none",
-    background: on ? "#1677ff" : "#f5f5f5",
-    color: on ? "#fff" : "rgba(0,0,0,.65)",
-    display: "flex",
-    alignItems: "center",
-  };
 }

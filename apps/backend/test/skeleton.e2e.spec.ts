@@ -15,6 +15,7 @@ import {
   KnowledgeBaseSchema,
   MessageSchema,
   ModelProviderSchema,
+  type PromptListQuery,
   PromptSchema,
   PromptVersionSchema,
   RetrievalTestResponseSchema,
@@ -29,6 +30,7 @@ import { KnowledgeBasesModule } from "../src/modules/knowledge-bases/knowledge-b
 import { ModelsModule } from "../src/modules/models/models.module";
 import { PromptsModule } from "../src/modules/prompts/prompts.module";
 import { PromptsRepository } from "../src/modules/prompts/prompts.repository";
+import type { PromptListResult, PromptListRow } from "../src/modules/prompts/prompts.repository";
 import type { NewPrompt, NewPromptVersion, PromptRow, PromptVersionRow } from "../src/modules/prompts/schema";
 import { RetrievalModule } from "../src/modules/retrieval/retrieval.module";
 import { JwtAuthGuard } from "../src/modules/auth/jwt-auth.guard";
@@ -56,10 +58,34 @@ const validCreateAgent = {
 // M6 PromptsRepository 内存实现（DB-free，对齐 skeleton.e2e 现状）
 const inMemoryPrompts: PromptRow[] = [];
 const inMemoryVersions: PromptVersionRow[] = [];
+// 方案 A：findPrompts/findPromptById 返回带聚合的行（currentVersionNumber + versionCount）
+const toListRow = (p: PromptRow): PromptListRow => {
+  const versions = inMemoryVersions.filter((v) => v.promptId === p.id);
+  const current = p.currentVersionId
+    ? versions.find((v) => v.id === p.currentVersionId)?.version ?? null
+    : null;
+  return { ...p, currentVersionNumber: current, versionCount: versions.length };
+};
 const inMemoryPromptsRepo = {
-  findPrompts: async (): Promise<PromptRow[]> => inMemoryPrompts,
-  findPromptById: async (id: string): Promise<PromptRow | undefined> =>
-    inMemoryPrompts.find((p) => p.id === id),
+  findPrompts: async (q: PromptListQuery): Promise<PromptListResult> => {
+    let list = inMemoryPrompts.map(toListRow);
+    if (q.search) {
+      const like = q.search.toLowerCase();
+      list = list.filter(
+        (r) => r.name.toLowerCase().includes(like) || r.updatedBy.toLowerCase().includes(like),
+      );
+    }
+    if (q.node) list = list.filter((r) => r.node === q.node);
+    if (q.status === "prod") list = list.filter((r) => r.currentVersionId !== null);
+    if (q.status === "draft") list = list.filter((r) => r.currentVersionId === null);
+    const total = list.length;
+    const start = (q.page - 1) * q.pageSize;
+    return { items: list.slice(start, start + q.pageSize), total };
+  },
+  findPromptById: async (id: string): Promise<PromptListRow | undefined> => {
+    const p = inMemoryPrompts.find((x) => x.id === id);
+    return p ? toListRow(p) : undefined;
+  },
   insertPrompt: async (row: NewPrompt): Promise<PromptRow> => {
     const r: PromptRow = {
       id: `p${inMemoryPrompts.length + 1}`,
@@ -111,6 +137,13 @@ const inMemoryPromptsRepo = {
     p.updatedBy = actorEmail;
     p.updatedAt = new Date();
     return v;
+  },
+  deletePrompt: async (id: string): Promise<void> => {
+    const idx = inMemoryPrompts.findIndex((x) => x.id === id);
+    if (idx >= 0) inMemoryPrompts.splice(idx, 1);
+    for (let i = inMemoryVersions.length - 1; i >= 0; i--) {
+      if (inMemoryVersions[i].promptId === id) inMemoryVersions.splice(i, 1);
+    }
   },
 };
 
@@ -315,7 +348,7 @@ describe("M2 domain skeleton", () => {
     let v1Id: string;
     let v2Id: string;
 
-    it("POST /api/prompts → 201 + currentVersionId:null + updatedBy=JWT email", async () => {
+    it("POST /api/prompts → 201 + currentVersionId:null + currentVersionNumber:null + versionCount:1 + updatedBy=JWT email", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/prompts")
         .set(auth())
@@ -323,6 +356,8 @@ describe("M2 domain skeleton", () => {
         .expect(201);
       expect(() => PromptSchema.parse(res.body)).not.toThrow();
       expect(res.body.currentVersionId).toBeNull();
+      expect(res.body.currentVersionNumber).toBeNull();
+      expect(res.body.versionCount).toBe(1);
       expect(res.body.updatedBy).toBe(PRINCIPAL.email);
       expect(res.body.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       promptId = res.body.id;
@@ -345,7 +380,7 @@ describe("M2 domain skeleton", () => {
       v1Id = v1.id;
     });
 
-    it("POST publish v1 → 200 + v1 prod + currentVersionId 指向 v1", async () => {
+    it("POST publish v1 → 200 + v1 prod + currentVersionId 指向 v1 + currentVersionNumber:1", async () => {
       const res = await request(app.getHttpServer())
         .post(`/api/prompts/${promptId}/versions/${v1Id}/publish`)
         .set(auth())
@@ -356,6 +391,8 @@ describe("M2 domain skeleton", () => {
         .set(auth())
         .expect(200);
       expect(p.body.currentVersionId).toBe(v1Id);
+      expect(p.body.currentVersionNumber).toBe(1);
+      expect(p.body.versionCount).toBe(1);
     });
 
     it("POST publish v1（已 prod）→ 409（D15）", async () => {
@@ -395,6 +432,8 @@ describe("M2 domain skeleton", () => {
         .set(auth())
         .expect(200);
       expect(p.body.currentVersionId).toBe(v2Id);
+      expect(p.body.currentVersionNumber).toBe(2);
+      expect(p.body.versionCount).toBe(2);
       expect(p.body.updatedBy).toBe(PRINCIPAL.email);
     });
 
@@ -429,6 +468,58 @@ describe("M2 domain skeleton", () => {
         .expect(201);
       expect(res.body.author).toBe(PRINCIPAL.email);
       expect(res.body.author).not.toBe("forged@evil.com");
+    });
+
+    it("GET /api/prompts → 200 { items, total, page, pageSize }（分页响应）", async () => {
+      const res = await request(app.getHttpServer()).get("/api/prompts").set(auth()).expect(200);
+      expect(res.body).toHaveProperty("items");
+      expect(res.body).toHaveProperty("total");
+      expect(res.body).toHaveProperty("page", 1);
+      expect(res.body).toHaveProperty("pageSize", 10);
+      expect(Array.isArray(res.body.items)).toBe(true);
+      for (const p of res.body.items) expect(() => PromptSchema.parse(p)).not.toThrow();
+    });
+
+    it("GET /api/prompts?node=rewrite&status=prod&page=1&pageSize=5 → 条件筛选 + 分页", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/prompts?node=rewrite&status=prod&page=1&pageSize=5")
+        .set(auth())
+        .expect(200);
+      expect(res.body.pageSize).toBe(5);
+      for (const p of res.body.items) {
+        expect(p.node).toBe("rewrite");
+        expect(p.currentVersionId).not.toBeNull();
+      }
+    });
+
+    it("DELETE /api/prompts/:id 草稿 → 204 + 级联；已启用 → 409；不存在 → 404", async () => {
+      // 新建一个草稿 prompt（currentVersionId:null）
+      const created = await request(app.getHttpServer())
+        .post("/api/prompts")
+        .set(auth())
+        .send({ name: "待删除草稿", node: "reply", body: "临时 {q}" })
+        .expect(201);
+      const draftId: string = created.body.id;
+      // 草稿可删 → 204
+      await request(app.getHttpServer())
+        .delete(`/api/prompts/${draftId}`)
+        .set(auth())
+        .expect(204);
+      // 删除后再 GET → 404
+      await request(app.getHttpServer())
+        .get(`/api/prompts/${draftId}`)
+        .set(auth())
+        .expect(404);
+      // 已启用（块前 publish/rollback 过的 promptId）→ 409
+      await request(app.getHttpServer())
+        .delete(`/api/prompts/${promptId}`)
+        .set(auth())
+        .expect(409);
+      // 不存在 → 404
+      await request(app.getHttpServer())
+        .delete("/api/prompts/nonexistent-id")
+        .set(auth())
+        .expect(404);
     });
   });
 
