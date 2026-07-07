@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import type { ModelProvider, ModelType, TestModelResponse } from "@codecrush/contracts";
+import type { ModelProtocol, ModelProvider, ModelType, TestModelResponse } from "@codecrush/contracts";
 import {
   createModel,
   deleteModel,
@@ -8,12 +8,20 @@ import {
   testModelConfig,
   updateModel,
 } from "../../api/client";
-import { MODEL_TABS, MODEL_TYPES, TYPE_LABEL, type ModelDraft } from "../../mocks/models";
+import {
+  MODEL_TABS,
+  MODEL_TYPES,
+  PROTOCOL_OPTIONS,
+  TYPE_LABEL,
+  defaultParams,
+  protocolLabel,
+  type ModelDraft,
+} from "../../mocks/models";
 import { tagOf } from "../../mocks/agents";
 
-/** 模型调用管理：Tab + 列表 + 启用开关 + 接入/编辑抽屉（M3 接真实 /api/models）。 */
+/** 模型调用管理：Tab + 列表 + 启用开关 + 接入/编辑抽屉（协议格式为路由键，对齐新原型）。 */
 
-const COLS = "200px 110px 110px 1fr 90px 160px";
+const COLS = "200px 100px 130px 1fr 80px 160px";
 
 const btnPrimary: CSSProperties = {
   height: 32,
@@ -136,12 +144,12 @@ export default function ModelsPage() {
   const [open, setOpen] = useState(false);
   const [mf, setMf] = useState<ModelDraft>({
     type: "llm",
-    provider: MODEL_TYPES.llm.provs[0],
+    protocol: PROTOCOL_OPTIONS.llm[0].protocol,
     name: "",
-    baseUrl: MODEL_TYPES.llm.base,
+    baseUrl: PROTOCOL_OPTIONS.llm[0].base,
     apiKey: "",
+    params: defaultParams("llm"),
   });
-  const [editingMasked, setEditingMasked] = useState("");
   const [mfErr, setMfErr] = useState("");
   const [saving, setSaving] = useState(false);
   const [testState, setTestState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
@@ -211,9 +219,15 @@ export default function ModelsPage() {
   };
 
   const openCreate = () => {
-    const d = MODEL_TYPES.llm;
-    setMf({ type: "llm", provider: d.provs[0], name: "", baseUrl: d.base, apiKey: "" });
-    setEditingMasked("");
+    const p = PROTOCOL_OPTIONS.llm[0];
+    setMf({
+      type: "llm",
+      protocol: p.protocol,
+      name: "",
+      baseUrl: p.base,
+      apiKey: "",
+      params: defaultParams("llm"),
+    });
     resetDrawerState();
     setOpen(true);
   };
@@ -222,12 +236,12 @@ export default function ModelsPage() {
     setMf({
       id: r.id,
       type: r.type,
-      provider: r.provider,
+      protocol: r.protocol,
       name: r.name,
       baseUrl: r.baseUrl,
-      apiKey: "",
+      apiKey: "", // key 只写不回显：编辑永远空占位
+      params: { ...defaultParams(r.type), ...r.params },
     });
-    setEditingMasked(r.apiKeyMasked);
     resetDrawerState();
     setOpen(true);
   };
@@ -238,9 +252,24 @@ export default function ModelsPage() {
     setTestState("idle");
   };
 
+  // 类型是第一决策点：切换后协议候选、默认 Base、参数区全部联动刷新
   const pickType = (ty: ModelType) => {
-    const d = MODEL_TYPES[ty];
-    setMf(prev => ({ ...prev, type: ty, provider: d.provs[0], baseUrl: d.base }));
+    const p = PROTOCOL_OPTIONS[ty][0];
+    setMf(prev => ({
+      ...prev,
+      type: ty,
+      protocol: p.protocol,
+      baseUrl: p.base,
+      params: defaultParams(ty),
+    }));
+    resetDrawerState();
+  };
+
+  // 选中协议：Base URL 自动填该协议默认值
+  const pickProtocol = (proto: ModelProtocol) => {
+    const opt = PROTOCOL_OPTIONS[mf.type].find(o => o.protocol === proto);
+    if (!opt) return;
+    setMf(prev => ({ ...prev, protocol: proto, baseUrl: opt.base }));
     resetDrawerState();
   };
 
@@ -262,10 +291,11 @@ export default function ModelsPage() {
           ? await testModel(mf.id)
           : await testModelConfig({
               type: mf.type,
-              provider: mf.provider,
+              protocol: mf.protocol,
               name: mf.name.trim(),
               baseUrl: mf.baseUrl.trim(),
               apiKey: mf.apiKey,
+              params: mf.params,
             });
       setTestState(res.ok ? "ok" : "fail");
       if (!res.ok) setTestErr(res.error ?? "连接失败");
@@ -289,18 +319,20 @@ export default function ModelsPage() {
       if (mf.id) {
         await updateModel(mf.id, {
           type: mf.type,
-          provider: mf.provider,
+          protocol: mf.protocol,
           name: mf.name.trim(),
           baseUrl: mf.baseUrl.trim(),
+          params: mf.params,
           ...(mf.apiKey.trim() ? { apiKey: mf.apiKey } : {}),
         });
       } else {
         await createModel({
           type: mf.type,
-          provider: mf.provider,
+          protocol: mf.protocol,
           name: mf.name.trim(),
           baseUrl: mf.baseUrl.trim(),
           apiKey: mf.apiKey,
+          params: mf.params,
           enabled: true,
         });
       }
@@ -403,7 +435,7 @@ export default function ModelsPage() {
         >
           <div>模型名称</div>
           <div>类型</div>
-          <div>提供商</div>
+          <div>协议格式</div>
           <div>用途</div>
           <div>启用</div>
           <div>操作</div>
@@ -442,7 +474,6 @@ export default function ModelsPage() {
                   }}
                 >
                   {r.name}
-                  <div style={{ color: "rgba(0,0,0,.35)", fontWeight: 400 }}>{r.apiKeyMasked}</div>
                 </div>
                 <div>
                   <span
@@ -459,7 +490,9 @@ export default function ModelsPage() {
                     {TYPE_LABEL[r.type]}
                   </span>
                 </div>
-                <div style={{ color: "rgba(0,0,0,.65)" }}>{r.provider}</div>
+                <div style={{ color: "rgba(0,0,0,.65)", fontSize: 12 }}>
+                  {protocolLabel(r.type, r.protocol)}
+                </div>
                 <div style={{ color: "rgba(0,0,0,.55)" }}>{MODEL_TYPES[r.type].hint}</div>
                 <div>
                   <div
@@ -576,14 +609,14 @@ export default function ModelsPage() {
                 </div>
               </Field>
 
-              <Field label="提供商">
+              <Field label="协议格式">
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {mtDef.provs.map(p => {
-                    const on = mf.provider === p;
+                  {PROTOCOL_OPTIONS[mf.type].map(p => {
+                    const on = mf.protocol === p.protocol;
                     return (
                       <div
-                        key={p}
-                        onClick={() => set({ provider: p })}
+                        key={p.protocol}
+                        onClick={() => pickProtocol(p.protocol)}
                         style={{
                           height: 32,
                           padding: "0 14px",
@@ -597,10 +630,13 @@ export default function ModelsPage() {
                           userSelect: "none",
                         }}
                       >
-                        {p}
+                        {p.label}
                       </div>
                     );
                   })}
+                </div>
+                <div style={{ fontSize: 12, color: "rgba(0,0,0,.4)", lineHeight: 1.6 }}>
+                  {PROTOCOL_OPTIONS[mf.type].find(o => o.protocol === mf.protocol)?.note}
                 </div>
               </Field>
 
@@ -625,7 +661,7 @@ export default function ModelsPage() {
                   type="password"
                   value={mf.apiKey}
                   onChange={e => set({ apiKey: e.target.value })}
-                  placeholder={mf.id ? `不修改则留空（当前 ${editingMasked}）` : "sk-••••••••••••"}
+                  placeholder={mf.id ? "不修改则留空" : "sk-••••••••••••"}
                   style={inputStyle}
                 />
               </Field>
@@ -638,21 +674,13 @@ export default function ModelsPage() {
                       style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}
                     >
                       <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>{p.k}</div>
-                      <div
-                        style={{
-                          height: 34,
-                          padding: "0 12px",
-                          border: "1px solid #f0f0f0",
-                          borderRadius: 6,
-                          background: "#fafafa",
-                          display: "flex",
-                          alignItems: "center",
-                          fontSize: 13,
-                          color: "rgba(0,0,0,.75)",
-                        }}
-                      >
-                        {p.v}
-                      </div>
+                      <input
+                        value={mf.params[p.k] ?? p.def}
+                        onChange={e =>
+                          set({ params: { ...mf.params, [p.k]: e.target.value } })
+                        }
+                        style={{ ...inputStyle, height: 34, fontSize: 13 }}
+                      />
                     </div>
                   ))}
                 </div>

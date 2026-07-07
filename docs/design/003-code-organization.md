@@ -98,7 +98,9 @@ rag-service/
 
 ### 端口 / 适配器落位
 
-端口(interface)归"需要它的域模块"所有:`models` 拥有 `ModelProviderPort`、`retrieval` 拥有 `RetrieverPort`、`platform/storage` 拥有 `BlobStore`。适配器实现之,经 **NestJS DI token → 实现** 注入(如 `OpenAiCompatProvider`/`PgVectorRetriever`/`LocalFsBlobStore`,日后 `OssBlobStore`)。**拿端口,不拿适配器**——保证本地自建 ↔ 阿里云托管零改动切换(呼应 001)。
+端口(interface)归"需要它的域模块"所有:`models` 拥有 `ModelProviderPort`、`retrieval` 拥有 `RetrieverPort`、`platform/storage` 拥有 `BlobStore`。适配器实现之,经 **NestJS DI token → 实现** 注入(如 `ProtocolDispatchAdapter`/`PgVectorRetriever`/`LocalFsBlobStore`,日后 `OssBlobStore`)。**拿端口,不拿适配器**——保证本地自建 ↔ 阿里云托管零改动切换(呼应 001)。
+
+**模型协议适配的内部组织**(001「协议格式为路由键」的落地):`ModelProviderPort` 始终只有**一个** DI 适配器 `ProtocolDispatchAdapter`(fetch/超时/latency/密钥擦除集中一处),请求构造与响应形状校验下沉为 `models/adapters/protocols/*.ts` **纯函数 builder**,按 `(type, protocol)` 查表分发;合法组合由 contracts 的 `PROTOCOLS_BY_TYPE` 单一事实源收口(前端候选渲染与后端校验共用)。新增协议 = 加一个 builder 文件 + 表项,不动端口与消费方。
 
 ### 模块依赖分层(代码/运行时 import 依赖，`A → B` = A 依赖 B)
 
