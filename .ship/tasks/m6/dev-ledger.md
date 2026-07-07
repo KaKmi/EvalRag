@@ -52,7 +52,7 @@
 - 级联红全修复：Story 3 的 tsc/e2e 红在 Story 4 清零。
 
 ### Story 5 — 前端接通（client + PromptsPage + mocks 清理）
-- Commit: `<TBD>` `feat(frontend): wire PromptsPage to real backend + shared prompt-template functions`
+- Commit: `25ba8e9` `feat(frontend): wire PromptsPage to real backend + shared prompt-template functions`
 - 改动：
   - `apps/frontend/src/api/client.ts`：加 `createPrompt` / `createPromptVersion` / `publishPromptVersion` / `rollbackPromptVersion` 四写函数（请求体无 author，D6 服务端从 JWT 填）。
   - `apps/frontend/src/mocks/prompts.ts`（重写）：删 mock 数据（PROMPT_ROWS/BODIES/V/VERS）+ 本地纯函数（detectVars/previewBody/lineDiff/bodyOf，迁 contracts）；保留 UI 常量 NODE_TAGS/NODE_META/VAR_PH/STV；`PromptNode`/`PromptVersionStatus` 改 `z.infer` 对齐契约英文 enum；加 `NODE_LABEL`（rewrite→问题改写…）/`STATUS_LABEL`（draft→草稿…）中文映射；删 `审批中/灰度中`（契约无）。
@@ -64,6 +64,21 @@
   - `actOnVersion` 统一 draft→publish / archived→rollback，版本列表项与 diff 底部按钮共用；从 useMemo 移出 `onPublishSel` 避免 exhaustive-deps 警告。
 - 验证：tsc 0 errors；frontend 17 tests passed（+1 M6）；lint 0；build OK（PromptsPage chunk 21.04 kB）。
 - 跨 story 回归：`pnpm test` 93 passed（backend 76 + frontend 17）+ `pnpm lint` 0 + `pnpm build` 5/5 successful。
+
+### Story 6 — 收尾验证 + seed + review
+- Commit: `<TBD>` `chore(m6): seed default prompts + document dc.html prototype + review pass`
+- 改动：
+  - `apps/backend/src/db/seed.ts`：扩展加 4 默认 Prompt（rewrite/intent/reply/fallback 各 v1 prod，D9 optional）；`onConflictDoNothing({target: prompts.name}).returning()` → 已存在跳过；新建则 insert v1 prod + update currentVersionId（保 demo 连续性，对齐 M2 mock 4 prod 版本）。
+  - `.gitignore`：加 `CodeCrushBot.dc.html`（前端 UI 原型 HTML，不进仓库/打包）。
+  - `AGENTS.md`：新增「原型参考（CodeCrushBot.dc.html）」节，说明作用 + 不进仓库/打包。
+  - `CLAUDE.md`：高频提醒加一条指向 AGENTS.md「原型参考」。
+  - `.ship/tasks/m6/review.md`（NEW）：轻量对抗收尾审，覆盖 `feat/m2-app-shell...HEAD` 全量 diff。
+- review 结论：1 P3（`createPrompt` 无事务，dev-ledger Story 3 已记 trade-off，非阻塞），无 P1/P2。AC 1-12 均有测试或代码覆盖。关键路径（publishVersion 事务/createVersion retry/D2 回滚/D6 author 不可伪造/D16 时间戳/共享纯逻辑双端锁/e2e 非假绿）审查无问题。
+- 决策：
+  - seed v1 设 `status:"prod"` + `currentVersionId`（非 draft）：保 demo 连续性，plan L753 选后者。
+  - dc.html 文档化进 AGENTS.md/CLAUDE.md + .gitignore，而非进仓库（256KB 非源码易变）。
+- 验证：backend tsc 0 + frontend tsc 0 + lint 0；seed 编译通过（未跑实际 seed，需 docker compose 起 postgres）。
+- 未做（deferred）：手动集成验收（docker compose + dev server 全链路 curl/浏览器）——需用户本地起依赖服务执行，AC 9 的 `pnpm test/lint/build` 已绿。
 
 ### 数据丢失与恢复（事故记录）
 - 另一 M3 开发窗口暂停时跑了一次 `git reset`（reflog `HEAD@{0}: reset: moving to HEAD`），把 Story 1 全部未提交工作（prompts.ts/index.ts/m2-schemas.test.ts 改动 + 新建 prompt-template.ts/test）连同 M3 WIP 一起冲掉，且未建 stash。

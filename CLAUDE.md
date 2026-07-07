@@ -42,3 +42,4 @@ Claude Code 专用指引。**先读 [`AGENTS.md`](AGENTS.md)**（环境、命令
 - 依赖服务要先 `docker compose -f infra/docker-compose.yml --profile infra up -d --wait`。
 - 可观测/追踪相关：遵 OTel GenAI 语义约定（`gen_ai.*` / 自定义 `rag.*`），SDK 通用（支持 chat/embeddings/tool/agent/retrieval，不绑 RAG）——细节见 `003` 的「通用 Telemetry SDK 与包边界」。
 - 用户对 OTLP/ClickHouse 细节不熟，涉及时讲清楚「为什么标准/可迁移」。
+- 前端页面还原参考仓库根 `CodeCrushBot.dc.html`（UI 原型 HTML，不进仓库见 `.gitignore`，不进打包）；M2 已据此还原 15 屏，后续页面继续参考。详见 [`AGENTS.md`](AGENTS.md)「原型参考」。
