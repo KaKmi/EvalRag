@@ -23,11 +23,16 @@ export const PROTOCOLS_BY_TYPE: Record<ModelType, readonly ModelProtocol[]> = {
   rerank: ["self_hosted", "cohere", "jina", "dashscope"],
 } as const;
 
+/** 组合合法性判定：后端 service 在 PATCH 单改 type/protocol 时结合存量行复用 */
+export function isValidProtocol(type: ModelType, protocol: ModelProtocol): boolean {
+  return PROTOCOLS_BY_TYPE[type].includes(protocol);
+}
+
 const validProtocolForType = (
   data: { type: ModelType; protocol?: ModelProtocol },
   ctx: z.RefinementCtx,
 ) => {
-  if (data.protocol && !PROTOCOLS_BY_TYPE[data.type].includes(data.protocol)) {
+  if (data.protocol && !isValidProtocol(data.type, data.protocol)) {
     ctx.addIssue({
       code: "custom",
       path: ["protocol"],
@@ -91,6 +96,18 @@ export const TestModelRequestSchema = CreateModelShape.omit({ enabled: true }).s
   validProtocolForType,
 );
 export type TestModelRequest = z.infer<typeof TestModelRequestSchema>;
+
+// 已存模型的测试 override（编辑抽屉改了配置但未换 key：服务端用存量 key + 抽屉当前配置测试）。
+// 不含 apiKey——key 永不下发/回传前端；合并后的 (type, protocol) 合法性由 service 校验。
+// 基于 ModelProviderSchema（无 default 字段）构造，规避 partial+default 注入问题。
+export const TestModelOverrideSchema = ModelProviderSchema.omit({
+  id: true,
+  apiKeyMasked: true,
+  enabled: true,
+})
+  .partial()
+  .default({}); // 无 body 的 POST /:id/test：undefined → {}（纯存量配置测试）
+export type TestModelOverride = z.infer<typeof TestModelOverrideSchema>;
 
 export const TestModelResponseSchema = z.object({
   ok: z.boolean(),

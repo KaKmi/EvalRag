@@ -1,12 +1,14 @@
-import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import type {
-  CreateModelRequest,
-  ModelProtocol,
-  ModelProvider,
-  ModelType,
-  TestModelRequest,
-  TestModelResponse,
-  UpdateModelRequest,
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  isValidProtocol,
+  type CreateModelRequest,
+  type ModelProtocol,
+  type ModelProvider,
+  type ModelType,
+  type TestModelOverride,
+  type TestModelRequest,
+  type TestModelResponse,
+  type UpdateModelRequest,
 } from "@codecrush/contracts";
 import { withSpan } from "@codecrush/otel";
 import { CODECRUSH_SPAN_KIND, GEN_AI, OTEL_OPERATIONS } from "@codecrush/otel-conventions";
@@ -51,7 +53,14 @@ export class ModelsService {
   }
 
   async update(id: string, req: UpdateModelRequest): Promise<ModelProvider> {
-    await this.mustFind(id);
+    const existing = await this.mustFind(id);
+    // PATCH 单改 type 或 protocol 时，契约层只能校验同现的组合——合并存量行后再校验，
+    // 防止落库非法 (type, protocol)（如 llm 行被 PATCH 成 protocol:dashscope）
+    const mergedType = (req.type ?? existing.type) as ModelType;
+    const mergedProtocol = (req.protocol ?? existing.protocol) as ModelProtocol;
+    if (!isValidProtocol(mergedType, mergedProtocol)) {
+      throw new BadRequestException(`protocol ${mergedProtocol} 不适用于类型 ${mergedType}`);
+    }
     const { apiKey, ...rest } = req;
     const patch: Partial<NewModelProvider> = { ...rest };
     if (apiKey) patch.apiKeyEnc = this.enc.encrypt(apiKey);
@@ -65,15 +74,21 @@ export class ModelsService {
     await this.repo.delete(id);
   }
 
-  async testById(id: string): Promise<TestModelResponse> {
+  // override：编辑抽屉改了配置但未填新 key 时，用抽屉当前配置 + 存量 key 测试（key 不下发前端）
+  async testById(id: string, override?: TestModelOverride): Promise<TestModelResponse> {
     const row = await this.mustFind(id);
+    const type = (override?.type ?? row.type) as ModelType;
+    const protocol = (override?.protocol ?? row.protocol) as ModelProtocol;
+    if (!isValidProtocol(type, protocol)) {
+      throw new BadRequestException(`protocol ${protocol} 不适用于类型 ${type}`);
+    }
     return this.doTest({
-      type: row.type as ModelType,
-      protocol: row.protocol as ModelProtocol,
-      name: row.name,
-      baseUrl: row.baseUrl,
-      deploymentId: row.deploymentId ?? undefined,
-      params: row.params,
+      type,
+      protocol,
+      name: override?.name ?? row.name,
+      baseUrl: override?.baseUrl ?? row.baseUrl,
+      deploymentId: override?.deploymentId ?? row.deploymentId ?? undefined,
+      params: override?.params ?? row.params,
       apiKey: this.enc.decrypt(row.apiKeyEnc),
     });
   }

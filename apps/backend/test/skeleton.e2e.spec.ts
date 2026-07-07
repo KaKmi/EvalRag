@@ -324,6 +324,25 @@ describe("M2 domain skeleton", () => {
       expect(res.body.apiKeyMasked).toBe("sk-****9999");
     });
 
+    it("PATCH 单改 protocol 为非法组合 → 400（llm 行改 dashscope）", async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/models/${modelId}`)
+        .set(auth())
+        .send({ protocol: "dashscope" })
+        .expect(400);
+    });
+
+    it("POST /:id/test 带 override → fake port 收到 override 配置 + 存量 key", async () => {
+      await request(app.getHttpServer())
+        .post(`/api/models/${modelId}/test`)
+        .set(auth())
+        .send({ baseUrl: "http://drawer.internal:9090" })
+        .expect(200);
+      expect(fakeModelProviderPort.testConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ baseUrl: "http://drawer.internal:9090" }),
+      );
+    });
+
     it("POST /api/models/:id/test → 200 且 fake port 收到解密明文", async () => {
       const res = await request(app.getHttpServer())
         .post(`/api/models/${modelId}/test`)

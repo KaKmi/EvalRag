@@ -27,6 +27,8 @@ import {
   type CreateModelRequest,
   UpdateModelRequestSchema,
   type UpdateModelRequest,
+  TestModelOverrideSchema,
+  type TestModelOverride,
   TestModelRequestSchema,
   type TestModelRequest,
   TestModelResponseSchema,
@@ -142,8 +144,15 @@ export async function deleteModel(id: string): Promise<void> {
   const resp = await apiFetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!resp.ok) throw new Error(`delete model failed: ${resp.status} ${resp.statusText}`);
 }
-export async function testModel(id: string): Promise<TestModelResponse> {
-  const resp = await apiFetch(`/api/models/${encodeURIComponent(id)}/test`, { method: "POST" });
+// override：编辑抽屉改了配置但未换 key 时传当前配置（不含 key），服务端用存量 key 测试
+export async function testModel(
+  id: string,
+  override?: TestModelOverride,
+): Promise<TestModelResponse> {
+  const resp = await apiFetch(`/api/models/${encodeURIComponent(id)}/test`, {
+    method: "POST",
+    ...(override ? { body: JSON.stringify(TestModelOverrideSchema.parse(override)) } : {}),
+  });
   if (!resp.ok) throw new Error(`test model failed: ${resp.status} ${resp.statusText}`);
   return TestModelResponseSchema.parse(await resp.json());
 }

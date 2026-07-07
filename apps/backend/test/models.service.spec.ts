@@ -1,4 +1,4 @@
-import { NotFoundException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { ModelsService } from "../src/modules/models/models.service";
 import { EncryptionService } from "../src/platform/security/encryption";
 import type { ModelsRepository } from "../src/modules/models/models.repository";
@@ -107,6 +107,35 @@ describe("ModelsService", () => {
       }),
     );
     await expect(svc.testById("nope")).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it("update 单改 protocol 导致非法组合 → 400（合并存量行校验）", async () => {
+    const repo = makeRepo();
+    const svc = new ModelsService(repo as unknown as ModelsRepository, enc, port);
+    const created = await svc.create(createReq); // llm + openai_compat
+    await expect(svc.update(created.id, { protocol: "dashscope" })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    // 合法换协议通过
+    const updated = await svc.update(created.id, { protocol: "anthropic" });
+    expect(updated.protocol).toBe("anthropic");
+  });
+
+  it("testById 带 override：用抽屉配置 + 存量 key；非法 override 组合 → 400", async () => {
+    const repo = makeRepo();
+    const svc = new ModelsService(repo as unknown as ModelsRepository, enc, port);
+    const created = await svc.create(createReq);
+    await svc.testById(created.id, { baseUrl: "http://new.internal:9090", protocol: "anthropic" });
+    expect(port.testConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: "http://new.internal:9090",
+        protocol: "anthropic",
+        apiKey: "sk-test12345678", // 存量 key，不来自 override
+      }),
+    );
+    await expect(
+      svc.testById(created.id, { protocol: "dashscope" }),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it("remove：不存在 → 404；存在 → 删除", async () => {

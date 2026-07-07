@@ -286,9 +286,17 @@ export default function ModelsPage() {
     setTestState("testing");
     setTestErr("");
     try {
+      // 编辑态未填新 key：把抽屉当前配置作为 override 传给 /:id/test（服务端用存量 key），
+      // 保证测的是"改过的配置"而非旧存量配置
       const res =
         mf.id && !mf.apiKey.trim()
-          ? await testModel(mf.id)
+          ? await testModel(mf.id, {
+              type: mf.type,
+              protocol: mf.protocol,
+              name: mf.name.trim(),
+              baseUrl: mf.baseUrl.trim(),
+              params: mf.params,
+            })
           : await testModelConfig({
               type: mf.type,
               protocol: mf.protocol,

@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from "@ne
 import { createZodDto } from "nestjs-zod";
 import {
   CreateModelRequestSchema,
+  TestModelOverrideSchema,
   TestModelRequestSchema,
   UpdateModelRequestSchema,
   type ModelProvider,
@@ -12,6 +13,7 @@ import { ModelsService } from "./models.service";
 class CreateModelRequestDto extends createZodDto(CreateModelRequestSchema) {}
 class UpdateModelRequestDto extends createZodDto(UpdateModelRequestSchema) {}
 class TestModelRequestDto extends createZodDto(TestModelRequestSchema) {}
+class TestModelOverrideDto extends createZodDto(TestModelOverrideSchema) {}
 
 @Controller("models")
 export class ModelsController {
@@ -51,9 +53,10 @@ export class ModelsController {
     return this.modelsService.remove(id);
   }
 
+  // body 可选：编辑抽屉未换 key 时传当前配置 override，服务端用存量 key 测试
   @Post(":id/test")
   @HttpCode(200)
-  test(@Param("id") id: string): Promise<TestModelResponse> {
-    return this.modelsService.testById(id);
+  test(@Param("id") id: string, @Body() body: TestModelOverrideDto): Promise<TestModelResponse> {
+    return this.modelsService.testById(id, body);
   }
 }
