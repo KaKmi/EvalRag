@@ -1,38 +1,61 @@
 import { Injectable } from "@nestjs/common";
-import type { ModelType } from "@codecrush/contracts";
+import type { ModelProtocol, ModelType } from "@codecrush/contracts";
 import type {
   ModelCallConfig,
   ModelProviderPort,
   TestModelResult,
 } from "../ports/model-provider.port";
+import type { ProbeBuilder } from "./protocols/types";
+import { openaiCompatChatProbe, openaiCompatEmbeddingProbe } from "./protocols/openai-compat";
+import { anthropicChatProbe } from "./protocols/anthropic";
+import { geminiChatProbe, geminiEmbeddingProbe } from "./protocols/gemini";
+import { cohereEmbeddingProbe, cohereRerankProbe } from "./protocols/cohere";
+import { jinaEmbeddingProbe, jinaRerankProbe } from "./protocols/jina";
+import { dashscopeRerankProbe } from "./protocols/dashscope";
+import { selfHostedEmbeddingProbe, selfHostedRerankProbe } from "./protocols/self-hosted";
 
 export const TEST_CONNECTION_TIMEOUT_MS = 10_000;
 
-const CANONICAL_PATH: Record<ModelType, string> = {
-  llm: "/chat/completions",
-  embedding: "/embeddings",
-  rerank: "/rerank",
-};
+// (type, protocol) → 探针 builder 表：与契约 PROTOCOLS_BY_TYPE 的合法组合一一对应
+// （完整性由 protocol-dispatch.adapter.spec 断言）。新增协议 = 加 builder 文件 + 表项。
+export const PROBE_BUILDERS: Record<`${ModelType}:${ModelProtocol}` & string, ProbeBuilder> = {
+  "llm:openai_compat": openaiCompatChatProbe,
+  "llm:anthropic": anthropicChatProbe,
+  "llm:gemini": geminiChatProbe,
+  "embedding:self_hosted": selfHostedEmbeddingProbe,
+  "embedding:openai_compat": openaiCompatEmbeddingProbe,
+  "embedding:gemini": geminiEmbeddingProbe,
+  "embedding:cohere": cohereEmbeddingProbe,
+  "embedding:jina": jinaEmbeddingProbe,
+  "rerank:self_hosted": selfHostedRerankProbe,
+  "rerank:cohere": cohereRerankProbe,
+  "rerank:jina": jinaRerankProbe,
+  "rerank:dashscope": dashscopeRerankProbe,
+} as Record<string, ProbeBuilder>;
 
 /**
- * OpenAI 兼容适配器（M3 仅连通性测试）：按 type POST 真调用路径验"该模型可用"，
- * 一切失败（非 2xx / 形状不符 / 网络错 / 超时）都返回 {ok:false}，不抛——测试端点要友好结果。
+ * 协议分发适配器（001「协议格式为路由键」）：请求构造与响应形状校验在 protocols/* 纯函数 builder，
+ * fetch / 10s 超时 / latency / 密钥擦除集中在此。一切失败（非 2xx / 形状不符 / 网络错 / 超时）
+ * 都返回 {ok:false}，不抛——测试端点要友好结果。
  * 仅经 MODEL_PROVIDER_PORT token 注入消费，禁止直接 import（eslint 边界）。
  */
 @Injectable()
-export class OpenAiCompatAdapter implements ModelProviderPort {
+export class ProtocolDispatchAdapter implements ModelProviderPort {
   async testConnection(config: ModelCallConfig): Promise<TestModelResult> {
+    const builder = PROBE_BUILDERS[`${config.type}:${config.protocol}`];
+    if (!builder) {
+      // 契约层已收口合法组合，此分支正常不可达（防御新枚举值漏配 builder）
+      return { ok: false, error: `unsupported protocol ${config.protocol} for ${config.type}` };
+    }
+    const probe = builder(config);
     const startedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TEST_CONNECTION_TIMEOUT_MS);
     try {
-      const resp = await fetch(buildUrl(config), {
+      const resp = await fetch(probe.url, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(buildBody(config)),
+        headers: probe.headers,
+        body: JSON.stringify(probe.body),
         signal: controller.signal,
       });
       const latencyMs = Date.now() - startedAt;
@@ -46,7 +69,7 @@ export class OpenAiCompatAdapter implements ModelProviderPort {
           error: redactSecret(upstreamError(resp.status, json), config.apiKey),
         };
       }
-      if (!shapeOk(config.type, json)) {
+      if (!probe.shapeOk(json)) {
         return { ok: false, latencyMs, statusCode: resp.status, error: "unexpected response shape" };
       }
       return { ok: true, latencyMs, statusCode: resp.status };
@@ -62,34 +85,6 @@ export class OpenAiCompatAdapter implements ModelProviderPort {
       clearTimeout(timer);
     }
   }
-}
-
-// baseUrl 归一化：去尾斜杠；已以 canonical 路径结尾则不重复拼（原型默认 base 有全路径形态）
-function buildUrl(config: ModelCallConfig): string {
-  const path = CANONICAL_PATH[config.type];
-  const base = config.baseUrl.replace(/\/+$/, "");
-  return base.endsWith(path) ? base : `${base}${path}`;
-}
-
-function buildBody(config: ModelCallConfig): Record<string, unknown> {
-  const model = config.deploymentId ?? config.name;
-  if (config.type === "embedding") return { model, input: "ping" };
-  if (config.type === "rerank") {
-    return { model, query: "ping", documents: ["ping", "pong"], top_n: 1 };
-  }
-  return { model, messages: [{ role: "user", content: "ping" }], max_tokens: 1 };
-}
-
-// 2xx 后轻量形状校验（diff D8）：防"网关 200 但模型不可用"假阳性
-function shapeOk(type: ModelType, json: unknown): boolean {
-  if (typeof json !== "object" || json === null) return false;
-  const o = json as Record<string, unknown>;
-  if (type === "llm") return Array.isArray(o.choices);
-  if (type === "embedding") {
-    const first = Array.isArray(o.data) ? (o.data[0] as Record<string, unknown> | undefined) : undefined;
-    return Array.isArray(first?.embedding);
-  }
-  return Array.isArray(o.results) || Array.isArray(o.data);
 }
 
 // 明文 key 擦除：error message 中出现的 apiKey 一律替换（全局约束：key 不得出现在任何 error message）

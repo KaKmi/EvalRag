@@ -16,11 +16,12 @@ function makeRepo(rows: ModelProviderRow[] = []) {
       const r: ModelProviderRow = {
         id: "m1",
         type: row.type,
-        provider: row.provider,
+        protocol: row.protocol,
         name: row.name,
         baseUrl: row.baseUrl,
         apiKeyEnc: row.apiKeyEnc,
         deploymentId: row.deploymentId ?? null,
+        params: row.params ?? {},
         enabled: row.enabled ?? true,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -46,10 +47,11 @@ const port: jest.Mocked<ModelProviderPort> = {
 
 const createReq = {
   type: "llm" as const,
-  provider: "DeepSeek",
+  protocol: "openai_compat" as const,
   name: "deepseek-chat",
   baseUrl: "https://api.deepseek.com/v1",
   apiKey: "sk-test12345678",
+  params: { temperature: "0.3", max_tokens: "2048" },
   enabled: true,
 };
 
@@ -97,7 +99,12 @@ describe("ModelsService", () => {
     const r = await svc.testById(created.id);
     expect(r).toMatchObject({ ok: true, latencyMs: 5, statusCode: 200 });
     expect(port.testConnection).toHaveBeenCalledWith(
-      expect.objectContaining({ apiKey: "sk-test12345678", type: "llm" }),
+      expect.objectContaining({
+        apiKey: "sk-test12345678",
+        type: "llm",
+        protocol: "openai_compat",
+        params: { temperature: "0.3", max_tokens: "2048" },
+      }),
     );
     await expect(svc.testById("nope")).rejects.toBeInstanceOf(NotFoundException);
   });

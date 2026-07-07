@@ -1,6 +1,7 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import type {
   CreateModelRequest,
+  ModelProtocol,
   ModelProvider,
   ModelType,
   TestModelRequest,
@@ -68,10 +69,11 @@ export class ModelsService {
     const row = await this.mustFind(id);
     return this.doTest({
       type: row.type as ModelType,
-      provider: row.provider,
+      protocol: row.protocol as ModelProtocol,
       name: row.name,
       baseUrl: row.baseUrl,
       deploymentId: row.deploymentId ?? undefined,
+      params: row.params,
       apiKey: this.enc.decrypt(row.apiKeyEnc),
     });
   }
@@ -80,14 +82,15 @@ export class ModelsService {
     return this.doTest({ ...req });
   }
 
-  // best-effort span：属性只含类型/供应商/模型名，永不含 apiKey
+  // best-effort span：属性只含类型/协议/模型名，永不含 apiKey。
+  // gen_ai.system 填协议值（provider 字段已随协议化移除，协议值比自由文本更规范）
   private async doTest(config: ModelCallConfig): Promise<TestModelResponse> {
     return await withSpan(
       "model.test_connection",
       {
         attributes: {
           [GEN_AI.OPERATION_NAME]: OP_BY_TYPE[config.type],
-          [GEN_AI.SYSTEM]: config.provider,
+          [GEN_AI.SYSTEM]: config.protocol,
           [GEN_AI.REQUEST_MODEL]: config.deploymentId ?? config.name,
           "codecrush.span.kind": KIND_BY_TYPE[config.type],
         },
@@ -109,10 +112,11 @@ export class ModelsService {
     return {
       id: row.id,
       type: row.type as ModelType,
-      provider: row.provider,
+      protocol: row.protocol as ModelProtocol,
       name: row.name,
       baseUrl: row.baseUrl,
       deploymentId: row.deploymentId ?? undefined,
+      params: row.params,
       enabled: row.enabled,
       apiKeyMasked: this.enc.maskApiKey(this.enc.decrypt(row.apiKeyEnc)),
     };

@@ -164,11 +164,12 @@ const inMemoryModelsRepo = {
     const r: ModelProviderRow = {
       id: `m${inMemoryModels.length + 1}`,
       type: row.type,
-      provider: row.provider,
+      protocol: row.protocol,
       name: row.name,
       baseUrl: row.baseUrl,
       apiKeyEnc: row.apiKeyEnc,
       deploymentId: row.deploymentId ?? null,
+      params: row.params ?? {},
       enabled: row.enabled ?? true,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -253,16 +254,25 @@ describe("M2 domain skeleton", () => {
     let modelId: string;
     const createBody = {
       type: "llm",
-      provider: "DeepSeek",
+      protocol: "openai_compat",
       name: "deepseek-chat",
       baseUrl: "https://api.deepseek.com/v1",
       apiKey: "sk-test12345678",
+      params: { temperature: "0.3" },
     };
 
     it("POST /api/models 缺 apiKey → 400（ZodValidationPipe）", async () => {
       const { apiKey: _k, ...noKey } = createBody;
       void _k;
       await request(app.getHttpServer()).post("/api/models").set(auth()).send(noKey).expect(400);
+    });
+
+    it("POST /api/models 非法 (type, protocol) 组合 → 400（llm+dashscope）", async () => {
+      await request(app.getHttpServer())
+        .post("/api/models")
+        .set(auth())
+        .send({ ...createBody, protocol: "dashscope" })
+        .expect(400);
     });
 
     it("POST /api/models → 201 + 掩码、无明文", async () => {

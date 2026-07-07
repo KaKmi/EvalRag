@@ -36,10 +36,11 @@ const valid = {
   model: {
     id: "m1",
     type: "llm",
-    provider: "DeepSeek",
+    protocol: "openai_compat",
     name: "deepseek-v3",
     baseUrl: "https://api.deepseek.com",
     apiKeyMasked: "sk-****1234",
+    params: { temperature: "0.3", max_tokens: "2048" },
     enabled: true,
   },
   kb: {
