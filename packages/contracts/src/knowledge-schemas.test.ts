@@ -4,6 +4,11 @@ import {
   ChunkPageResponseSchema,
   ChunkBatchDeleteRequestSchema,
 } from "./chunks";
+import {
+  DocumentSchema,
+  DocumentStatusSchema,
+  UpdateDocumentMetadataRequestSchema,
+} from "./documents";
 
 const validChunk = {
   id: "c1",
@@ -47,5 +52,45 @@ describe("ChunkBatchDeleteRequestSchema", () => {
   });
   it("accepts one or more ids", () => {
     expect(ChunkBatchDeleteRequestSchema.parse({ ids: ["c1", "c2"] }).ids.length).toBe(2);
+  });
+});
+
+const validDocument = {
+  id: "d1",
+  kbId: "kb1",
+  name: "a.pdf",
+  type: "pdf" as const,
+  size: 1024,
+  chunksCount: 0,
+  chunkVersion: null,
+  status: "pending" as const,
+  metadata: {},
+  uploadedAt: "2026-07-08T00:00:00.000Z",
+  updatedAt: "2026-07-08T00:00:00.000Z",
+};
+
+describe("DocumentStatusSchema", () => {
+  it("accepts the five M4 statuses", () => {
+    for (const s of ["pending", "queued", "processing", "failed", "ready"]) {
+      expect(DocumentStatusSchema.parse(s)).toBe(s);
+    }
+  });
+  it("rejects legacy M2 statuses", () => {
+    expect(() => DocumentStatusSchema.parse("upload")).toThrow();
+    expect(() => DocumentStatusSchema.parse("ingest")).toThrow();
+  });
+});
+
+describe("DocumentSchema", () => {
+  it("accepts a valid document with metadata and nullable chunkVersion", () => {
+    expect(DocumentSchema.parse(validDocument)).toEqual(validDocument);
+  });
+});
+
+describe("UpdateDocumentMetadataRequestSchema", () => {
+  it("accepts a string->string metadata map", () => {
+    expect(
+      UpdateDocumentMetadataRequestSchema.parse({ metadata: { author: "x" } }).metadata.author,
+    ).toBe("x");
   });
 });
