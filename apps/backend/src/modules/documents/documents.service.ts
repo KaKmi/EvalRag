@@ -57,9 +57,13 @@ export class DocumentsService {
     if (!kb) throw new NotFoundException(`knowledge base ${kbId} not found`);
     const targetVersion = kb.buildingVersion ?? kb.activeVersion;
 
+    // 先对整批做校验（类型白名单），全部通过才开始任何副作用（落盘/建档/入队）：
+    // 否则「前几个文件已持久化+已入队，随后某个文件校验失败返回 400」会造成错误响应背后的部分提交，
+    // 客户端把整批当失败重传时产生重复文档。
+    const validated = files.map((file) => ({ file, type: inferType(file.originalname) }));
+
     const created: Document[] = [];
-    for (const file of files) {
-      const type = inferType(file.originalname);
+    for (const { file, type } of validated) {
       const docId = randomUUID();
       // blob key 完全服务端拼装：docId 是 randomUUID()，扩展名来自白名单映射——不掺入任何客户端路径片段。
       const blobKey = `kb/${kbId}/${docId}/original.${type}`;

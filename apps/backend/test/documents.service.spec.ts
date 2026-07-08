@@ -109,6 +109,21 @@ describe("DocumentsService.upload", () => {
     expect(deps.repo.insert).not.toHaveBeenCalled();
   });
 
+  it("混合批次（合法+非法类型）整批拒绝：抛 400 且零副作用——不落盘、不建档、不入队", async () => {
+    const deps = makeDeps();
+    const svc = makeService(deps);
+    const files = [
+      { originalname: "good.pdf", buffer: Buffer.from("x"), size: 1, mimetype: "application/pdf" },
+      { originalname: "bad.exe", buffer: Buffer.from("x"), size: 1, mimetype: "application/octet-stream" },
+    ];
+    await expect(svc.upload("kb1", files as never, { autoParse: true })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(deps.blobStore.put).not.toHaveBeenCalled();
+    expect(deps.repo.insert).not.toHaveBeenCalled();
+    expect(deps.ingestion.enqueue).not.toHaveBeenCalled();
+  });
+
   it("不支持的文件类型（扩展名不在白名单）拒绝：抛 400，不落盘、不建档", async () => {
     const deps = makeDeps();
     const svc = makeService(deps);
