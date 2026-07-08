@@ -19,12 +19,19 @@ export class GeneralChunker implements ChunkerPort {
     }
 
     const sections: Array<{ path: string; body: string }> = [];
+    // 首个标题之前的引言内容不丢弃：以空 section 先行成段
+    const preamble = lines.slice(0, headings[0].lineIndex).join("\n").trim();
+    if (preamble) sections.push({ path: "", body: preamble });
     const stack: string[] = [];
     for (let i = 0; i < headings.length; i++) {
       const h = headings[i];
       stack.splice(h.level - 1);
       stack[h.level - 1] = h.title;
-      const path = stack.slice(0, h.level).join(" > ");
+      // 跳级标题（如 # 直跳 ###）会在 stack 留洞，join 前过滤空段
+      const path = stack
+        .slice(0, h.level)
+        .filter((seg) => seg)
+        .join(" > ");
       const bodyStart = h.lineIndex + 1;
       const bodyEnd = i + 1 < headings.length ? headings[i + 1].lineIndex : lines.length;
       const body = lines.slice(bodyStart, bodyEnd).join("\n").trim();

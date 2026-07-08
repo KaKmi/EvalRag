@@ -26,6 +26,19 @@ describe("GeneralChunker", () => {
     expect(drafts[0].section).toBe("");
   });
 
+  it("首个标题前的引言内容不丢弃：以 seq 0、空 section 先行成段", () => {
+    const drafts = chunker.chunk("引言段落。\n# 一\n正文");
+    expect(drafts[0]).toEqual({ seq: 0, text: "引言段落。", section: "" });
+    expect(drafts.some((d) => d.text.includes("正文") && d.section === "一")).toBe(true);
+    expect(drafts.map((d) => d.seq)).toEqual(drafts.map((_, i) => i));
+  });
+
+  it("跳级标题不留空路径段：# 直跳 ### 得 'a > c' 而非 'a >  > c'", () => {
+    const drafts = chunker.chunk("# a\n### c\n正文");
+    expect(drafts.some((d) => d.section === "a > c")).toBe(true);
+    expect(drafts.every((d) => !d.section.includes(">  >"))).toBe(true);
+  });
+
   it("seq 从 0 递增且连续", () => {
     const drafts = chunker.chunk("# 一\nA\n# 二\nB\n# 三\nC");
     expect(drafts.map((d) => d.seq)).toEqual(drafts.map((_, i) => i));
