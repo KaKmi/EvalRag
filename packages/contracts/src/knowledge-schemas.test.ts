@@ -133,11 +133,16 @@ describe("CreateKnowledgeBaseRequestSchema", () => {
 });
 
 describe("UpdateKnowledgeBaseRequestSchema", () => {
-  it("does not accept embeddingModelId (locked post-creation)", () => {
-    const parsed = UpdateKnowledgeBaseRequestSchema.parse({
-      chunkTemplate: "qa",
-      embeddingModelId: "m3",
-    } as unknown as Record<string, unknown>);
-    expect(parsed).not.toHaveProperty("embeddingModelId");
+  it("rejects embeddingModelId (locked post-creation, strict — 显式 400 而非静默丢弃)", () => {
+    expect(() =>
+      UpdateKnowledgeBaseRequestSchema.parse({
+        desc: "x",
+        embeddingModelId: "m",
+      } as unknown as Record<string, unknown>),
+    ).toThrow();
+  });
+  it("still accepts known keys only", () => {
+    const parsed = UpdateKnowledgeBaseRequestSchema.parse({ desc: "x" });
+    expect(parsed).toEqual({ desc: "x" });
   });
 });

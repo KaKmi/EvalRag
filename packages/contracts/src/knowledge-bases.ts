@@ -33,8 +33,10 @@ export const CreateKnowledgeBaseRequestSchema = z.object({
 });
 export type CreateKnowledgeBaseRequest = z.infer<typeof CreateKnowledgeBaseRequestSchema>;
 
-// embeddingModelId 故意不在此契约出现：锁定规则在 service 层强制（传了也会被拒绝，见 007/spec）
-export const UpdateKnowledgeBaseRequestSchema = z.object({
+// embeddingModelId 故意不在此契约出现：锁定规则见 007/spec（PATCH 携带 → 显式 400，而非静默丢弃）。
+// strictObject：契约层直接拒绝未知键（HTTP 经全局 ZodValidationPipe 映射 400）；
+// service 层的显式 400 检查保留作为纵深防御（非 HTTP 调用路径同样拒绝）。
+export const UpdateKnowledgeBaseRequestSchema = z.strictObject({
   name: z.string().min(1).optional(),
   desc: z.string().optional(),
   chunkTemplate: ChunkTemplateSchema.optional(),
