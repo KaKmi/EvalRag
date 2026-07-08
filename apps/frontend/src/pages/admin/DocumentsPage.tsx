@@ -752,6 +752,11 @@ export default function DocumentsPage() {
                   )}
                 </div>
                 <div style={{ display: "flex", gap: 14, fontSize: 13, color: "rgba(0,0,0,.45)" }}>
+                  {d.status === "pending" && (
+                    <span onClick={() => void retryParse(d.id)} style={linkBlue}>
+                      开始解析
+                    </span>
+                  )}
                   <span onClick={() => goChunks(d.id)} style={linkBlue}>
                     查看切片
                   </span>
@@ -986,7 +991,7 @@ export default function DocumentsPage() {
                 上传后立即解析
               </label>
               <div style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>
-                关闭后文档状态停留在「待处理」，需在文档表手动点击「重试」触发解析。
+                关闭后文档状态停留在「待处理」，需在文档表手动点击「开始解析」触发解析。
               </div>
             </div>
             <div style={drawerFooter}>
@@ -1122,6 +1127,44 @@ export default function DocumentsPage() {
                   {lifecycleDoc.name}
                 </div>
               </div>
+
+              {lifecycleDoc.status === "pending" && (
+                <div
+                  style={{
+                    border: "1px solid #91caff",
+                    background: "#e6f4ff",
+                    borderRadius: 8,
+                    padding: "14px 16px",
+                    marginBottom: 22,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                  }}
+                >
+                  <div style={{ fontSize: 12, color: "rgba(0,0,0,.65)", lineHeight: 1.7 }}>
+                    文档已上传，尚未解析。点击「开始解析」进入解析入库流程。
+                  </div>
+                  <div
+                    onClick={() => void retryParse(lifecycleDoc.id)}
+                    style={{
+                      height: 30,
+                      padding: "0 14px",
+                      background: "#1677ff",
+                      color: "#fff",
+                      borderRadius: 6,
+                      display: "flex",
+                      alignItems: "center",
+                      fontSize: 13,
+                      cursor: "pointer",
+                      userSelect: "none",
+                      flex: "none",
+                    }}
+                  >
+                    开始解析
+                  </div>
+                </div>
+              )}
 
               {lifecycleDoc.status === "failed" && (
                 <div
