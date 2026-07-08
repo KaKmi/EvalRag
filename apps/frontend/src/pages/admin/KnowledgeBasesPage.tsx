@@ -29,6 +29,7 @@ const CHUNK_OPTS: { value: ChunkTemplate; label: string; desc: string }[] = [
     desc: "按标题结构切分，适合 Markdown / TXT / 层级清晰的文档",
   },
   { value: "qa", label: "问答", desc: "识别问答对，一问一答作为一个切片，适合 FAQ 文档" },
+  { value: "custom", label: "定制", desc: "按指定规则清洗与切分，适合有特定格式要求的专属内容" },
 ];
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));

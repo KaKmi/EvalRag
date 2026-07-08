@@ -91,6 +91,8 @@ export class IngestionService {
         embeddingModelId: kb?.embeddingModelId ?? "",
         targetVersion,
         blob,
+        docName: doc.name,
+        kbName: kb?.name ?? "",
       });
 
       // HOST 裁定：ready 但 0 切片会误导用户，按失败处理（走 catch 落 failed + 可读错误）。

@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  ChunkSchema,
-  ChunkPageResponseSchema,
-  ChunkBatchDeleteRequestSchema,
-} from "./chunks";
+import { ChunkSchema, ChunkPageResponseSchema, ChunkBatchDeleteRequestSchema } from "./chunks";
 import {
   DocumentSchema,
   DocumentStatusSchema,
@@ -122,13 +118,18 @@ describe("KnowledgeBaseSchema", () => {
     const building = { ...validKb, status: "building" as const, buildingVersion: 2, progress: 40 };
     expect(KnowledgeBaseSchema.parse(building).buildingVersion).toBe(2);
   });
+  it("accepts chunkTemplate=custom（定制分块）", () => {
+    const custom = { ...validKb, chunkTemplate: "custom" as const };
+    expect(KnowledgeBaseSchema.parse(custom).chunkTemplate).toBe("custom");
+  });
+  it("rejects an unknown chunkTemplate value", () => {
+    expect(() => KnowledgeBaseSchema.parse({ ...validKb, chunkTemplate: "weird" })).toThrow();
+  });
 });
 
 describe("CreateKnowledgeBaseRequestSchema", () => {
   it("requires chunkTemplate and embeddingModelId", () => {
-    expect(() =>
-      CreateKnowledgeBaseRequestSchema.parse({ name: "x" }),
-    ).toThrow();
+    expect(() => CreateKnowledgeBaseRequestSchema.parse({ name: "x" })).toThrow();
   });
 });
 

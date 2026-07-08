@@ -1,12 +1,14 @@
 import { estimateTokens } from "../src/modules/ingestion/pipeline/estimate-tokens";
 import { GeneralChunker } from "../src/modules/ingestion/adapters/chunkers/general-chunker";
 import { QaChunker } from "../src/modules/ingestion/adapters/chunkers/qa-chunker";
+import { CustomChunker } from "../src/modules/ingestion/adapters/chunkers/custom-chunker";
 import { CHUNKER_REGISTRY } from "../src/modules/ingestion/adapters/chunkers/chunker-registry";
 
 describe("CHUNKER_REGISTRY 完整性", () => {
-  it("general 与 qa 两个模板都有实现", () => {
+  it("general/qa/custom 三个模板都有实现", () => {
     expect(CHUNKER_REGISTRY.general).toBeInstanceOf(GeneralChunker);
     expect(CHUNKER_REGISTRY.qa).toBeInstanceOf(QaChunker);
+    expect(CHUNKER_REGISTRY.custom).toBeInstanceOf(CustomChunker);
   });
 });
 

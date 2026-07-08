@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const ChunkTemplateSchema = z.enum(["general", "qa"]);
+export const ChunkTemplateSchema = z.enum(["general", "qa", "custom"]);
 export type ChunkTemplate = z.infer<typeof ChunkTemplateSchema>;
 
 export const KnowledgeBaseStatusSchema = z.enum(["ready", "building", "failed"]);

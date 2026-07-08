@@ -25,6 +25,8 @@ describe("DefaultIngestionPipeline", () => {
       chunkTemplate: "general",
       embeddingModelId: "m1",
       targetVersion: 1,
+      docName: "a.txt",
+      kbName: "测试库",
       blob: Buffer.from("段落一。\n\n段落二。\n\n段落三。", "utf-8"),
     });
 
@@ -54,6 +56,8 @@ describe("DefaultIngestionPipeline", () => {
         chunkTemplate: "general",
         embeddingModelId: "m1",
         targetVersion: 1,
+        docName: "b.pdf",
+        kbName: "测试库",
         blob: Buffer.from("not a real pdf"),
       }),
     ).rejects.toThrow();
@@ -81,6 +85,8 @@ describe("DefaultIngestionPipeline 业务错误码（QA 回归）", () => {
         chunkTemplate: "general",
         embeddingModelId: "m1",
         targetVersion: 1,
+        docName: "c.txt",
+        kbName: "测试库",
         blob: Buffer.from("正文内容"),
       }),
     ).rejects.toThrow(/^\[EMBED_FAILED\] 向量化失败：HTTP 400/);
@@ -99,6 +105,8 @@ describe("DefaultIngestionPipeline 业务错误码（QA 回归）", () => {
         chunkTemplate: "general",
         embeddingModelId: "m1",
         targetVersion: 1,
+        docName: "d.pdf",
+        kbName: "测试库",
         blob: Buffer.from("not a pdf"),
       }),
     ).rejects.toThrow(/^\[PARSE_FAILED\] 文档解析失败：/);

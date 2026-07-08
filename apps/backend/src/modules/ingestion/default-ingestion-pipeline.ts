@@ -40,7 +40,7 @@ export class DefaultIngestionPipeline implements IngestionPipelinePort {
     }
 
     const chunker = CHUNKER_REGISTRY[ctx.chunkTemplate];
-    const parts = chunker.chunk(text);
+    const parts = chunker.chunk(text, { filename: ctx.docName, kbName: ctx.kbName });
 
     const batches = chunkArray(parts, this.embedBatchSize);
     const drafts: ChunkDraft[] = [];
