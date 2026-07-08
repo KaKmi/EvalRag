@@ -3,18 +3,25 @@ import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 const { Header, Sider, Content } = Layout;
 
-/** 侧栏 7 项导航（对齐原型 NAV：start/llm/kb/prompts/agents/retrieval/traces） */
-const NAV_ITEMS = [
-  { key: "/admin", label: "快速开始" },
-  { key: "/admin/models", label: "模型接入" },
-  { key: "/admin/knowledge-bases", label: "知识库" },
-  { key: "/admin/prompts", label: "Prompt 管理" },
-  { key: "/admin/agents", label: "Agent 管理" },
-  { key: "/admin/retrieval-test", label: "检索测试" },
-  { key: "/admin/traces", label: "Trace 追踪" },
-] as const;
+/** 分组侧栏导航（对齐新原型 NAV：配置 / 验证 & 观测 / 数据飞轮） */
+type NavEntry = { kind: "group"; label: string } | { kind: "item"; key: string; label: string };
+const NAV_ENTRIES: NavEntry[] = [
+  { kind: "item", key: "/admin", label: "快速开始" },
+  { kind: "group", label: "配置" },
+  { kind: "item", key: "/admin/models", label: "模型接入" },
+  { kind: "item", key: "/admin/knowledge-bases", label: "知识库" },
+  { kind: "item", key: "/admin/prompts", label: "Prompt 管理" },
+  { kind: "item", key: "/admin/agents", label: "Agent 管理" },
+  { kind: "group", label: "验证 & 观测" },
+  { kind: "item", key: "/admin/retrieval-test", label: "检索测试" },
+  { kind: "item", key: "/admin/traces", label: "Trace 追踪" },
+  { kind: "group", label: "数据飞轮" },
+  { kind: "item", key: "/admin/gaps", label: "知识缺口" },
+  { kind: "item", key: "/admin/evalsets", label: "评测集" },
+  { kind: "item", key: "/admin/evaluations", label: "效果评测" },
+];
 
-/** 子路由需要高亮父级菜单的路径前缀（dashboard/evalsets/evaluations 不在侧栏） */
+/** 子路由需要高亮父级菜单的路径前缀（dashboard 不在侧栏） */
 const PREFIX_KEYS = [
   "/admin/models",
   "/admin/knowledge-bases",
@@ -22,6 +29,9 @@ const PREFIX_KEYS = [
   "/admin/agents",
   "/admin/retrieval-test",
   "/admin/traces",
+  "/admin/gaps",
+  "/admin/evalsets",
+  "/admin/evaluations",
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -33,8 +43,9 @@ const PAGE_TITLES: Record<string, string> = {
   "/admin/agents": "Agent 管理",
   "/admin/retrieval-test": "检索测试",
   "/admin/traces": "Trace 追踪",
+  "/admin/gaps": "知识缺口",
   "/admin/evalsets": "评测集",
-  "/admin/evaluations": "评测管理",
+  "/admin/evaluations": "效果评测",
 };
 
 function getSelectedKey(pathname: string): string {
@@ -85,10 +96,26 @@ export function AdminLayout() {
             <div style={{ color: "#fff", fontSize: 15, fontWeight: 600 }}>控制台</div>
           </div>
           <div style={{ flex: 1, overflowY: "auto", padding: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-            {NAV_ITEMS.map((item) => {
-              const on = selectedKey === item.key;
+            {NAV_ENTRIES.map((entry, i) => {
+              if (entry.kind === "group") {
+                return (
+                  <div
+                    key={`g-${i}`}
+                    style={{
+                      padding: "10px 16px 2px",
+                      fontSize: 11,
+                      letterSpacing: 1,
+                      color: "rgba(255,255,255,.35)",
+                      userSelect: "none",
+                    }}
+                  >
+                    {entry.label}
+                  </div>
+                );
+              }
+              const on = selectedKey === entry.key;
               return (
-                <Link key={item.key} to={item.key} style={{ textDecoration: "none" }}>
+                <Link key={entry.key} to={entry.key} style={{ textDecoration: "none" }}>
                   <div
                     style={{
                       padding: "9px 16px",
@@ -98,7 +125,7 @@ export function AdminLayout() {
                       background: on ? "#1677ff" : "transparent",
                     }}
                   >
-                    {item.label}
+                    {entry.label}
                   </div>
                 </Link>
               );

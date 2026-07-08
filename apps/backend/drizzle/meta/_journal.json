@@ -22,6 +22,27 @@
       "when": 1783393516384,
       "tag": "0002_vengeful_chronomancer",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783411088415,
+      "tag": "0003_reflective_matthew_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1783418037429,
+      "tag": "0004_moaning_black_bolt",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1783418058099,
+      "tag": "0005_smiling_jackpot",
+      "breakpoints": true
     }
   ]
 }

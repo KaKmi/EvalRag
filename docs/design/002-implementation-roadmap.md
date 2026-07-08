@@ -77,13 +77,13 @@ M0 工程地基 ─┬─► M0.5 可观测最小闭环 ────────
 | # | 模块 | 大块内容 | 依赖 | 验收 |
 |---|---|---|---|---|
 | **M1** | 用户 / 认证 | 登录(JWT)、user 实体、auth guard。RBAC 留到 M12 | M0 | demo 账号登录；无 token 接口 401 |
-| **M2** | 前后端页面骨架 | React+antd app shell、路由、管理台导航；登录页、首页(快速开始+运行看板占位)、及所有管理页(模型/知识库/切片/Agent 配置/Prompt/Trace/评测)的 1:1 布局壳子(数据 mock/空态)；后端各模块 skeleton + REST 脚手架 + OpenAPI；SSE 客户端 | M0, M1 | 15 屏可点开、布局还原；跳转通；API 契约生成 |
+| **M2** | 前后端页面骨架 | React+antd app shell、路由、管理台导航(分组：配置/验证&观测/数据飞轮，含知识缺口/评测集/效果评测入口)；登录页、首页(快速开始+运行看板占位)、及所有管理页(模型/知识库/切片/Agent 配置/Prompt/Trace/评测/知识缺口壳)的 1:1 布局壳子(数据 mock/空态)；后端各模块 skeleton + REST 脚手架 + OpenAPI；SSE 客户端 | M0, M1 | 15 屏可点开、布局还原；跳转通；API 契约生成 |
 
 ### 波次 C — 可配置域
 
 | # | 模块 | 大块内容 | 依赖 | 验收 |
 |---|---|---|---|---|
-| **M3** | 模型接入 | model_providers CRUD、密钥加密、连通性测试、OpenAI 兼容适配器(LLM/Embedding/Rerank) | M2 | 注册模型并"测试"通过；key 前端掩码 |
+| **M3** | 模型接入 | model_providers CRUD、密钥加密、连通性测试、**协议适配层**(LLM: OpenAI 兼容/Anthropic/Gemini；Embedding: 自部署/OpenAI 兼容/Gemini/Cohere/Jina；Rerank: 自部署/OpenAI 兼容(/v1/reranks)/Cohere/Jina/DashScope 原生；`(type,protocol)` 为请求构造路由键)、按类型可编辑参数(params jsonb) | M2 | 注册模型并"测试"通过；key 前端掩码、只写不回显 |
 | **M6** | Prompt 管理 | prompts + 版本 + diff + 发布/回滚 + 变量抽取(`{var}`) | M2 | 建 Prompt、出新版本、diff、发布切生产、回滚 |
 | **M4** | 知识库/文档/切片/入库 | KB CRUD(绑 M3 embedding)、文档上传(BlobStore)、固定入库管线(解析→语义切片→向量化→入索引，pg-boss 异步)、切片查看/启用/禁用、生命周期状态 | M3 | 传 PDF 走到"就绪"；切片可见可开关；失败可重解析 |
 | **M5** | 检索 | `RetrieverPort`:向量召回 + 关键词召回 + 融合 + 重排；检索测试台(与 chat 共用) | M4, M3 | 测试台输入问题出命中分块 + 三种分数 |

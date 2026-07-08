@@ -36,11 +36,11 @@ const valid = {
   model: {
     id: "m1",
     type: "llm",
-    provider: "DeepSeek",
+    protocol: "openai_compat",
     name: "deepseek-v3",
     baseUrl: "https://api.deepseek.com",
     apiKeyMasked: "sk-****1234",
-    role: "回复生成（主）",
+    params: { temperature: "0.3", max_tokens: "2048" },
     enabled: true,
   },
   kb: {
@@ -307,11 +307,16 @@ describe("PaginatedResponseSchema (generic factory)", () => {
 });
 
 describe("M2 request schemas (skeleton DTOs)", () => {
-  it("CreateModelRequestSchema omits id, keeps enabled", () => {
-    const { id: _id, ...rest } = valid.model;
+  it("CreateModelRequestSchema 要求明文 apiKey，读侧无 apiKey", () => {
+    const { id: _id, apiKeyMasked: _m, ...rest } = valid.model;
     void _id;
-    expect(CreateModelRequestSchema.parse(rest).enabled).toBe(true);
-    expect(() => CreateModelRequestSchema.parse({ ...rest, type: "vision" })).toThrow();
+    void _m;
+    expect(() => CreateModelRequestSchema.parse(rest)).toThrow(); // 缺 apiKey
+    const created = CreateModelRequestSchema.parse({ ...rest, apiKey: "sk-12345678" });
+    expect(created.enabled).toBe(true);
+    expect(() =>
+      CreateModelRequestSchema.parse({ ...rest, apiKey: "sk-12345678", type: "vision" }),
+    ).toThrow();
   });
   it("CreateKnowledgeBaseRequestSchema omits id/counts/status/progress/updatedAt", () => {
     const { id: _a, docsCount: _b, chunksCount: _c, status: _d, updatedAt: _e, ...rest } = valid.kb;

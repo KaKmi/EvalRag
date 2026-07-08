@@ -1,83 +1,169 @@
+import type { ModelProtocol, ModelType } from "@codecrush/contracts";
 import type { TagKey } from "./agents";
 
-/** M2 mock：模型调用管理页用，对齐原型 LLM_ROWS / MODEL_TYPES。M3 接真实 /api/models。 */
+/** 模型接入页 UI 常量（非数据 mock，数据走 /api/models）：类型文案 / 协议候选（label/默认 base/说明）/ 参数定义。 */
 
-export type ModelType = "LLM" | "Rerank" | "Embedding";
+export const TYPE_LABEL: Record<ModelType, string> = {
+  llm: "LLM",
+  embedding: "Embedding",
+  rerank: "Rerank",
+};
 
-export interface LlmRow {
-  m: string;
-  type: ModelType;
-  role: string;
-  prov: string;
-  off?: boolean;
+/** 协议候选：顺序与展示对齐原型；合法性以契约 PROTOCOLS_BY_TYPE 为准（mocks/models.test.ts 断言一致） */
+export interface ProtocolOption {
+  protocol: ModelProtocol;
+  label: string;
+  /** 选中协议时自动填入的默认 Base URL（可改，支持自部署内网地址） */
+  base: string;
+  /** 协议适用场景说明（抽屉协议选项下方灰字） */
+  note: string;
 }
 
-export const LLM_ROWS: LlmRow[] = [
-  { m: "DeepSeek-V3", type: "LLM", role: "回复生成（主）", prov: "DeepSeek" },
-  { m: "DeepSeek-V3 (低温)", type: "LLM", role: "问题改写 · 意图识别", prov: "DeepSeek" },
-  { m: "Qwen-Max", type: "LLM", role: "生成备用 / 降级链路", prov: "阿里云" },
-  { m: "GPT-4o-mini", type: "LLM", role: "评测裁判", prov: "OpenAI" },
-  { m: "bge-m3", type: "Embedding", role: "向量嵌入 · 全部知识库", prov: "自部署" },
-  { m: "text-embedding-3-large", type: "Embedding", role: "备用嵌入", prov: "OpenAI", off: true },
-  { m: "bge-reranker-v2-m3", type: "Rerank", role: "召回重排", prov: "自部署" },
-];
+export const PROTOCOL_OPTIONS: Record<ModelType, ProtocolOption[]> = {
+  llm: [
+    {
+      protocol: "openai_compat",
+      label: "OpenAI 兼容",
+      base: "https://api.openai.com/v1",
+      note: "DeepSeek / Qwen / vLLM 等均可用此协议，改 Base URL 即可",
+    },
+    {
+      protocol: "anthropic",
+      label: "Anthropic",
+      base: "https://api.anthropic.com",
+      note: "Claude 系列 · Messages API",
+    },
+    {
+      protocol: "gemini",
+      label: "Google Gemini",
+      base: "https://generativelanguage.googleapis.com/v1beta",
+      note: "Gemini · generateContent",
+    },
+  ],
+  rerank: [
+    {
+      protocol: "self_hosted",
+      label: "自部署 (HTTP)",
+      base: "http://infra.internal:8080/rerank",
+      note: "bge-reranker 等自建服务",
+    },
+    {
+      protocol: "openai_compat",
+      label: "OpenAI 兼容",
+      base: "https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compatible-api/v1",
+      note: "/v1/reranks 扁平协议——阿里云百炼 workspace 域名（qwen3-rerank，替换域名中的 WorkspaceId）及其他兼容网关；百炼新版网关请选此协议",
+    },
+    {
+      protocol: "cohere",
+      label: "Cohere Rerank",
+      base: "https://api.cohere.ai/v1",
+      note: "Cohere /rerank 协议",
+    },
+    {
+      protocol: "jina",
+      label: "Jina Rerank",
+      base: "https://api.jina.ai/v1",
+      note: "Jina /rerank 协议",
+    },
+    {
+      protocol: "dashscope",
+      label: "阿里云 DashScope",
+      base: "https://dashscope.aliyuncs.com/api/v1",
+      note: "DashScope 原生 text-rerank，input/parameters 包裹体（gte-rerank-v2 / qwen3-rerank）——仅适用 dashscope.aliyuncs.com 老网关；百炼 workspace 域名（*.maas.aliyuncs.com）要扁平体，请选「OpenAI 兼容」",
+    },
+  ],
+  embedding: [
+    {
+      protocol: "self_hosted",
+      label: "自部署 (HTTP)",
+      base: "http://infra.internal:8080",
+      note: "bge-m3 等自建服务",
+    },
+    {
+      protocol: "openai_compat",
+      label: "OpenAI 兼容",
+      base: "https://api.openai.com/v1",
+      note: "/v1/embeddings 协议",
+    },
+    {
+      protocol: "gemini",
+      label: "Google",
+      base: "https://generativelanguage.googleapis.com/v1beta",
+      note: "Gemini embedContent",
+    },
+    { protocol: "cohere", label: "Cohere", base: "https://api.cohere.ai/v1", note: "Cohere /embed 协议" },
+    { protocol: "jina", label: "Jina", base: "https://api.jina.ai/v1", note: "Jina /embeddings 协议" },
+  ],
+};
+
+/** 列表「协议格式」列的显示 label（按行的 type+protocol 查） */
+export function protocolLabel(type: ModelType, protocol: ModelProtocol): string {
+  return PROTOCOL_OPTIONS[type].find((o) => o.protocol === protocol)?.label ?? protocol;
+}
 
 export interface ModelTypeDef {
   hint: string;
   tag: TagKey;
-  provs: string[];
   namePh: string;
-  base: string;
   paramLabel: string;
-  params: { k: string; v: string }[];
+  /** 按类型可编辑参数（原型：LLM temperature/max_tokens；Embedding dimensions/batch_size；Rerank top_n/threshold） */
+  params: { k: string; def: string }[];
 }
 
 export const MODEL_TYPES: Record<ModelType, ModelTypeDef> = {
-  LLM: {
+  llm: {
     hint: "生成 · 改写 · 意图",
     tag: "blue",
-    provs: ["DeepSeek", "阿里云", "OpenAI", "智谱", "自部署"],
     namePh: "deepseek-chat",
-    base: "https://api.deepseek.com/v1",
     paramLabel: "默认生成参数",
     params: [
-      { k: "temperature", v: "0.3" },
-      { k: "max_tokens", v: "2048" },
+      { k: "temperature", def: "0.3" },
+      { k: "max_tokens", def: "2048" },
     ],
   },
-  Rerank: {
+  rerank: {
     hint: "召回结果重排",
     tag: "purple",
-    provs: ["自部署", "Jina", "Cohere", "阿里云"],
     namePh: "bge-reranker-v2-m3",
-    base: "http://infra.internal:8080/rerank",
     paramLabel: "重排参数",
     params: [
-      { k: "top_n", v: "5" },
-      { k: "score 阈值", v: "0.65" },
+      { k: "top_n", def: "5" },
+      { k: "threshold", def: "0.65" },
     ],
   },
-  Embedding: {
+  embedding: {
     hint: "文本向量嵌入",
     tag: "cyan",
-    provs: ["自部署", "OpenAI", "Jina", "智谱"],
     namePh: "bge-m3",
-    base: "http://infra.internal:8080/embed",
     paramLabel: "向量参数",
     params: [
-      { k: "维度", v: "1024" },
-      { k: "归一化", v: "是" },
+      { k: "dimensions", def: "1024" },
+      { k: "batch_size", def: "64" },
     ],
   },
 };
 
-export const LLM_TABS = ["全部", "LLM", "Rerank", "Embedding"] as const;
+/** 按类型取参数默认值对象（打开抽屉/切换类型时初始化） */
+export function defaultParams(type: ModelType): Record<string, string> {
+  return Object.fromEntries(MODEL_TYPES[type].params.map((p) => [p.k, p.def]));
+}
 
-/** 接入模型抽屉表单。 */
+export const MODEL_TABS: Array<{ key: "all" | ModelType; label: string }> = [
+  { key: "all", label: "全部" },
+  { key: "llm", label: "LLM" },
+  { key: "rerank", label: "Rerank" },
+  { key: "embedding", label: "Embedding" },
+];
+
+/** 接入/编辑模型抽屉表单。 */
 export interface ModelDraft {
+  /** 有值 = 编辑模式 */
+  id?: string;
   type: ModelType;
-  prov: string;
+  protocol: ModelProtocol;
   name: string;
-  base: string;
-  key: string;
+  baseUrl: string;
+  /** 编辑模式留空 = 不改（key 只写不回显） */
+  apiKey: string;
+  params: Record<string, string>;
 }

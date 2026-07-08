@@ -10,7 +10,11 @@ const NAV_LABELS = [
   "Agent 管理",
   "检索测试",
   "Trace 追踪",
+  "知识缺口",
+  "评测集",
+  "效果评测",
 ];
+const NAV_GROUPS = ["配置", "验证 & 观测", "数据飞轮"];
 
 beforeEach(() => {
   localStorage.clear();
@@ -28,7 +32,7 @@ it("redirects to /login when visiting /admin without a token", async () => {
   expect(screen.queryByText("管理后台")).not.toBeInTheDocument();
 });
 
-it("renders admin sider with brand and 7 nav items when authenticated", async () => {
+it("renders admin sider with brand, grouped nav (10 items + 3 group headers) when authenticated", async () => {
   localStorage.setItem("token", "fake-token");
   // 用 /admin/dashboard（不在侧栏）避免页面标题与菜单文案重复匹配
   render(
@@ -42,6 +46,19 @@ it("renders admin sider with brand and 7 nav items when authenticated", async ()
   for (const label of NAV_LABELS) {
     expect(screen.getByText(label)).toBeInTheDocument();
   }
+  for (const group of NAV_GROUPS) {
+    expect(screen.getByText(group)).toBeInTheDocument();
+  }
+});
+
+it("renders GapsPage shell on /admin/gaps (数据飞轮壳页)", async () => {
+  localStorage.setItem("token", "fake-token");
+  render(
+    <MemoryRouter initialEntries={["/admin/gaps"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText(/暂无知识缺口/)).toBeInTheDocument();
 });
 
 it("renders traces list on /admin/traces when authenticated", async () => {
@@ -88,6 +105,31 @@ it("loads PromptsPage from real /api/prompts on /admin/prompts (M6)", async () =
   await waitFor(() => {
     const calls = fetchMock.mock.calls.map(c => String(c[0]));
     expect(calls.some(u => u.includes("/api/prompts"))).toBe(true);
+  });
+});
+
+it("loads ModelsPage from real /api/models on /admin/models (M3)", async () => {
+  localStorage.setItem("token", "fake-token");
+  // mock fetch：GET /api/models 返空数组，其余 404。证明页面挂载调真 API 而非本地 mock。
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _opts?: RequestInit) => {
+    const u = typeof input === "string" ? input : input.toString();
+    if (u.includes("/api/models")) {
+      return { ok: true, status: 200, json: async () => [] } as unknown as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as unknown as Response;
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+
+  render(
+    <MemoryRouter initialEntries={["/admin/models"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  // 空态出现 = 页面消费了 API 响应（不再渲染本地 LLM_ROWS）
+  expect(await screen.findByText(/暂无模型/)).toBeInTheDocument();
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.map(c => String(c[0]));
+    expect(calls.some(u => u.includes("/api/models"))).toBe(true);
   });
 });
 

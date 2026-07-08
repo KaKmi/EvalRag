@@ -8,3 +8,4 @@ export const appMeta = pgTable("app_meta", {
 
 export * from "../modules/users/schema";
 export * from "../modules/prompts/schema";
+export * from "../modules/models/schema";

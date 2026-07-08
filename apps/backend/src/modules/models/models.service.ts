@@ -1,53 +1,139 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import type { CreateModelRequest, ModelProvider } from "@codecrush/contracts";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  isValidProtocol,
+  type CreateModelRequest,
+  type ModelProtocol,
+  type ModelProvider,
+  type ModelType,
+  type TestModelOverride,
+  type TestModelRequest,
+  type TestModelResponse,
+  type UpdateModelRequest,
+} from "@codecrush/contracts";
+import { withSpan } from "@codecrush/otel";
+import { CODECRUSH_SPAN_KIND, GEN_AI, OTEL_OPERATIONS } from "@codecrush/otel-conventions";
+import { ENCRYPTION } from "../../platform/security/security.constants";
+import { EncryptionService } from "../../platform/security/encryption";
+import { ModelsRepository } from "./models.repository";
+import { MODEL_PROVIDER_PORT } from "./model-provider.constants";
+import type { ModelCallConfig, ModelProviderPort } from "./ports/model-provider.port";
+import type { ModelProviderRow, NewModelProvider } from "./schema";
 
-const MOCK_MODELS: ModelProvider[] = [
-  {
-    id: "m1",
-    type: "llm",
-    provider: "DeepSeek",
-    name: "deepseek-v3",
-    baseUrl: "https://api.deepseek.com",
-    apiKeyMasked: "sk-****1234",
-    role: "回复生成（主）",
-    enabled: true,
-  },
-  {
-    id: "m2",
-    type: "embedding",
-    provider: "BAAI",
-    name: "bge-m3",
-    baseUrl: "https://api.bge.local",
-    enabled: true,
-  },
-  {
-    id: "m3",
-    type: "rerank",
-    provider: "BAAI",
-    name: "bge-reranker-v2-m3",
-    enabled: true,
-  },
-];
+const OP_BY_TYPE: Record<ModelType, string> = {
+  llm: OTEL_OPERATIONS.CHAT,
+  embedding: OTEL_OPERATIONS.EMBEDDINGS,
+  rerank: OTEL_OPERATIONS.RERANK,
+};
+const KIND_BY_TYPE: Record<ModelType, string> = {
+  llm: CODECRUSH_SPAN_KIND.LLM,
+  embedding: CODECRUSH_SPAN_KIND.EMBEDDINGS,
+  rerank: CODECRUSH_SPAN_KIND.RERANK,
+};
 
 @Injectable()
 export class ModelsService {
-  list(): ModelProvider[] {
-    return MOCK_MODELS;
+  constructor(
+    private readonly repo: ModelsRepository,
+    @Inject(ENCRYPTION) private readonly enc: EncryptionService,
+    @Inject(MODEL_PROVIDER_PORT) private readonly provider: ModelProviderPort,
+  ) {}
+
+  async list(): Promise<ModelProvider[]> {
+    return (await this.repo.find()).map((r) => this.toModelProvider(r));
   }
 
-  get(id: string): ModelProvider {
-    const model = MOCK_MODELS.find((m) => m.id === id);
-    if (!model) throw new NotFoundException(`model ${id} not found`);
-    return model;
+  async get(id: string): Promise<ModelProvider> {
+    return this.toModelProvider(await this.mustFind(id));
   }
 
-  create(req: CreateModelRequest): ModelProvider {
-    // M2 桩：仅回显，不持久化（M3 接 models 表）
-    return { id: `m${MOCK_MODELS.length + 1}`, ...req };
+  async create(req: CreateModelRequest): Promise<ModelProvider> {
+    const { apiKey, ...rest } = req;
+    const row = await this.repo.insert({ ...rest, apiKeyEnc: this.enc.encrypt(apiKey) });
+    return this.toModelProvider(row);
   }
 
-  test(_id: string): { ok: boolean } {
-    // M2 桩：永远成功（M3 接真实连通性测试）
-    return { ok: true };
+  async update(id: string, req: UpdateModelRequest): Promise<ModelProvider> {
+    const existing = await this.mustFind(id);
+    // PATCH 单改 type 或 protocol 时，契约层只能校验同现的组合——合并存量行后再校验，
+    // 防止落库非法 (type, protocol)（如 llm 行被 PATCH 成 protocol:dashscope）
+    const mergedType = (req.type ?? existing.type) as ModelType;
+    const mergedProtocol = (req.protocol ?? existing.protocol) as ModelProtocol;
+    if (!isValidProtocol(mergedType, mergedProtocol)) {
+      throw new BadRequestException(`protocol ${mergedProtocol} 不适用于类型 ${mergedType}`);
+    }
+    const { apiKey, ...rest } = req;
+    const patch: Partial<NewModelProvider> = { ...rest };
+    if (apiKey) patch.apiKeyEnc = this.enc.encrypt(apiKey);
+    const row = await this.repo.update(id, patch);
+    if (!row) throw new NotFoundException(`model ${id} not found`);
+    return this.toModelProvider(row);
+  }
+
+  async remove(id: string): Promise<void> {
+    await this.mustFind(id);
+    await this.repo.delete(id);
+  }
+
+  // override：编辑抽屉改了配置但未填新 key 时，用抽屉当前配置 + 存量 key 测试（key 不下发前端）
+  async testById(id: string, override?: TestModelOverride): Promise<TestModelResponse> {
+    const row = await this.mustFind(id);
+    const type = (override?.type ?? row.type) as ModelType;
+    const protocol = (override?.protocol ?? row.protocol) as ModelProtocol;
+    if (!isValidProtocol(type, protocol)) {
+      throw new BadRequestException(`protocol ${protocol} 不适用于类型 ${type}`);
+    }
+    return this.doTest({
+      type,
+      protocol,
+      name: override?.name ?? row.name,
+      baseUrl: override?.baseUrl ?? row.baseUrl,
+      deploymentId: override?.deploymentId ?? row.deploymentId ?? undefined,
+      params: override?.params ?? row.params,
+      apiKey: this.enc.decrypt(row.apiKeyEnc),
+    });
+  }
+
+  async testConfig(req: TestModelRequest): Promise<TestModelResponse> {
+    return this.doTest({ ...req });
+  }
+
+  // best-effort span：属性只含类型/协议/模型名，永不含 apiKey。
+  // gen_ai.system 填协议值（provider 字段已随协议化移除，协议值比自由文本更规范）
+  private async doTest(config: ModelCallConfig): Promise<TestModelResponse> {
+    return await withSpan(
+      "model.test_connection",
+      {
+        attributes: {
+          [GEN_AI.OPERATION_NAME]: OP_BY_TYPE[config.type],
+          [GEN_AI.SYSTEM]: config.protocol,
+          [GEN_AI.REQUEST_MODEL]: config.deploymentId ?? config.name,
+          "codecrush.span.kind": KIND_BY_TYPE[config.type],
+        },
+      },
+      async () => {
+        const r = await this.provider.testConnection(config);
+        return { ok: r.ok, latencyMs: r.latencyMs, statusCode: r.statusCode, error: r.error };
+      },
+    );
+  }
+
+  private async mustFind(id: string): Promise<ModelProviderRow> {
+    const row = await this.repo.findById(id);
+    if (!row) throw new NotFoundException(`model ${id} not found`);
+    return row;
+  }
+
+  private toModelProvider(row: ModelProviderRow): ModelProvider {
+    return {
+      id: row.id,
+      type: row.type as ModelType,
+      protocol: row.protocol as ModelProtocol,
+      name: row.name,
+      baseUrl: row.baseUrl,
+      deploymentId: row.deploymentId ?? undefined,
+      params: row.params,
+      enabled: row.enabled,
+      apiKeyMasked: this.enc.maskApiKey(this.enc.decrypt(row.apiKeyEnc)),
+    };
   }
 }

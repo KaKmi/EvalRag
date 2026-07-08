@@ -19,6 +19,7 @@ import {
   PromptSchema,
   PromptVersionSchema,
   RetrievalTestResponseSchema,
+  TestModelResponseSchema,
 } from "@codecrush/contracts";
 import { AgentsModule } from "../src/modules/agents/agents.module";
 import { ChatModule } from "../src/modules/chat/chat.module";
@@ -34,6 +35,12 @@ import type { PromptListResult, PromptListRow } from "../src/modules/prompts/pro
 import type { NewPrompt, NewPromptVersion, PromptRow, PromptVersionRow } from "../src/modules/prompts/schema";
 import { RetrievalModule } from "../src/modules/retrieval/retrieval.module";
 import { JwtAuthGuard } from "../src/modules/auth/jwt-auth.guard";
+import { SecurityModule } from "../src/platform/security/security.module";
+import { EncryptionService } from "../src/platform/security/encryption";
+import { ENCRYPTION } from "../src/platform/security/security.constants";
+import { ModelsRepository } from "../src/modules/models/models.repository";
+import { MODEL_PROVIDER_PORT } from "../src/modules/models/model-provider.constants";
+import type { ModelProviderRow, NewModelProvider } from "../src/modules/models/schema";
 
 const SECRET = "test-secret-at-least-32-characters-long!!";
 const PRINCIPAL = { sub: "u1", email: "demo@codecrush.local" };
@@ -147,6 +154,47 @@ const inMemoryPromptsRepo = {
   },
 };
 
+// M3 ModelsRepository 内存实现（DB-free）+ fake port（不真打外网）+ 固定 key 加密实例
+const inMemoryModels: ModelProviderRow[] = [];
+const inMemoryModelsRepo = {
+  find: async (): Promise<ModelProviderRow[]> => [...inMemoryModels],
+  findById: async (id: string): Promise<ModelProviderRow | undefined> =>
+    inMemoryModels.find((m) => m.id === id),
+  insert: async (row: NewModelProvider): Promise<ModelProviderRow> => {
+    const r: ModelProviderRow = {
+      id: `m${inMemoryModels.length + 1}`,
+      type: row.type,
+      protocol: row.protocol,
+      name: row.name,
+      baseUrl: row.baseUrl,
+      apiKeyEnc: row.apiKeyEnc,
+      deploymentId: row.deploymentId ?? null,
+      params: row.params ?? {},
+      enabled: row.enabled ?? true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    inMemoryModels.push(r);
+    return r;
+  },
+  update: async (
+    id: string,
+    patch: Partial<NewModelProvider>,
+  ): Promise<ModelProviderRow | undefined> => {
+    const r = inMemoryModels.find((m) => m.id === id);
+    if (r) Object.assign(r, patch, { updatedAt: new Date() });
+    return r;
+  },
+  delete: async (id: string): Promise<void> => {
+    const i = inMemoryModels.findIndex((m) => m.id === id);
+    if (i >= 0) inMemoryModels.splice(i, 1);
+  },
+};
+const fakeModelProviderPort = {
+  testConnection: jest.fn(async () => ({ ok: true, latencyMs: 5, statusCode: 200 })),
+};
+const testEncryption = new EncryptionService(Buffer.alloc(32, 7).toString("base64"));
+
 describe("M2 domain skeleton", () => {
   let app: INestApplication;
   let token: string;
@@ -165,6 +213,8 @@ describe("M2 domain skeleton", () => {
         PromptsModule,
         ChatModule,
         ConversationsModule,
+        // SecurityModule 注册 ENCRYPTION token 供 override（factory 被替换后不需 AppConfigService）
+        SecurityModule,
       ],
       providers: [
         { provide: APP_GUARD, useClass: JwtAuthGuard },
@@ -173,6 +223,12 @@ describe("M2 domain skeleton", () => {
     })
       .overrideProvider(PromptsRepository)
       .useValue(inMemoryPromptsRepo)
+      .overrideProvider(ModelsRepository)
+      .useValue(inMemoryModelsRepo)
+      .overrideProvider(ENCRYPTION)
+      .useValue(testEncryption)
+      .overrideProvider(MODEL_PROVIDER_PORT)
+      .useValue(fakeModelProviderPort)
       .compile();
     app = ref.createNestApplication();
     applyGlobalConfig(app);
@@ -194,35 +250,130 @@ describe("M2 domain skeleton", () => {
     });
   });
 
-  describe("models", () => {
-    it("GET /api/models → 200 + schema 合规", async () => {
-      const res = await request(app.getHttpServer()).get("/api/models").set(auth()).expect(200);
-      expect(Array.isArray(res.body)).toBe(true);
-      expect(res.body.length).toBeGreaterThan(0);
-      for (const m of res.body) expect(() => ModelProviderSchema.parse(m)).not.toThrow();
+  describe("models (M3 真实 CRUD + 加密 + 连通性测试)", () => {
+    let modelId: string;
+    const createBody = {
+      type: "llm",
+      protocol: "openai_compat",
+      name: "deepseek-chat",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "sk-test12345678",
+      params: { temperature: "0.3" },
+    };
+
+    it("POST /api/models 缺 apiKey → 400（ZodValidationPipe）", async () => {
+      const { apiKey: _k, ...noKey } = createBody;
+      void _k;
+      await request(app.getHttpServer()).post("/api/models").set(auth()).send(noKey).expect(400);
     });
-    it("GET /api/models/m1 → 200", async () => {
-      const res = await request(app.getHttpServer()).get("/api/models/m1").set(auth()).expect(200);
-      expect(() => ModelProviderSchema.parse(res.body)).not.toThrow();
-    });
-    it("POST /api/models → 201", async () => {
+
+    it("POST /api/models 非法 (type, protocol) 组合 → 400（llm+dashscope）", async () => {
       await request(app.getHttpServer())
         .post("/api/models")
         .set(auth())
-        .send({
-          type: "llm",
-          provider: "OpenAI",
-          name: "gpt-4o",
-          enabled: true,
-        })
-        .expect(201);
+        .send({ ...createBody, protocol: "dashscope" })
+        .expect(400);
     });
-    it("POST /api/models/m1/test → 200 {ok:true}", async () => {
+
+    it("POST /api/models → 201 + 掩码、无明文", async () => {
       const res = await request(app.getHttpServer())
-        .post("/api/models/m1/test")
+        .post("/api/models")
+        .set(auth())
+        .send(createBody)
+        .expect(201);
+      expect(() => ModelProviderSchema.parse(res.body)).not.toThrow();
+      expect(res.body.apiKeyMasked).toBe("sk-****5678");
+      expect(res.body.apiKey).toBeUndefined();
+      expect(res.body.enabled).toBe(true);
+      expect(JSON.stringify(res.body)).not.toContain("sk-test12345678");
+      modelId = res.body.id;
+    });
+
+    it("GET /api/models → 200 列表 schema 合规 + 掩码", async () => {
+      const res = await request(app.getHttpServer()).get("/api/models").set(auth()).expect(200);
+      expect(res.body.length).toBeGreaterThan(0);
+      for (const m of res.body) expect(() => ModelProviderSchema.parse(m)).not.toThrow();
+      expect(JSON.stringify(res.body)).not.toContain("sk-test12345678");
+    });
+
+    it("GET /api/models/:id → 200；不存在 → 404", async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/api/models/${modelId}`)
         .set(auth())
         .expect(200);
-      expect(res.body).toEqual({ ok: true });
+      expect(() => ModelProviderSchema.parse(res.body)).not.toThrow();
+      await request(app.getHttpServer()).get("/api/models/nope").set(auth()).expect(404);
+    });
+
+    it("PATCH enabled:false → 生效；不带 apiKey 掩码不变", async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`/api/models/${modelId}`)
+        .set(auth())
+        .send({ enabled: false })
+        .expect(200);
+      expect(res.body.enabled).toBe(false);
+      expect(res.body.apiKeyMasked).toBe("sk-****5678");
+    });
+
+    it("PATCH 带 apiKey → 轮换掩码", async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`/api/models/${modelId}`)
+        .set(auth())
+        .send({ apiKey: "sk-rotated9999" })
+        .expect(200);
+      expect(res.body.apiKeyMasked).toBe("sk-****9999");
+    });
+
+    it("PATCH 单改 protocol 为非法组合 → 400（llm 行改 dashscope）", async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/models/${modelId}`)
+        .set(auth())
+        .send({ protocol: "dashscope" })
+        .expect(400);
+    });
+
+    it("POST /:id/test 带 override → fake port 收到 override 配置 + 存量 key", async () => {
+      await request(app.getHttpServer())
+        .post(`/api/models/${modelId}/test`)
+        .set(auth())
+        .send({ baseUrl: "http://drawer.internal:9090" })
+        .expect(200);
+      expect(fakeModelProviderPort.testConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ baseUrl: "http://drawer.internal:9090" }),
+      );
+    });
+
+    it("POST /api/models/:id/test → 200 且 fake port 收到解密明文", async () => {
+      const res = await request(app.getHttpServer())
+        .post(`/api/models/${modelId}/test`)
+        .set(auth())
+        .expect(200);
+      expect(() => TestModelResponseSchema.parse(res.body)).not.toThrow();
+      expect(res.body.ok).toBe(true);
+      expect(fakeModelProviderPort.testConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ apiKey: "sk-rotated9999" }),
+      );
+      await request(app.getHttpServer()).post("/api/models/nope/test").set(auth()).expect(404);
+    });
+
+    it("POST /api/models/test（ad-hoc，保存前验活）→ 200", async () => {
+      const res = await request(app.getHttpServer())
+        .post("/api/models/test")
+        .set(auth())
+        .send({ ...createBody, apiKey: "sk-drafttest1234" })
+        .expect(200);
+      expect(res.body.ok).toBe(true);
+      expect(fakeModelProviderPort.testConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ apiKey: "sk-drafttest1234" }),
+      );
+    });
+
+    it("DELETE → 204，再 GET → 404", async () => {
+      await request(app.getHttpServer())
+        .delete(`/api/models/${modelId}`)
+        .set(auth())
+        .expect(204);
+      await request(app.getHttpServer()).get(`/api/models/${modelId}`).set(auth()).expect(404);
     });
   });
 
@@ -577,6 +728,8 @@ describe("M2 domain skeleton", () => {
       const paths = Object.keys(res.body.paths);
       expect(paths).toContain("/api/models");
       expect(paths).toContain("/api/models/{id}");
+      expect(paths).toContain("/api/models/test");
+      expect(paths).toContain("/api/models/{id}/test");
       expect(paths).toContain("/api/knowledge-bases");
       expect(paths).toContain("/api/documents");
       expect(paths).toContain("/api/documents/{id}/ingest");
