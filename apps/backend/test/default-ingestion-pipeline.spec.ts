@@ -59,3 +59,48 @@ describe("DefaultIngestionPipeline", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("DefaultIngestionPipeline 业务错误码（QA 回归）", () => {
+  it("向量化上游报错 → [EMBED_FAILED] 前缀 + 上游详情保留", async () => {
+    const models = {
+      embedTexts: jest
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "HTTP 400: <400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 8192]",
+          ),
+        ),
+    };
+    const chunksRepo = { replaceVersion: jest.fn() };
+    const pipeline = new DefaultIngestionPipeline(models as never, chunksRepo as never, 10);
+    await expect(
+      pipeline.run({
+        documentId: "d1",
+        kbId: "kb1",
+        docType: "text",
+        chunkTemplate: "general",
+        embeddingModelId: "m1",
+        targetVersion: 1,
+        blob: Buffer.from("正文内容"),
+      }),
+    ).rejects.toThrow(/^\[EMBED_FAILED\] 向量化失败：HTTP 400/);
+    expect(chunksRepo.replaceVersion).not.toHaveBeenCalled();
+  });
+
+  it("解析失败 → [PARSE_FAILED] 前缀", async () => {
+    const models = { embedTexts: jest.fn() };
+    const chunksRepo = { replaceVersion: jest.fn() };
+    const pipeline = new DefaultIngestionPipeline(models as never, chunksRepo as never, 10);
+    await expect(
+      pipeline.run({
+        documentId: "d1",
+        kbId: "kb1",
+        docType: "pdf",
+        chunkTemplate: "general",
+        embeddingModelId: "m1",
+        targetVersion: 1,
+        blob: Buffer.from("not a pdf"),
+      }),
+    ).rejects.toThrow(/^\[PARSE_FAILED\] 文档解析失败：/);
+  });
+});

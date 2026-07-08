@@ -1,5 +1,9 @@
 import { GeneralChunker } from "./general-chunker";
+import { estimateTokens } from "../../pipeline/estimate-tokens";
+import { hardSplitByTokens } from "../../pipeline/hard-split";
 import type { ChunkDraftPartial, ChunkerPort } from "../../ports/chunker.port";
+
+const MAX_TOKENS = 512;
 
 const QA_LINE = /^(?:问|Q)[：:]\s*(.+)$/;
 const A_LINE = /^(?:答|A)[：:]\s*(.+)$/;
@@ -21,7 +25,15 @@ export class QaChunker implements ChunkerPort {
       }
       const a = A_LINE.exec(line.trim());
       if (a && pendingQ) {
-        drafts.push({ seq: drafts.length, text: `${pendingQ}\n${a[1]}`, section: pendingQ });
+        const pair = `${pendingQ}\n${a[1]}`;
+        if (estimateTokens(pair) > MAX_TOKENS) {
+          // 超长问答对按硬上限切分为多片，section 保持问句——保证不超 embedding 单条输入上限
+          for (const piece of hardSplitByTokens(pair, MAX_TOKENS)) {
+            drafts.push({ seq: drafts.length, text: piece, section: pendingQ });
+          }
+        } else {
+          drafts.push({ seq: drafts.length, text: pair, section: pendingQ });
+        }
         pendingQ = null;
       }
     }

@@ -9,6 +9,7 @@ import { DocumentsRepository } from "../documents/documents.repository";
 import { KnowledgeBasesRepository } from "../knowledge-bases/knowledge-bases.repository";
 import { INGESTION_PIPELINE_PORT } from "./ingestion.constants";
 import type { IngestionPipelinePort } from "./ports/ingestion-pipeline.port";
+import { IngestionError } from "./pipeline/ingestion-error";
 import { INGEST_DOCUMENT_JOB } from "./ingestion-job.constants";
 
 const nowIso = (): string => new Date().toISOString();
@@ -94,7 +95,7 @@ export class IngestionService {
 
       // HOST 裁定：ready 但 0 切片会误导用户，按失败处理（走 catch 落 failed + 可读错误）。
       if (result.chunkCount === 0) {
-        throw new Error("解析结果为空，未产生任何切片");
+        throw new IngestionError("CHUNK_EMPTY");
       }
 
       await this.docsRepo.update(documentId, {

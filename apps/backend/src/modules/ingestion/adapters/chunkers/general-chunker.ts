@@ -1,4 +1,5 @@
 import { estimateTokens } from "../../pipeline/estimate-tokens";
+import { hardSplitByTokens } from "../../pipeline/hard-split";
 import type { ChunkDraftPartial, ChunkerPort } from "../../ports/chunker.port";
 
 const MAX_TOKENS = 512;
@@ -54,12 +55,15 @@ export class GeneralChunker implements ChunkerPort {
     return out;
   }
 
-  // 贪心合并：按段落（空行分隔）依次累加，超过 MAX_TOKENS 就切出一片
+  // 贪心合并：按段落（空行分隔）依次累加，超过 MAX_TOKENS 就切出一片。
+  // 单段超过 MAX_TOKENS 时先做硬上限切分（句子边界优先）——PDF 抽取文本常无空行，
+  // 否则整页会成为一个巨型切片，向量化会被服务商的单条输入长度上限（如 8192）拒绝。
   private chunkFlat(body: string, section: string, seqStart = 0): ChunkDraftPartial[] {
     const paragraphs = body
       .split(/\n\s*\n/)
       .map((p) => p.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      .flatMap((p) => (estimateTokens(p) > MAX_TOKENS ? hardSplitByTokens(p, MAX_TOKENS) : [p]));
     if (paragraphs.length === 0) return [];
 
     const drafts: ChunkDraftPartial[] = [];

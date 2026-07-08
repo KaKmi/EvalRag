@@ -1,3 +1,4 @@
+import { estimateTokens } from "../src/modules/ingestion/pipeline/estimate-tokens";
 import { GeneralChunker } from "../src/modules/ingestion/adapters/chunkers/general-chunker";
 import { QaChunker } from "../src/modules/ingestion/adapters/chunkers/qa-chunker";
 import { CHUNKER_REGISTRY } from "../src/modules/ingestion/adapters/chunkers/chunker-registry";
@@ -65,5 +66,33 @@ describe("QaChunker", () => {
   it("退化：无 Q/A 标记时按最低级标题切段（同 general 兜底）", () => {
     const drafts = chunker.chunk("# 一\n没有问答标记的内容");
     expect(drafts.length).toBe(1);
+  });
+});
+
+describe("分块硬上限（QA 回归：PDF 无空行长文不得产出超长切片）", () => {
+  it("GeneralChunker：无空行的超长正文被硬切，所有切片 ≤ 512 token", () => {
+    // 模拟 PDF 抽取文本：只有单个换行、无空行 → 旧实现会产出一个 ~3000 token 巨型切片
+    const line = "苏州各板块房价与学区资源分布对比分析，二百万预算的购置建议与风险提示。";
+    const text = Array.from({ length: 100 }, () => line).join("\n");
+    const drafts = new GeneralChunker().chunk(text);
+
+    expect(drafts.length).toBeGreaterThan(1);
+    for (const d of drafts) {
+      expect(estimateTokens(d.text)).toBeLessThanOrEqual(512);
+    }
+    // seq 连续
+    drafts.forEach((d, i) => expect(d.seq).toBe(i));
+  });
+
+  it("QaChunker：超长问答对被硬切为多片，section 保持问句", () => {
+    const longAnswer = "这个问题的答案非常长。".repeat(120); // ~1300 token
+    const text = `问：二百万预算怎么买？\n答：${longAnswer}`;
+    const drafts = new QaChunker().chunk(text);
+
+    expect(drafts.length).toBeGreaterThan(1);
+    for (const d of drafts) {
+      expect(estimateTokens(d.text)).toBeLessThanOrEqual(512);
+      expect(d.section).toBe("二百万预算怎么买？");
+    }
   });
 });

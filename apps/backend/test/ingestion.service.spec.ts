@@ -148,7 +148,10 @@ describe("IngestionService.processDocument", () => {
     await expect(svc.processDocument("d1", 1)).resolves.toBeUndefined();
     expect(deps.docsRepo.update).toHaveBeenCalledWith(
       "d1",
-      expect.objectContaining({ status: "failed", error: "解析结果为空，未产生任何切片" }),
+      expect.objectContaining({
+        status: "failed",
+        error: "[CHUNK_EMPTY] 解析结果为空，未产生任何切片",
+      }),
     );
     expect(deps.docsRepo.update).not.toHaveBeenCalledWith(
       "d1",
