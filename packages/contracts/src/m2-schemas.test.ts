@@ -208,9 +208,8 @@ describe("M2 contracts — negative cases", () => {
         .rerankThreshold,
     ).toBe(0.5);
   });
-  it("AgentSchema rejects threshold out of range", () => {
-    expect(() => AgentSchema.parse({ ...valid.agent, threshold: 2 })).toThrow();
-  });
+  // M7 后 threshold 归属 currentVersion（AgentConfigVersion），Agent 顶层无此字段——
+  // 旧扁平 schema 的「顶层 threshold 越界」用例已无意义，由下面 currentVersion 用例覆盖
   it("AgentSchema rejects currentVersion.threshold out of range", () => {
     expect(() =>
       AgentSchema.parse({
