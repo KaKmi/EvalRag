@@ -101,10 +101,13 @@ describe("CustomChunker 文件名解析与上下文头", () => {
 
 describe("CustomChunker 结构切分", () => {
   it("按 ## 一级标题切主段；首个 ## 之前的内容归为「引言」", () => {
-    // 第一节正文需 ≥50 字，否则触发「过短整节并入上一 chunk」规则（另有专门用例覆盖）。
-    const text = ["这是引言部分的内容。", "", "## 第一节", "第一节正文内容。".repeat(10)].join(
-      "\n",
-    );
+    // 两节正文都需 ≥MIN_CHUNK(200) 字，否则触发全文范围的短块合并规则（另有专门用例覆盖）。
+    const text = [
+      "这是引言部分的内容。".repeat(30),
+      "",
+      "## 第一节",
+      "第一节正文内容。".repeat(30),
+    ].join("\n");
     const drafts = chunker.chunk(text, meta);
     expect(drafts[0].section).toContain("引言");
     expect(drafts.some((d) => d.section.includes("第一节"))).toBe(true);
@@ -172,5 +175,96 @@ describe("CustomChunker 结构切分", () => {
     const text = ["## 一", "正文一。", "## 二", "正文二。", "## 三", "正文三。"].join("\n\n");
     const drafts = chunker.chunk(text, meta);
     drafts.forEach((d, i) => expect(d.seq).toBe(i));
+  });
+});
+
+describe("CustomChunker 二次切分子标题溯源", () => {
+  it("二次切分的分片 section 带上真实的 ### 子标题，不退化成纯编号", () => {
+    const longPara = "详细内容句子。".repeat(100);
+    const text = ["## 大标题", "### 扩散模型", longPara, "### 压缩模型", longPara].join("\n\n");
+    const drafts = chunker.chunk(text, meta);
+    const withSub1 = drafts.find((d) => d.text.includes("扩散模型"));
+    const withSub2 = drafts.find((d) => d.text.includes("压缩模型"));
+    expect(withSub1?.section).toContain("扩散模型");
+    expect(withSub2?.section).toContain("压缩模型");
+    expect(withSub1?.section).not.toMatch(/大标题（\d+）$/);
+  });
+
+  it("子标题只产生一片时不加序号后缀", () => {
+    const longPara = "详细内容句子。".repeat(100);
+    const text = ["## 大标题", "### 扩散模型", longPara, "### 压缩模型", longPara].join("\n\n");
+    const drafts = chunker.chunk(text, meta);
+    const withSub1 = drafts.find((d) => d.text.includes("扩散模型"));
+    expect(withSub1?.section).toBe("《揭秘公司治理框架》第11课·人才九宫格 > 大标题 > 扩散模型");
+  });
+});
+
+describe("CustomChunker 全文短块合并", () => {
+  it("开头的引言（50~200字之间，超过旧的 50 字阈值）没有上一块可并，向后并入紧随的第一节", () => {
+    const text = [
+      "上一节我们聊了A，这一节我们聊聊B，敬请期待。".repeat(3),
+      "",
+      "## 第一节",
+      "第一节正文内容，足够长构成独立块。".repeat(20),
+    ].join("\n");
+    const drafts = chunker.chunk(text, meta);
+    expect(drafts.length).toBe(1);
+    expect(drafts[0].text).toContain("敬请期待");
+    expect(drafts[0].text).toContain("第一节正文内容");
+    expect(drafts[0].section).toContain("第一节");
+  });
+
+  it("结语类过渡段（50~200字）与前一块合并，不再独立成碎片", () => {
+    const text = [
+      "## 正文标题",
+      "这是正文内容。".repeat(30),
+      "## 结语",
+      "今天的内容就到这里，下一节我们继续探讨管理话题，敬请期待各位读者朋友们。",
+    ].join("\n\n");
+    const drafts = chunker.chunk(text, meta);
+    expect(drafts.length).toBe(1);
+    expect(drafts[0].text).toContain("今天的内容就到这里");
+  });
+});
+
+describe("CustomChunker 表格保护", () => {
+  const tableHeader = "| 列A | 列B |";
+  const tableSep = "|---|---|";
+  const makeRow = (i: number) =>
+    `| 第${i}行数据很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长 | 第${i}列数据很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长 |`;
+
+  it("超长表格按行切分，每一片都重复表头/分隔行", () => {
+    const rows = Array.from({ length: 15 }, (_, i) => makeRow(i));
+    const text = ["## 大标题", "### 数据表", tableHeader, tableSep, ...rows].join("\n");
+    const drafts = chunker.chunk(text, meta);
+    expect(drafts.length).toBeGreaterThan(1);
+    for (const d of drafts) {
+      expect(d.text).toContain(tableHeader);
+      expect(d.text).toContain(tableSep);
+    }
+  });
+
+  it("表格前带引导语（表头不在第一行）也能正确识别表头并在续片重复", () => {
+    const rows = Array.from({ length: 15 }, (_, i) => makeRow(i));
+    const text = ["## 大标题", "### 数据表", "这里举个例子：", tableHeader, tableSep, ...rows].join(
+      "\n",
+    );
+    const drafts = chunker.chunk(text, meta);
+    expect(drafts.length).toBeGreaterThan(1);
+    for (const d of drafts) {
+      expect(d.text).toContain(tableHeader);
+    }
+  });
+
+  it("表格切分不做字符级 overlap，不会把表格行从单元格中间截断", () => {
+    const rows = Array.from({ length: 15 }, (_, i) => makeRow(i));
+    const text = ["## 大标题", "### 数据表", tableHeader, tableSep, ...rows].join("\n");
+    const drafts = chunker.chunk(text, meta);
+    for (const d of drafts) {
+      const brokenLine = d.text
+        .split("\n")
+        .find((line) => line.startsWith("……") && line.includes("|") && !line.trim().startsWith("|"));
+      expect(brokenLine).toBeUndefined();
+    }
   });
 });
