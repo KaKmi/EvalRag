@@ -188,8 +188,10 @@ it("loads DocumentsPage from real /api/documents on /admin/knowledge-bases/:kbId
       <App />
     </MemoryRouter>,
   );
-  // 空列表态出现 = 页面已挂载且消费了 API 响应（不再渲染本地 mock 文档）
-  expect(await screen.findByText(/该知识库暂无文档/)).toBeInTheDocument();
+  // 空列表态出现 = 页面已挂载且消费了 API 响应（不再渲染本地 mock 文档）。
+  // DocumentsPage 是最重的懒加载 chunk，全量套件并发跑时 vitest 现场转换可超 findByText
+  // 默认 1s 超时（单跑轻载能过）——放宽等待窗口，断言语义不变。
+  expect(await screen.findByText(/该知识库暂无文档/, {}, { timeout: 10_000 })).toBeInTheDocument();
   // 关键断言：挂载时确实调用了 /api/documents?kbId=kb1（非本地 mock）
   await waitFor(() => {
     const calls = fetchMock.mock.calls.map(c => String(c[0]));
