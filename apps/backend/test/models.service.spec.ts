@@ -169,3 +169,33 @@ describe("ModelsService", () => {
     });
   });
 });
+
+describe("ModelsService.rerankTexts", () => {
+  it("查行、解密 key、调用 provider.rerank，返回 results", async () => {
+    const repo = makeRepo();
+    // 局部 port（不复用文件顶部共享 port 常量）：只为本用例声明 rerank，避免打乱其它用例
+    const rerankPort = {
+      testConnection: jest.fn(),
+      embed: jest.fn(),
+      rerank: jest.fn(async () => ({ results: [{ index: 0, score: 0.9 }] })),
+    } as unknown as jest.Mocked<ModelProviderPort>;
+    const svc = new ModelsService(repo as unknown as ModelsRepository, enc, rerankPort);
+    const created = await svc.create({
+      type: "rerank",
+      protocol: "cohere",
+      name: "rerank-v3",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "sk-rerank12345",
+      params: {},
+      enabled: true,
+    });
+    const results = await svc.rerankTexts(created.id, "问题", ["a", "b"], 5);
+    expect(results).toEqual([{ index: 0, score: 0.9 }]);
+    expect(rerankPort.rerank).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: "sk-rerank12345", protocol: "cohere" }),
+      "问题",
+      ["a", "b"],
+      5,
+    );
+  });
+});

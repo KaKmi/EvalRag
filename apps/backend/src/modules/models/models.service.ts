@@ -131,6 +131,32 @@ export class ModelsService {
     return vectors;
   }
 
+  // 供 retrieval 域调用：按 modelId 查行、解密 key、调端口 rerank()。密钥解密不出 models 域
+  // （同 embedTexts 的模式，008 §Rerank 端口设计）。
+  async rerankTexts(
+    modelId: string,
+    query: string,
+    texts: string[],
+    topN?: number,
+  ): Promise<{ index: number; score: number }[]> {
+    const row = await this.mustFind(modelId);
+    const { results } = await this.provider.rerank(
+      {
+        type: row.type as ModelType,
+        protocol: row.protocol as ModelProtocol,
+        name: row.name,
+        baseUrl: row.baseUrl,
+        deploymentId: row.deploymentId ?? undefined,
+        params: row.params,
+        apiKey: this.enc.decrypt(row.apiKeyEnc),
+      },
+      query,
+      texts,
+      topN,
+    );
+    return results;
+  }
+
   // best-effort span：属性只含类型/协议/模型名，永不含 apiKey。
   // gen_ai.system 填协议值（provider 字段已随协议化移除，协议值比自由文本更规范）
   private async doTest(config: ModelCallConfig): Promise<TestModelResponse> {
