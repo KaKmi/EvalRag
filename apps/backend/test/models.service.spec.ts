@@ -165,7 +165,7 @@ describe("ModelsService", () => {
 
     await expect(svc.remove(created.id)).rejects.toMatchObject({
       status: 409,
-      message: expect.stringContaining("仍被知识库引用"),
+      message: expect.stringContaining("仍被知识库或 Agent 配置引用"),
     });
   });
 });

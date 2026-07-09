@@ -282,4 +282,40 @@ describe("PromptsService", () => {
     await expect(service.delete("p1")).rejects.toBeInstanceOf(NotFoundException);
     expect(repo.deletePrompt).not.toHaveBeenCalled();
   });
+
+  it("delete → repo 抛 FK 违反（23503 包在 cause 里）→ ConflictException（M7 联动补丁）", async () => {
+    const fkError = Object.assign(
+      new Error("update or delete violates foreign key constraint"),
+      { cause: { code: "23503" } },
+    );
+    const repo = makeRepo({
+      findPromptById: jest.fn(async () => promptListRow), // currentVersionId:null，草稿可删
+      deletePrompt: jest.fn(async () => {
+        throw fkError;
+      }),
+    });
+    const service = new PromptsService(repo);
+    await expect(service.delete("p1")).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it("delete → repo 抛非 FK 错误 → 原样透传（不误转 409）", async () => {
+    const repo = makeRepo({
+      findPromptById: jest.fn(async () => promptListRow),
+      deletePrompt: jest.fn(async () => {
+        throw new Error("boom");
+      }),
+    });
+    const service = new PromptsService(repo);
+    await expect(service.delete("p1")).rejects.toThrow("boom");
+  });
+
+  it("getVersionMeta → 返回 {promptId, node}；版本不存在 → null（M7 跨域校验用）", async () => {
+    const repo = makeRepo({
+      findVersionById: jest.fn(async (id: string) => (id === "pv1" ? versionRow : undefined)),
+      findPromptById: jest.fn(async () => promptListRow),
+    });
+    const service = new PromptsService(repo);
+    expect(await service.getVersionMeta("pv1")).toEqual({ promptId: "p1", node: "rewrite" });
+    expect(await service.getVersionMeta("nope")).toBeNull();
+  });
 });

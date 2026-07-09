@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import { knowledgeBases, type KnowledgeBaseRow, type NewKnowledgeBase } from "./schema";
@@ -25,6 +25,12 @@ export class KnowledgeBasesRepository {
       .where(eq(knowledgeBases.id, id))
       .limit(1);
     return rows[0];
+  }
+
+  // 批量按 id 查（agents 域校验 embedding 一致性用，避免 N 次单查）
+  async findByIds(ids: string[]): Promise<KnowledgeBaseRow[]> {
+    if (ids.length === 0) return [];
+    return await this.db.select().from(knowledgeBases).where(inArray(knowledgeBases.id, ids));
   }
 
   async findByName(name: string): Promise<KnowledgeBaseRow | undefined> {
