@@ -111,7 +111,27 @@ export class PromptsService {
     if (r.currentVersionId !== null) {
       throw new ConflictException("已启用的 Prompt 不可删除，请先停用");
     }
-    await this.repo.deletePrompt(promptId);
+    try {
+      await this.repo.deletePrompt(promptId);
+    } catch (err) {
+      // M7 起 agent_config_versions.prompt_*_ver_id ON DELETE RESTRICT：
+      // 草稿 Prompt 的版本也可能已被 Agent 配置版本引用，DB 层拒删时转可读 409（不让 23503 裸奔）
+      if (isForeignKeyViolation(err)) {
+        throw new ConflictException(
+          `prompt ${promptId} 的某个版本仍被 Agent 配置引用，无法删除`,
+        );
+      }
+      throw err;
+    }
+  }
+
+  // 供跨域（agents）调用：给定 prompt_version id，反查其所属 prompt 与 node（校验节点归属用）
+  async getVersionMeta(versionId: string): Promise<{ promptId: string; node: string } | null> {
+    const version = await this.repo.findVersionById(versionId);
+    if (!version) return null;
+    const prompt = await this.repo.findPromptById(version.promptId);
+    if (!prompt) return null;
+    return { promptId: version.promptId, node: prompt.node };
   }
 }
 
@@ -148,5 +168,17 @@ function isUniqueViolation(e: unknown): boolean {
     e !== null &&
     "code" in e &&
     (e as { code: string }).code === "23505"
+  );
+}
+
+// drizzle 把底层 pg 错误包在 e.cause 里（models.service.ts:177-185 实测验证的正确模式），
+// 不复用上面检查顶层 e.code 的 isUniqueViolation 写法
+function isForeignKeyViolation(e: unknown): boolean {
+  const cause = e instanceof Error ? e.cause : undefined;
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    (cause as { code: string }).code === "23503"
   );
 }

@@ -3,6 +3,16 @@ import {
   AgentSchema,
   type Agent,
   type AgentListResponse,
+  AgentConfigVersionListResponseSchema,
+  type AgentConfigVersionListResponse,
+  AgentConfigVersionSchema,
+  type AgentConfigVersion,
+  CreateAgentRequestSchema,
+  type CreateAgentRequest,
+  UpdateAgentRequestSchema,
+  type UpdateAgentRequest,
+  CreateAgentConfigVersionRequestSchema,
+  type CreateAgentConfigVersionRequest,
   ChunkBatchDeleteRequestSchema,
   type ChunkBatchDeleteRequest,
   ChunkBatchDeleteResponseSchema,
@@ -138,11 +148,63 @@ export async function getHealth(): Promise<HealthResponse> {
 // 路径对齐后端 skeleton 路由前缀（见各域 @Controller）。
 // evalsets/evals 后端无 skeleton（M11 才有），故不在此声明。
 
-// agents — @Controller("agents")
+// agents — @Controller("agents")（M7 真实 CRUD + 配置版本 + Eval stub + 发布/回滚）
 export const getAgents = (): Promise<AgentListResponse> =>
   getJson("/api/agents", AgentListResponseSchema);
 export const getAgent = (id: string): Promise<Agent> =>
   getJson(`/api/agents/${encodeURIComponent(id)}`, AgentSchema);
+export const createAgent = (req: CreateAgentRequest): Promise<Agent> =>
+  postJson("/api/agents", req, CreateAgentRequestSchema, AgentSchema);
+export async function updateAgent(id: string, req: UpdateAgentRequest): Promise<Agent> {
+  const resp = await apiFetch(`/api/agents/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(UpdateAgentRequestSchema.parse(req)),
+  });
+  if (!resp.ok) throw new Error(`update agent failed: ${resp.status} ${resp.statusText}`);
+  return AgentSchema.parse(await resp.json());
+}
+export const getAgentConfigVersions = (
+  agentId: string,
+): Promise<AgentConfigVersionListResponse> =>
+  getJson(
+    `/api/agents/${encodeURIComponent(agentId)}/config-versions`,
+    AgentConfigVersionListResponseSchema,
+  );
+export const createAgentConfigVersion = (
+  agentId: string,
+  req: CreateAgentConfigVersionRequest,
+): Promise<AgentConfigVersion> =>
+  postJson(
+    `/api/agents/${encodeURIComponent(agentId)}/config-versions`,
+    req,
+    CreateAgentConfigVersionRequestSchema,
+    AgentConfigVersionSchema,
+  );
+// eval-run / publish / rollback：无请求体 POST（对齐 prompts publish/rollback 的封装形状）
+async function postAgentVersionAction(
+  agentId: string,
+  versionId: string,
+  action: "eval-run" | "publish" | "rollback",
+): Promise<AgentConfigVersion> {
+  const resp = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/config-versions/${encodeURIComponent(versionId)}/${action}`,
+    { method: "POST" },
+  );
+  if (!resp.ok) throw new Error(`${action} failed: ${resp.status}`);
+  return AgentConfigVersionSchema.parse(await resp.json());
+}
+export const runAgentConfigVersionEval = (
+  agentId: string,
+  versionId: string,
+): Promise<AgentConfigVersion> => postAgentVersionAction(agentId, versionId, "eval-run");
+export const publishAgentConfigVersion = (
+  agentId: string,
+  versionId: string,
+): Promise<AgentConfigVersion> => postAgentVersionAction(agentId, versionId, "publish");
+export const rollbackAgentConfigVersion = (
+  agentId: string,
+  versionId: string,
+): Promise<AgentConfigVersion> => postAgentVersionAction(agentId, versionId, "rollback");
 
 // models — @Controller("models")（M3 真实 CRUD + 连通性测试）
 export const getModels = (): Promise<ModelProviderListResponse> =>
