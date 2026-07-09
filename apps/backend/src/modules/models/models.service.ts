@@ -80,11 +80,11 @@ export class ModelsService {
     try {
       await this.repo.delete(id);
     } catch (err) {
-      // knowledge_bases.embedding_model_id 现有 FK RESTRICT（007 Design「存储 schema」）：
-      // 模型仍被知识库绑定时删除会在 DB 层被拒（embeddingModelId 创建后锁定，语义上就不该能删）。
+      // knowledge_bases.embedding_model_id 与 agent_config_versions.*_model_id 均 FK RESTRICT
+      //（007/008 Design「存储 schema」）：模型仍被引用时删除会在 DB 层被拒。
       // 转成可读 409，不让原始 23503 裸奔到客户端。
       if (isForeignKeyViolation(err)) {
-        throw new ConflictException(`model ${id} 仍被知识库引用，无法删除`);
+        throw new ConflictException(`model ${id} 仍被知识库或 Agent 配置引用，无法删除`);
       }
       throw err;
     }

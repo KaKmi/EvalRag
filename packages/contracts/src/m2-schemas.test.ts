@@ -23,6 +23,48 @@ import {
   UpdateAgentRequestSchema,
 } from "./index";
 
+// M7：Agent 契约改三层版本化模型（008 设计），fixture 对齐新形状
+const validNodeConfig = {
+  freedom: "balance" as const,
+  temperatureEnabled: true,
+  temperature: 0.5,
+  topPEnabled: false,
+  topP: 0.9,
+};
+const validAgentConfigFields = {
+  kbIds: ["kb1"],
+  genModelId: "m1",
+  promptRewriteVerId: "pv1",
+  promptIntentVerId: "pv2",
+  promptReplyVerId: "pv3",
+  promptFallbackVerId: "pv4",
+  nodeParams: {
+    rewrite: validNodeConfig,
+    intent: validNodeConfig,
+    reply: validNodeConfig,
+    fallback: validNodeConfig,
+  },
+  topK: 20,
+  topN: 5,
+  threshold: 0.65,
+  multiRecall: true,
+  fallbackHuman: true,
+};
+const validAgentVersion = {
+  ...validAgentConfigFields,
+  id: "av1",
+  agentId: "a1",
+  version: 1,
+  status: "published" as const,
+  evalStatus: "exempt" as const,
+  evalRunAt: null,
+  evalPassRate: null,
+  createdBy: "demo@codecrush.local",
+  createdAt: "2026-07-09T00:00:00.000Z",
+  publishedBy: "demo@codecrush.local",
+  publishedAt: "2026-07-09T00:00:00.000Z",
+};
+
 const valid = {
   model: {
     id: "m1",
@@ -52,21 +94,15 @@ const valid = {
     finalScore: 0.82,
   },
   agent: {
-    id: "aftersale",
+    id: "a1",
     name: "售后助手",
     desc: "售后问答",
-    status: "active",
-    kbs: ["kb1"],
-    genModelId: "m1",
-    promptRewriteVerId: "pv1",
-    promptIntentVerId: "pv2",
-    promptReplyVerId: "pv3",
-    promptFallbackVerId: "pv4",
-    topK: 20,
-    topN: 5,
-    threshold: 0.2,
-    multi: true,
-    fallbackHuman: true,
+    enabled: true,
+    status: "active" as const,
+    currentVersion: validAgentVersion,
+    createdAt: "2026-07-09T00:00:00.000Z",
+    updatedAt: "2026-07-09T00:00:00.000Z",
+    updatedBy: "demo@codecrush.local",
   },
   prompt: {
     id: "p1",
@@ -161,8 +197,16 @@ describe("M2 contracts — negative cases", () => {
   it("RetrievalTestRequestSchema rejects threshold out of range", () => {
     expect(() => RetrievalTestRequestSchema.parse({ ...valid.retrievalReq, threshold: 1.5 })).toThrow();
   });
-  it("AgentSchema rejects threshold out of range", () => {
-    expect(() => AgentSchema.parse({ ...valid.agent, threshold: 2 })).toThrow();
+  it("AgentSchema rejects currentVersion.threshold out of range", () => {
+    expect(() =>
+      AgentSchema.parse({
+        ...valid.agent,
+        currentVersion: { ...validAgentVersion, threshold: 2 },
+      }),
+    ).toThrow();
+  });
+  it("AgentSchema accepts currentVersion:null (draft，未发布任何版本)", () => {
+    expect(AgentSchema.parse({ ...valid.agent, currentVersion: null }).currentVersion).toBeNull();
   });
   it("PromptSchema rejects unknown node", () => {
     expect(() => PromptSchema.parse({ ...valid.prompt, node: "summary" })).toThrow();
@@ -231,7 +275,12 @@ describe("PaginatedResponseSchema (generic factory)", () => {
   it("rejects when an item is invalid", () => {
     const Schema = PaginatedResponseSchema(AgentSchema);
     expect(() =>
-      Schema.parse({ items: [{ ...valid.agent, threshold: 5 }], total: 1, page: 1, pageSize: 20 }),
+      Schema.parse({
+        items: [{ ...valid.agent, currentVersion: { ...validAgentVersion, threshold: 5 } }],
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      }),
     ).toThrow();
   });
   it("rejects page=0", () => {
@@ -252,15 +301,19 @@ describe("M2 request schemas (skeleton DTOs)", () => {
       CreateModelRequestSchema.parse({ ...rest, apiKey: "sk-12345678", type: "vision" }),
     ).toThrow();
   });
-  it("CreateAgentRequestSchema omits id", () => {
-    const { id: _id, ...rest } = valid.agent;
-    void _id;
-    expect(CreateAgentRequestSchema.parse(rest).name).toBe(valid.agent.name);
-    expect(() => CreateAgentRequestSchema.parse({ ...rest, topK: -1 })).toThrow();
+  it("CreateAgentRequestSchema accepts full payload (配置字段 + name/desc)", () => {
+    const req = { ...validAgentConfigFields, name: "售后助手", desc: "" };
+    expect(CreateAgentRequestSchema.parse(req).name).toBe("售后助手");
+    expect(() => CreateAgentRequestSchema.parse({ ...req, topK: -1 })).toThrow();
+    expect(() => CreateAgentRequestSchema.parse({ ...req, threshold: 2 })).toThrow();
+    expect(() => CreateAgentRequestSchema.parse({ ...req, kbIds: [] })).toThrow(); // 至少绑一个知识库
   });
-  it("UpdateAgentRequestSchema is partial (allows single field)", () => {
+  it("UpdateAgentRequestSchema is strict — 仅 name/desc/enabled，拒绝未知键（008 决策 3）", () => {
     expect(UpdateAgentRequestSchema.parse({ name: "新名字" }).name).toBe("新名字");
     expect(UpdateAgentRequestSchema.parse({}).name).toBeUndefined();
+    expect(UpdateAgentRequestSchema.parse({ enabled: false }).enabled).toBe(false);
+    expect(() => UpdateAgentRequestSchema.parse({ topK: 10 })).toThrow();
+    expect(() => UpdateAgentRequestSchema.parse({ genModelId: "m2" })).toThrow();
   });
   it("CreatePromptRequestSchema accepts { name, node, body, note? }", () => {
     const parsed = CreatePromptRequestSchema.parse(valid.createPromptReq);
