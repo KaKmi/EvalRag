@@ -161,6 +161,17 @@ describe("M2 contracts — negative cases", () => {
   it("RetrievalTestRequestSchema rejects threshold out of range", () => {
     expect(() => RetrievalTestRequestSchema.parse({ ...valid.retrievalReq, threshold: 1.5 })).toThrow();
   });
+  it("RetrievalTestRequestSchema rejects rerankThreshold out of range", () => {
+    expect(() =>
+      RetrievalTestRequestSchema.parse({ ...valid.retrievalReq, rerankThreshold: 1.5 }),
+    ).toThrow();
+  });
+  it("RetrievalTestRequestSchema accepts rerankThreshold within range", () => {
+    expect(
+      RetrievalTestRequestSchema.parse({ ...valid.retrievalReq, rerankThreshold: 0.5 })
+        .rerankThreshold,
+    ).toBe(0.5);
+  });
   it("AgentSchema rejects threshold out of range", () => {
     expect(() => AgentSchema.parse({ ...valid.agent, threshold: 2 })).toThrow();
   });

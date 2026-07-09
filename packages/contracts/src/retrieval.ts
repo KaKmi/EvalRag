@@ -9,6 +9,7 @@ export const RetrievalTestRequestSchema = z.object({
   multi: z.boolean(),
   vecWeight: z.number().min(0).max(1).optional(),
   rerankModelId: z.string().optional(),
+  rerankThreshold: z.number().min(0).max(1).optional(),
   topN: z.number().int().positive().optional(),
 });
 export type RetrievalTestRequest = z.infer<typeof RetrievalTestRequestSchema>;
