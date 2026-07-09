@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -96,6 +96,20 @@ const defaultNodeParams = (): NodeParams => ({
   reply: defaultNodeConfig(),
   fallback: defaultNodeConfig(),
 });
+
+/** 检索测试页「带入新建配置版本」经路由 state 传来的载荷（M5↔M7 测试 → 发布闭环） */
+export interface RetrievalTestApplyState {
+  agentId: string;
+  params: {
+    topK: number;
+    topN: number;
+    threshold: number;
+    multiRecall: boolean;
+    vecWeight?: number;
+    rerankModelId?: string;
+  };
+  note: string;
+}
 
 /** 新建 Agent / 新建配置版本共用的表单草稿（"" 表示未选，提交前转 undefined/校验） */
 interface ConfigDraft {
@@ -599,6 +613,7 @@ function VersionSummary({
 
 export default function AgentsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [rows, setRows] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [listErr, setListErr] = useState("");
@@ -696,6 +711,34 @@ export default function AgentsPage() {
     void refreshVersions(verAgent.id);
     setSelVerId(null);
   }, [verAgent, refreshVersions]);
+
+  // 检索测试「带入新建配置版本」（M5↔M7 测试 → 发布闭环）：以生产配置为底、
+  // 覆盖测试检索参数，直接打开目标 Agent 的配置版本抽屉 + 预填的新建版本抽屉
+  useEffect(() => {
+    const apply = (location.state as { retrievalTestApply?: RetrievalTestApplyState } | null)
+      ?.retrievalTestApply;
+    if (!apply || rows.length === 0) return;
+    // 一次性载荷：立即消费掉，避免刷新/返回时重复弹出
+    navigate(location.pathname, { replace: true });
+    const agent = rows.find((a) => a.id === apply.agentId);
+    if (!agent?.currentVersion) {
+      message.error("目标 Agent 不存在或暂无生产版本，无法带入测试参数");
+      return;
+    }
+    setVerAgent(agent);
+    setVerDraft({
+      ...draftFromVersion(agent.currentVersion),
+      topK: apply.params.topK,
+      topN: apply.params.topN,
+      threshold: apply.params.threshold,
+      multiRecall: apply.params.multiRecall,
+      vecWeight: apply.params.vecWeight ?? agent.currentVersion.vecWeight ?? 0.6,
+      rerankModelId: apply.params.rerankModelId ?? "",
+      note: apply.note,
+    });
+    setVerDraftErr("");
+    setNewVerOpen(true);
+  }, [location.state, location.pathname, rows, navigate]);
 
   const patchDraft = (p: Partial<ConfigDraft>) => {
     setDraft((prev) => ({ ...prev, ...p }));

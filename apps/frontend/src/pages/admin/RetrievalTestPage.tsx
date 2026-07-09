@@ -1,18 +1,25 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Alert, Button, Card, Empty, Input, InputNumber, Select, Slider, Switch, Tag } from "antd";
-import type { KnowledgeBase, ModelProvider, RetrievalHit } from "@codecrush/contracts";
-import { getKnowledgeBases, getModels, testRetrieval } from "../../api/client";
+import type { Agent, KnowledgeBase, ModelProvider, RetrievalHit } from "@codecrush/contracts";
+import { getAgents, getKnowledgeBases, getModels, testRetrieval } from "../../api/client";
+import type { RetrievalTestApplyState } from "./AgentsPage";
 
 const { TextArea } = Input;
 
-/** 知识检索测试：左配置 + 右结果。M5 接真实 POST /api/retrieval/test，antd 组件化。 */
+/** 知识检索测试：左配置 + 右结果。M5 接真实 POST /api/retrieval/test，antd 组件化。
+ * 「从 Agent 加载」/「带入新建配置版本」与 Agent 管理（M7）联动，形成测试 → 发布闭环。 */
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export default function RetrievalTestPage() {
+  const navigate = useNavigate();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [models, setModels] = useState<ModelProvider[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [loadErr, setLoadErr] = useState("");
+  // 「从 Agent 加载」选中的 Agent，"" = 手动配置；仅作为参数起点，不反向绑定表单
+  const [agentId, setAgentId] = useState("");
 
   const [kbId, setKbId] = useState<string>();
   const [embedModelId, setEmbedModelId] = useState<string>();
@@ -35,9 +42,14 @@ export default function RetrievalTestPage() {
   useEffect(() => {
     (async () => {
       try {
-        const [kbList, modelList] = await Promise.all([getKnowledgeBases(), getModels()]);
+        const [kbList, modelList, agentList] = await Promise.all([
+          getKnowledgeBases(),
+          getModels(),
+          getAgents(),
+        ]);
         setKbs(kbList);
         setModels(modelList);
+        setAgents(agentList);
         if (kbList[0]) setKbId(kbList[0].id);
         const firstEmbed = modelList.find((m) => m.type === "embedding" && m.enabled);
         if (firstEmbed) setEmbedModelId(firstEmbed.id);
@@ -49,6 +61,45 @@ export default function RetrievalTestPage() {
 
   const embedOpts = models.filter((m) => m.type === "embedding" && m.enabled);
   const rerankOpts = models.filter((m) => m.type === "rerank" && m.enabled);
+  // 只有存在生产版本的 Agent 才有配置可带入
+  const agentOpts = agents.filter((a) => a.currentVersion !== null);
+  const loadedAgent = agentOpts.find((a) => a.id === agentId);
+
+  /** 「从 Agent 加载」：把生产配置带入表单作为起点（Embedding 由绑定知识库决定） */
+  const loadFromAgent = (id: string) => {
+    setAgentId(id);
+    const v = agents.find((a) => a.id === id)?.currentVersion;
+    if (!v) return;
+    const kb = kbs.find((k) => k.id === v.kbIds[0]);
+    if (kb) {
+      setKbId(kb.id);
+      setEmbedModelId(kb.embeddingModelId);
+    }
+    setThreshold(v.threshold);
+    setMulti(v.multiRecall);
+    if (v.vecWeight !== undefined) setVecWeight(v.vecWeight);
+    setRerankModelId(v.rerankModelId);
+    setTopK(v.topK);
+    setTopN(v.topN);
+  };
+
+  /** 「带入新建配置版本」：当前测试参数经路由 state 推给 Agent 管理页的新建配置版本抽屉 */
+  const applyToAgent = () => {
+    if (!loadedAgent) return;
+    const retrievalTestApply: RetrievalTestApplyState = {
+      agentId: loadedAgent.id,
+      params: {
+        topK,
+        topN,
+        threshold,
+        multiRecall: multi,
+        vecWeight: multi ? vecWeight : undefined,
+        rerankModelId,
+      },
+      note: `来源：检索测试：${query.trim()}`,
+    };
+    navigate("/admin/agents", { state: { retrievalTestApply } });
+  };
 
   const run = async () => {
     if (!query.trim() || !kbId || !embedModelId) return;
@@ -91,6 +142,24 @@ export default function RetrievalTestPage() {
       >
         <Card title="测试设置" size="small">
           <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+            <Field
+              label={
+                <>
+                  从 Agent 加载{" "}
+                  <span style={{ color: "rgba(0,0,0,.4)" }}>带入其生产配置作为起点，可选</span>
+                </>
+              }
+            >
+              <Select
+                value={agentId}
+                onChange={loadFromAgent}
+                options={[
+                  { value: "", label: "不选择（手动配置）" },
+                  ...agentOpts.map((a) => ({ value: a.id, label: a.name })),
+                ]}
+                style={{ width: "100%" }}
+              />
+            </Field>
             <Field label="检索知识库">
               <Select
                 value={kbId}
@@ -162,7 +231,10 @@ export default function RetrievalTestPage() {
               <Select
                 value={topN}
                 onChange={setTopN}
-                options={[5, 10, 20, 50].map((n) => ({ value: n, label: `前 ${n} 条` }))}
+                // Agent 生产配置的 topN 可能不在预设档位里，补进选项避免显示裸数字
+                options={[...new Set([5, 10, 20, 50, topN])]
+                  .sort((a, b) => a - b)
+                  .map((n) => ({ value: n, label: `前 ${n} 条` }))}
                 style={{ width: "100%" }}
               />
             </Field>
@@ -205,17 +277,48 @@ export default function RetrievalTestPage() {
             </span>
           }
           size="small"
+          // 结果框 sticky 钉在视口内，高度 = 视口 - 56 顶栏 - 上下 20 留白；sticky 偏移相对
+          // Content 的 padding 边缘计算，top 0 即吸附在顶栏下 20px 处。命中列表在框体内滚，
+          // 头部（数量/阈值）与底部操作栏恒定可见
+          style={{
+            position: "sticky",
+            top: 0,
+            height: "calc(100vh - 96px)",
+            display: "flex",
+            flexDirection: "column",
+          }}
+          styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } }}
         >
-          {runErr && <Alert type="error" message={runErr} style={{ marginBottom: 12 }} />}
+          {runErr && (
+            <Alert type="error" message={runErr} style={{ marginBottom: 12, flex: "none" }} />
+          )}
           {ran ? (
             hits.length === 0 ? (
-              <Empty description="没有召回结果，尝试降低相似度阈值" />
+              <CenterBox>
+                <Empty description="没有召回结果，尝试降低相似度阈值" />
+              </CenterBox>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <>
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  overflowY: "auto",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 14,
+                }}
+              >
                 {hits.map((r, i) => (
                   <div
                     key={r.chunkId}
-                    style={{ border: "1px solid #f0f0f0", borderRadius: 8, overflow: "hidden" }}
+                    // flex none：父级是 overflow 滚动的 flex column，不加会被压扁而不是触发滚动
+                    style={{
+                      flex: "none",
+                      border: "1px solid #f0f0f0",
+                      borderRadius: 8,
+                      overflow: "hidden",
+                    }}
                   >
                     <div
                       style={{
@@ -258,12 +361,38 @@ export default function RetrievalTestPage() {
                   </div>
                 ))}
               </div>
+              {/* 测试 → 发布闭环：选了 Agent 且有召回结果时，可把这套参数带回其新建配置版本；
+                  flex none + borderTop 钉在框体底部，不随列表滚动 */}
+              {loadedAgent && (
+                <div
+                  style={{
+                    flex: "none",
+                    borderTop: "1px solid #f0f0f0",
+                    marginTop: 14,
+                    paddingTop: 12,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                  }}
+                >
+                  <span style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>
+                    对结果满意？可把这套参数带入生产配置
+                  </span>
+                  <Button onClick={applyToAgent}>
+                    ↳ 带入「{loadedAgent.name}」新建配置版本
+                  </Button>
+                </div>
+              )}
+              </>
             )
           ) : (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="输入问题并点击「运行」查看召回结果"
-            />
+            <CenterBox>
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="输入问题并点击「运行」查看召回结果"
+              />
+            </CenterBox>
           )}
         </Card>
       </div>
@@ -271,7 +400,16 @@ export default function RetrievalTestPage() {
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+/** 固定高度结果框内的空态垂直居中容器 */
+function CenterBox({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {children}
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>{label}</div>

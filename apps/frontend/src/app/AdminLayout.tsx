@@ -72,8 +72,9 @@ export function AdminLayout() {
     navigate("/login", { replace: true });
   };
 
+  // height 而非 minHeight：滚动收敛到 Content 内部，侧栏/顶栏恒定可见
   return (
-    <Layout style={{ minHeight: "100vh" }}>
+    <Layout style={{ height: "100vh" }}>
       <Sider theme="dark" width={208} style={{ background: "#001529" }}>
         <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: 16, height: 56 }}>
