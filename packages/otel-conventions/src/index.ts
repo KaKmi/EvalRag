@@ -20,6 +20,8 @@ export const RAG = {
   CITATION_IDS: "rag.citation.ids",
   COST_USD: "rag.cost.usd",
   PROMPT_VERSION_ID: "rag.prompt.version_id",
+  VEC_WEIGHT: "rag.retrieval.vec_weight",
+  RERANK_THRESHOLD: "rag.rerank.threshold",
 } as const;
 
 export const OTEL_OPERATIONS = {

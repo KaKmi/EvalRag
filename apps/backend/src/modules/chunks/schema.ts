@@ -1,7 +1,17 @@
-import { index, integer, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
+import { customType, index, integer, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
 import { vector1024 } from "../../platform/persistence/pgvector-type";
 import { documents } from "../documents/schema";
 import { knowledgeBases } from "../knowledge-bases/schema";
+
+// tsvector 列类型：drizzle-orm 无内置类型，仿 pgvector-type 的 customType 先例。
+// 只做类型声明供查询构造（tsv @@ tsquery / ts_rank_cd）；真实 DDL 是 GENERATED ALWAYS AS
+// (to_tsvector('simple', cjk_bigram_text(text))) STORED（手写迁移 0008，同 0006 HNSW 先例——
+// drizzle-kit 推导不出生成列表达式与自定义 SQL 函数）。生成列只读，插入路径不写它。
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 export const chunks = pgTable(
   "chunks",
@@ -19,6 +29,7 @@ export const chunks = pgTable(
     tokenCount: integer("token_count").notNull(),
     section: text("section").notNull().default(""),
     embedding: vector1024("embedding").notNull(),
+    tsv: tsvector("tsv"),
   },
   (table) => [
     unique("chunks_doc_version_seq_unique").on(table.docId, table.version, table.seq),
