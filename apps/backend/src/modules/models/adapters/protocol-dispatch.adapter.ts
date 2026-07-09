@@ -21,6 +21,10 @@ import { selfHostedEmbeddingProbe, selfHostedRerankProbe } from "./protocols/sel
 import { EMBED_BUILDERS } from "./embed-builders";
 
 export const TEST_CONNECTION_TIMEOUT_MS = 10_000;
+// embed() 批量文本量级远超探针（真实入库调用，非最小 mock 请求），10s 太紧；60s 留够真实厂商延迟余量，
+// 同时仍能兜住 007 Failure modes 要求处理的「Embedding 服务超时/连接 hang」——不设超时会让 pg-boss
+// 单进程 worker 永久卡死在这次 fetch 上，后续入库任务全部堆积不消费。
+export const EMBED_TIMEOUT_MS = 60_000;
 
 // (type, protocol) → 探针 builder 表：与契约 PROTOCOLS_BY_TYPE 的合法组合一一对应
 // （完整性由 protocol-dispatch.adapter.spec 断言）。新增协议 = 加 builder 文件 + 表项。
@@ -100,11 +104,26 @@ export class ProtocolDispatchAdapter implements ModelProviderPort {
       throw new Error(`unsupported protocol ${config.protocol} for embedding`);
     }
     const req = builder(config, texts);
-    const resp = await fetch(req.url, {
-      method: "POST",
-      headers: req.headers,
-      body: JSON.stringify(req.body),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
+    let resp: Response;
+    try {
+      resp = await fetch(req.url, {
+        method: "POST",
+        headers: req.headers,
+        body: JSON.stringify(req.body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      const message = controller.signal.aborted
+        ? `embedding 请求超时（>${EMBED_TIMEOUT_MS}ms）`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      throw new Error(redactSecret(message, config.apiKey));
+    } finally {
+      clearTimeout(timer);
+    }
     if (!resp.ok) {
       const json: unknown = await resp.json().catch(() => undefined);
       throw new Error(redactSecret(upstreamError(resp.status, json), config.apiKey));

@@ -9,6 +9,10 @@ export interface ChunkPage {
   total: number;
 }
 
+// deleteByVersion 分批大小：设计 007:62/132 要求"异步分批清理旧版切片"（大删不进切换事务，
+// 避免长行锁 + 大 WAL + 一次性 RETURNING 全量 id 造成的内存尖峰）。1000 是任意但保守的批量。
+const DELETE_BATCH_SIZE = 1000;
+
 @Injectable()
 export class ChunksRepository {
   constructor(@Inject(DRIZZLE) private readonly db: DB) {}
@@ -96,12 +100,24 @@ export class ChunksRepository {
     return deleted.length;
   }
 
-  // 全库重建切换后，异步分批清理旧版本切片（不进切换事务，避免大删拖慢原子切换）
+  // 全库重建切换后，异步分批清理旧版本切片（不进切换事务，避免大删拖慢原子切换）。
+  // 分批：每轮只删 DELETE_BATCH_SIZE 条（子查询选 id 再按 id 删），避免单条超大 DELETE
+  // 长时间持有行锁、产生巨量 WAL，以及一次性 RETURNING 全量 id 造成的 Node 内存尖峰。
   async deleteByVersion(kbId: string, version: number): Promise<number> {
-    const deleted = await this.db
-      .delete(chunks)
-      .where(and(eq(chunks.kbId, kbId), eq(chunks.version, version)))
-      .returning({ id: chunks.id });
-    return deleted.length;
+    let totalDeleted = 0;
+    for (;;) {
+      const batchIds = this.db
+        .select({ id: chunks.id })
+        .from(chunks)
+        .where(and(eq(chunks.kbId, kbId), eq(chunks.version, version)))
+        .limit(DELETE_BATCH_SIZE);
+      const deleted = await this.db
+        .delete(chunks)
+        .where(inArray(chunks.id, batchIds))
+        .returning({ id: chunks.id });
+      totalDeleted += deleted.length;
+      if (deleted.length < DELETE_BATCH_SIZE) break;
+    }
+    return totalDeleted;
   }
 }

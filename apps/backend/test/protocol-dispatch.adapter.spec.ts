@@ -208,4 +208,26 @@ describe("ProtocolDispatchAdapter.embed", () => {
     fetchMock.mockResolvedValue(okJson({ data: [{ index: 0, embedding: [0.1, 0.2] }] }));
     await expect(adapter.embed(embedCfg(), ["a"])).rejects.toThrow(/维度不是 1024.*实际 2/);
   });
+
+  // 回归：P2-6——embed() 此前无超时保护，厂商网关 hang 住的连接会让 pg-boss 单进程 worker
+  // 永久卡死。用真实 AbortController 行为模拟：fetch 返回一个只在 signal abort 时才 reject 的
+  // promise（连接本身不会自己失败/成功），验证 EMBED_TIMEOUT_MS 到期后确实会中止并抛可读超时错误。
+  it("fetch 挂起超过 EMBED_TIMEOUT_MS → abort 并抛超时错误，不会永久挂起", async () => {
+    jest.useFakeTimers();
+    fetchMock.mockImplementation(
+      (_url: string, opts: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          opts.signal?.addEventListener("abort", () => {
+            const err = new Error("The operation was aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        }),
+    );
+    const pending = adapter.embed(embedCfg(), ["a"]);
+    const assertion = expect(pending).rejects.toThrow(/embedding 请求超时/);
+    await jest.advanceTimersByTimeAsync(60_000);
+    await assertion;
+    jest.useRealTimers();
+  });
 });
