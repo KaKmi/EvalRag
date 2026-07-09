@@ -85,9 +85,10 @@ export class PgHybridRetriever implements RetrieverPort {
     // 向量路（finalScore=vecScore，不套权重——否则单路分数被 vecWeight 无谓腰斩，Invariant 2）。
     const kwDegraded = req.multi && kwOutcome.status === "rejected";
     if (kwDegraded) {
+      // 独立 key（非共用 "rag.degraded"）：同请求可能双降级（关键词+rerank），共用 key 会互相覆盖
       tag(
-        "rag.degraded",
-        `keyword_recall_failed: ${((kwOutcome as PromiseRejectedResult).reason as Error).message}`,
+        "rag.degraded.keyword_recall",
+        ((kwOutcome as PromiseRejectedResult).reason as Error).message,
       );
     }
     const useFusion = req.multi && !kwDegraded;
@@ -122,7 +123,7 @@ export class PgHybridRetriever implements RetrieverPort {
         }
       } catch (err) {
         // rerank 失败/超时 → 降级为跳过重排，保留融合分作为 finalScore（008 Invariant 3）
-        tag("rag.degraded", `rerank_failed: ${(err as Error).message}`);
+        tag("rag.degraded.rerank", (err as Error).message);
       }
     }
 
