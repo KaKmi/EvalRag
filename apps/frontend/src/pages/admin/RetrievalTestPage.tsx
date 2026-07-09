@@ -29,6 +29,8 @@ export default function RetrievalTestPage() {
   const [ran, setRan] = useState(false);
   const [runErr, setRunErr] = useState("");
   const [hits, setHits] = useState<RetrievalHit[]>([]);
+  // 本次已展示结果实际使用的阈值快照——跑完后再拖滑杆，头部标签不能跟着实时值撒谎
+  const [ranThreshold, setRanThreshold] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -66,6 +68,7 @@ export default function RetrievalTestPage() {
         topN,
       });
       setHits(res.hits);
+      setRanThreshold(threshold);
       setRan(true);
     } catch (e) {
       setRunErr(errMsg(e));
@@ -196,7 +199,7 @@ export default function RetrievalTestPage() {
                     marginLeft: 10,
                   }}
                 >
-                  共 {hits.length} 条 · 阈值 {threshold.toFixed(2)} 以上
+                  共 {hits.length} 条 · 阈值 {ranThreshold.toFixed(2)} 以上
                 </span>
               )}
             </span>
