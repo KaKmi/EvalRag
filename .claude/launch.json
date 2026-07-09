@@ -7,6 +7,13 @@
       "runtimeArgs": ["dev"],
       "cwd": "apps/frontend",
       "port": 5173
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev"],
+      "cwd": "apps/backend",
+      "port": 3000
     }
   ]
 }
