@@ -12,6 +12,13 @@ const TERMINAL_STATUSES = new Set<string>(["ready", "failed"]);
 export class KbRebuildService implements DocumentTerminalListener {
   private readonly logger = new Logger(KbRebuildService.name);
 
+  // kbId -> 本轮重建实际入队的文档 id 快照。QA 复现的死锁根因：onDocumentTerminal 若改查
+  // "kb 下当前全部文档"而不是这份快照，重建期间新上传（尤其 autoParse=false 停在 pending）的
+  // 文档会被一并计入终态判定，但它从未入队、永远不会到达 ready/failed，allTerminal 永远为
+  // false，KB 卡死在 building 且无法自行恢复。单进程内存 Map 与仓库既有的单进程假设一致
+  // （见 concerns.md「多 worker 并发双切换竞态」为已知 out-of-scope 风险，同一前提）。
+  private readonly rebuildDocIds = new Map<string, Set<string>>();
+
   constructor(
     private readonly kbRepo: KnowledgeBasesRepository,
     private readonly docsRepo: DocumentsRepository,
@@ -40,6 +47,11 @@ export class KbRebuildService implements DocumentTerminalListener {
       return;
     }
 
+    // 先落快照再入队：终态判定只认这份 id 集合，重建期间新上传的文档不会被计入、也不会卡住切换。
+    this.rebuildDocIds.set(
+      kbId,
+      new Set(docs.map((doc) => doc.id)),
+    );
     for (const doc of docs) {
       await this.ingestion.enqueue(doc.id, buildingVersion);
     }
@@ -53,10 +65,17 @@ export class KbRebuildService implements DocumentTerminalListener {
     // 非重建场景（普通单文档入库）：buildingVersion 为空，无需检查/切换。
     if (!kb || kb.buildingVersion === null) return;
 
+    // 只检查本轮重建入队时快照的文档集合，不含重建期间新上传的文档（见类顶注释）。
+    // 快照缺失（理论上不应发生：buildingVersion 非空必然经过 startRebuild 落过快照；
+    // 进程重启会丢内存态，此时保守回退到旧行为，避免因快照丢失而永久卡死）。
+    const targetIds = this.rebuildDocIds.get(kbId);
     const docs = await this.docsRepo.findByKb(kbId);
-    const allTerminal = docs.every((doc) => TERMINAL_STATUSES.has(doc.status));
+    const relevant = targetIds ? docs.filter((doc) => targetIds.has(doc.id)) : docs;
+    // 快照里的文档若已被删除（cascade 走了），不会出现在 findByKb 结果里——视为不再阻塞。
+    const allTerminal = relevant.every((doc) => TERMINAL_STATUSES.has(doc.status));
     if (!allTerminal) return; // 仍有 queued/processing 文档，等待后续回调。
 
+    this.rebuildDocIds.delete(kbId);
     await this.finalizeSwitch(kbId, kb.buildingVersion, kb.activeVersion);
   }
 
