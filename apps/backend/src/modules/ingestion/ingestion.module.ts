@@ -11,7 +11,17 @@ import { IngestionService, DOCUMENT_TERMINAL_LISTENER } from "./ingestion.servic
 import { IngestionProcessor } from "./ingestion.processor";
 import { KbRebuildService } from "./kb-rebuild.service";
 import { DefaultIngestionPipeline } from "./default-ingestion-pipeline";
-import { INGESTION_PIPELINE_PORT } from "./ingestion.constants";
+import {
+  CHUNKER_REGISTRY_TOKEN,
+  INGESTION_PIPELINE_PORT,
+  NORMALIZER_REGISTRY_TOKEN,
+  PARSER_REGISTRY_TOKEN,
+  PROFILE_REGISTRY,
+} from "./ingestion.constants";
+import { CHUNKER_REGISTRY } from "./adapters/chunkers/chunker-registry";
+import { NORMALIZER_REGISTRY } from "./adapters/normalizers/normalizer-registry";
+import { PARSER_REGISTRY } from "./adapters/parsers/parser-registry";
+import { PROCESSING_PROFILES, ProfileRegistry } from "./profiles/profile-registry";
 
 // 依赖装配说明：
 // - QueueModule / StorageModule 是 @Global 但此前无消费方、未被任何模块 import（token 尚未注册）；
@@ -32,6 +42,16 @@ import { INGESTION_PIPELINE_PORT } from "./ingestion.constants";
     DocumentsRepository,
     KnowledgeBasesRepository,
     ChunksRepository,
+    {
+      provide: PROFILE_REGISTRY,
+      useValue: new ProfileRegistry(PROCESSING_PROFILES, {
+        chunkers: Object.keys(CHUNKER_REGISTRY),
+        normalizers: Object.keys(NORMALIZER_REGISTRY),
+      }),
+    },
+    { provide: PARSER_REGISTRY_TOKEN, useValue: PARSER_REGISTRY },
+    { provide: CHUNKER_REGISTRY_TOKEN, useValue: CHUNKER_REGISTRY },
+    { provide: NORMALIZER_REGISTRY_TOKEN, useValue: NORMALIZER_REGISTRY },
     {
       provide: INGESTION_PIPELINE_PORT,
       inject: [ModelsService, ChunksRepository, AppConfigService],
