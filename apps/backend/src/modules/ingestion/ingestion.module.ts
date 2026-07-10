@@ -11,6 +11,7 @@ import { IngestionService, DOCUMENT_TERMINAL_LISTENER } from "./ingestion.servic
 import { IngestionProcessor } from "./ingestion.processor";
 import { KbRebuildService } from "./kb-rebuild.service";
 import { ProcessingRunsRepository } from "./processing-runs.repository";
+import { ProcessingProfilesController } from "./processing-profiles.controller";
 import { DefaultIngestionPipeline } from "./default-ingestion-pipeline";
 import {
   CHUNKER_REGISTRY_TOKEN,
@@ -33,6 +34,7 @@ import { PROCESSING_PROFILES, ProfileRegistry } from "./profiles/profile-registr
 // - ModelsService 只能经 ModelsModule 导出的端口拿到，故 import ModelsModule。
 @Module({
   imports: [ModelsModule, QueueModule, StorageModule],
+  controllers: [ProcessingProfilesController],
   providers: [
     IngestionService,
     IngestionProcessor,
@@ -83,7 +85,8 @@ import { PROCESSING_PROFILES, ProfileRegistry } from "./profiles/profile-registr
     },
   ],
   // KbRebuildService 导出供 KnowledgeBasesService.update 改 chunkTemplate/默认 Profile 时调用 startRebuild。
-  // ProcessingRunsRepository 导出供 DocumentsModule 读文档处理历史（listRuns，Task 7）。
-  exports: [IngestionService, KbRebuildService, ProcessingRunsRepository],
+  // ProcessingRunsRepository 导出供 DocumentsModule 读文档处理历史（listRuns）。
+  // PROFILE_REGISTRY 导出供 KnowledgeBasesService/DocumentsService 校验 Profile ref。
+  exports: [IngestionService, KbRebuildService, ProcessingRunsRepository, PROFILE_REGISTRY],
 })
 export class IngestionModule {}

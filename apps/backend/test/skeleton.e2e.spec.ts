@@ -891,14 +891,19 @@ describe("M2 domain skeleton", () => {
       for (const d of res.body) expect(() => DocumentSchema.parse(d)).not.toThrow();
     });
 
-    it("POST /documents/:id/parse → 202，触发入队；不存在 → 404", async () => {
+    it("POST /documents/:id/parse（空 body = 用当前方案重解析）→ 202，触发入队；不存在 → 404", async () => {
       fakeQueue.publish.mockClear();
       await request(app.getHttpServer())
         .post(`/api/documents/${docId}/parse`)
         .set(auth())
+        .send({})
         .expect(202);
       expect(fakeQueue.publish).toHaveBeenCalled();
-      await request(app.getHttpServer()).post("/api/documents/nope/parse").set(auth()).expect(404);
+      await request(app.getHttpServer())
+        .post("/api/documents/nope/parse")
+        .set(auth())
+        .send({})
+        .expect(404);
     });
 
     it("GET /documents/:id/lifecycle → 200 + schema（含 upload 完成项）", async () => {
@@ -919,13 +924,41 @@ describe("M2 domain skeleton", () => {
       expect(res.body.metadata.author).toBe("qa");
     });
 
-    it("GET /documents/:id/content → 200（未解析时 text 为空串）", async () => {
+    it("GET /documents/:id/content → 200（未解析时 text/markdown 为空串）", async () => {
       const res = await request(app.getHttpServer())
         .get(`/api/documents/${docId}/content`)
         .set(auth())
         .expect(200);
       expect(res.body.documentId).toBe(docId);
       expect(res.body.text).toBe("");
+      expect(res.body.markdown).toBe("");
+    });
+
+    it("GET /documents/:id/processing-runs → 200 数组；不存在文档 → 404", async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/api/documents/${docId}/processing-runs`)
+        .set(auth())
+        .expect(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      await request(app.getHttpServer())
+        .get("/api/documents/00000000-0000-0000-0000-000000000000/processing-runs")
+        .set(auth())
+        .expect(404);
+    });
+
+    it("GET /api/processing-profiles → 200 且方案数 ≥3（含 documentType 过滤）", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/processing-profiles")
+        .set(auth())
+        .expect(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body.length).toBeGreaterThanOrEqual(3);
+      expect(res.body[0]).toHaveProperty("label");
+      expect(res.body[0]).toHaveProperty("summary");
+      await request(app.getHttpServer())
+        .get("/api/processing-profiles?documentType=pdf")
+        .set(auth())
+        .expect(200);
     });
 
     it("DELETE /documents/:id → 204（blob 同删），再 GET lifecycle → 404", async () => {
