@@ -72,6 +72,7 @@ import type { KnowledgeBaseRow } from "../src/modules/knowledge-bases/schema";
 import { DocumentsRepository } from "../src/modules/documents/documents.repository";
 import type { DocumentRow } from "../src/modules/documents/schema";
 import { ChunksRepository } from "../src/modules/chunks/chunks.repository";
+import { ProcessingRunsRepository } from "../src/modules/ingestion/processing-runs.repository";
 
 const SECRET = "test-secret-at-least-32-characters-long!!";
 const PRINCIPAL = { sub: "u1", email: "demo@codecrush.local" };
@@ -345,6 +346,28 @@ const inMemoryChunksRepo: Partial<ChunksRepository> = {
   searchByKeyword: async () => [],
 } as Partial<ChunksRepository>;
 
+// —— M4.1 ProcessingRunsRepository 内存实现（e2e 只验证接线与端点 smoke，无真库）——
+const inMemoryProcessingRuns = new Map<string, Record<string, unknown>>();
+let processingRunSeq = 0;
+const inMemoryProcessingRunsRepo: Partial<ProcessingRunsRepository> = {
+  insert: (async (row: Record<string, unknown>) => {
+    const id = `run-e2e-${++processingRunSeq}`;
+    const full = { id, status: "queued", createdAt: new Date(), startedAt: null, ...row };
+    inMemoryProcessingRuns.set(id, full);
+    return full;
+  }) as ProcessingRunsRepository["insert"],
+  findById: (async (id: string) => inMemoryProcessingRuns.get(id)) as ProcessingRunsRepository["findById"],
+  findByDocument: (async (docId: string) =>
+    [...inMemoryProcessingRuns.values()].filter(
+      (r) => r.documentId === docId,
+    )) as ProcessingRunsRepository["findByDocument"],
+  update: (async (id: string, patch: Record<string, unknown>) => {
+    const row = inMemoryProcessingRuns.get(id);
+    if (row) inMemoryProcessingRuns.set(id, { ...row, ...patch });
+    return inMemoryProcessingRuns.get(id);
+  }) as ProcessingRunsRepository["update"],
+};
+
 // —— M7 AgentsRepository 内存实现（DB-free，同上手写风格）——
 let agentSeq = 0;
 let agentVerSeq = 0;
@@ -508,6 +531,8 @@ describe("M2 domain skeleton", () => {
       .useValue(inMemoryDocsRepo)
       .overrideProvider(ChunksRepository)
       .useValue(inMemoryChunksRepo)
+      .overrideProvider(ProcessingRunsRepository)
+      .useValue(inMemoryProcessingRunsRepo)
       .overrideProvider(AgentsRepository)
       .useValue(inMemoryAgentsRepo)
       .overrideProvider(BLOB_STORE)
@@ -834,7 +859,7 @@ describe("M2 domain skeleton", () => {
         .expect(404);
     });
 
-    it("POST multipart（autoParse 默认开）→ 201 + queued + 幂等入队 opts", async () => {
+    it("POST multipart（autoParse 默认开，Profile 特性开）→ 201 + queued + 建 Run 超集入队", async () => {
       fakeQueue.publish.mockClear();
       const res = await request(app.getHttpServer())
         .post(`/api/knowledge-bases/${kbId}/documents`)
@@ -843,11 +868,18 @@ describe("M2 domain skeleton", () => {
         .expect(201);
       expect(res.body[0].status).toBe("queued");
       const doc = res.body[0];
+      // Profile 特性开启（默认）→ 走 createRun：payload 携带 processingRunId，singletonKey=runId（去重按 Run）。
       expect(fakeQueue.publish).toHaveBeenCalledWith(
         expect.any(String),
-        expect.objectContaining({ documentId: doc.id }),
-        expect.objectContaining({ singletonKey: doc.id, retryLimit: 1 }),
+        expect.objectContaining({ documentId: doc.id, processingRunId: expect.any(String) }),
+        expect.objectContaining({ retryLimit: 1 }),
       );
+      const [, payload, opts] = fakeQueue.publish.mock.calls[0] as [
+        string,
+        { processingRunId: string },
+        { singletonKey: string },
+      ];
+      expect(opts.singletonKey).toBe(payload.processingRunId);
     });
 
     it("GET /documents?kbId= → 200 + schema", async () => {

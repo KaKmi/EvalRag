@@ -10,6 +10,7 @@ import { StorageModule } from "../../platform/storage/storage.module";
 import { IngestionService, DOCUMENT_TERMINAL_LISTENER } from "./ingestion.service";
 import { IngestionProcessor } from "./ingestion.processor";
 import { KbRebuildService } from "./kb-rebuild.service";
+import { ProcessingRunsRepository } from "./processing-runs.repository";
 import { DefaultIngestionPipeline } from "./default-ingestion-pipeline";
 import {
   CHUNKER_REGISTRY_TOKEN,
@@ -42,6 +43,7 @@ import { PROCESSING_PROFILES, ProfileRegistry } from "./profiles/profile-registr
     DocumentsRepository,
     KnowledgeBasesRepository,
     ChunksRepository,
+    ProcessingRunsRepository,
     {
       provide: PROFILE_REGISTRY,
       useValue: new ProfileRegistry(PROCESSING_PROFILES, {
@@ -80,7 +82,8 @@ import { PROCESSING_PROFILES, ProfileRegistry } from "./profiles/profile-registr
         ),
     },
   ],
-  // KbRebuildService 导出供 Task 18 KnowledgeBasesService.update 改 chunkTemplate 时调用 startRebuild。
-  exports: [IngestionService, KbRebuildService],
+  // KbRebuildService 导出供 KnowledgeBasesService.update 改 chunkTemplate/默认 Profile 时调用 startRebuild。
+  // ProcessingRunsRepository 导出供 DocumentsModule 读文档处理历史（listRuns，Task 7）。
+  exports: [IngestionService, KbRebuildService, ProcessingRunsRepository],
 })
 export class IngestionModule {}

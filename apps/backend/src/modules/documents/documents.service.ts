@@ -4,6 +4,7 @@ import { extname } from "node:path";
 import type { Document, DocumentType, UpdateDocumentMetadataRequest } from "@codecrush/contracts";
 import { BLOB_STORE } from "../../platform/storage/blob-store.constants";
 import type { BlobStore } from "../../platform/storage/blob-store.port";
+import { AppConfigService } from "../../platform/config/config.service";
 import { DocumentsRepository } from "./documents.repository";
 import { KnowledgeBasesRepository } from "../knowledge-bases/knowledge-bases.repository";
 import { ChunksRepository } from "../chunks/chunks.repository";
@@ -56,7 +57,17 @@ export class DocumentsService {
     private readonly chunksRepo: ChunksRepository,
     @Inject(BLOB_STORE) private readonly blobStore: BlobStore,
     private readonly ingestion: IngestionService,
+    private readonly config: AppConfigService,
   ) {}
+
+  // M4.1 入库分流：开启 Profile 特性走新 Run 路径（建冻结快照 Run + 入队），否则 legacy chunkTemplate 入队。
+  private async startIngestion(documentId: string, targetVersion: number): Promise<void> {
+    if (this.config.processingProfilesEnabled) {
+      await this.ingestion.createRun(documentId);
+    } else {
+      await this.ingestion.enqueue(documentId, targetVersion);
+    }
+  }
 
   async list(kbId: string): Promise<Document[]> {
     const rows = await this.repo.findByKb(kbId);
@@ -109,7 +120,7 @@ export class DocumentsService {
       });
 
       if (opts.autoParse) {
-        await this.ingestion.enqueue(row.id, targetVersion);
+        await this.startIngestion(row.id, targetVersion);
       }
       created.push(this.toDocument((await this.repo.findById(row.id)) ?? row));
     }
@@ -121,7 +132,7 @@ export class DocumentsService {
     const kb = await this.kbRepo.findById(doc.kbId);
     if (!kb) throw new NotFoundException(`knowledge base ${doc.kbId} not found`);
     const targetVersion = kb.buildingVersion ?? kb.activeVersion;
-    await this.ingestion.enqueue(id, targetVersion);
+    await this.startIngestion(id, targetVersion);
     return this.withCount(await this.mustFind(id));
   }
 

@@ -5,6 +5,7 @@ import type { KnowledgeBasesRepository } from "../src/modules/knowledge-bases/kn
 import type { ChunksRepository } from "../src/modules/chunks/chunks.repository";
 import type { BlobStore } from "../src/platform/storage/blob-store.port";
 import type { IngestionService } from "../src/modules/ingestion/ingestion.service";
+import type { AppConfigService } from "../src/platform/config/config.service";
 
 function makeDeps() {
   const repo = {
@@ -32,13 +33,15 @@ function makeDeps() {
     get: jest.fn(async () => Buffer.from("x")),
     delete: jest.fn(),
   };
-  const ingestion = { enqueue: jest.fn() };
+  const ingestion = { enqueue: jest.fn(), createRun: jest.fn() };
   const chunksRepo = {
     countByDocs: jest.fn(
       async () => [] as Array<{ docId: string; version: number; count: number }>,
     ),
   };
-  return { repo, kbRepo, blobStore, ingestion, chunksRepo };
+  // 本 spec 覆盖 legacy 入库路径（flag=false → enqueue）；flag=true 的 createRun 分流由 Task 7 documents 矩阵覆盖。
+  const config = { processingProfilesEnabled: false } as unknown as AppConfigService;
+  return { repo, kbRepo, blobStore, ingestion, chunksRepo, config };
 }
 
 function makeService(deps: ReturnType<typeof makeDeps>): DocumentsService {
@@ -48,6 +51,7 @@ function makeService(deps: ReturnType<typeof makeDeps>): DocumentsService {
     deps.chunksRepo as unknown as ChunksRepository,
     deps.blobStore,
     deps.ingestion as unknown as IngestionService,
+    deps.config,
   );
 }
 

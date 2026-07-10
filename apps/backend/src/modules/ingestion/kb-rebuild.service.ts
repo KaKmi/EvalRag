@@ -1,8 +1,13 @@
-import { BadRequestException, Injectable, Logger } from "@nestjs/common";
+import { ConflictException, Injectable, Logger } from "@nestjs/common";
 import { KnowledgeBasesRepository } from "../knowledge-bases/knowledge-bases.repository";
 import { DocumentsRepository } from "../documents/documents.repository";
 import { ChunksRepository } from "../chunks/chunks.repository";
+import { AppConfigService } from "../../platform/config/config.service";
 import { IngestionService, type DocumentTerminalListener } from "./ingestion.service";
+
+// 重建范围：'all' 重建全库；'inherited' 只重建继承 KB 默认方案（无文档级 override）的文档——
+// 改 KB 默认 Profile 后「应用到旧文档」用之，不覆盖用户已单独指定 Profile 的文档（010 §选择5）。
+export type RebuildScope = "inherited" | "all";
 
 // 文档终态集合：ready（成功）与 failed（失败）都算"到达终态"。
 // 007 拍板：部分文档 failed 不卡住整体切换——failed 也是终态，不需人工干预即可切换。
@@ -24,25 +29,29 @@ export class KbRebuildService implements DocumentTerminalListener {
     private readonly docsRepo: DocumentsRepository,
     private readonly chunksRepo: ChunksRepository,
     private readonly ingestion: IngestionService,
+    private readonly config: AppConfigService,
   ) {}
 
-  // 全库重建触发（如 chunkTemplate 变更）：building_version = active_version+1、status=building，
-  // 随后为 kb 下每个文档以新版本异步入队（经 enqueue -> queue，禁止同步阻塞式重建）。
-  // 空库：无文档 -> 无入队，永远不会触发 onDocumentTerminal，故此处直接原子完成切换。
-  // 重建中再次调用 -> 409 语义（buildingVersion 非空），不重复发任务。
-  async startRebuild(kbId: string): Promise<void> {
+  // 全库重建触发（chunkTemplate/默认 Profile 变更、或显式 rebuild 端点）：building_version =
+  // active_version+1、status=building，随后为范围内每个文档以新版本异步入队（禁止同步阻塞式重建）。
+  // scope='inherited' 只入队无文档级 override 的文档；'all'（默认）入队全部。
+  // 空范围（无文档或全被 override 排除）：无入队 -> 不会触发 onDocumentTerminal，此处直接原子完成切换。
+  // 重建中再次调用 -> 409（buildingVersion 非空），不重复发任务。
+  async startRebuild(kbId: string, scope: RebuildScope = "all"): Promise<void> {
     const kb = await this.kbRepo.findById(kbId);
     if (!kb) return;
     if (kb.buildingVersion !== null) {
-      throw new BadRequestException(`knowledge base ${kbId} is already building`);
+      throw new ConflictException(`knowledge base ${kbId} is already building`);
     }
 
     const buildingVersion = kb.activeVersion + 1;
     await this.kbRepo.updateVersions(kbId, { buildingVersion, status: "building" });
 
-    const docs = await this.docsRepo.findByKb(kbId);
+    const all = await this.docsRepo.findByKb(kbId);
+    // 'inherited'：排除已有文档级 Profile override 的文档（它们保持自己的方案，不随 KB 默认变更）。
+    const docs = scope === "inherited" ? all.filter((doc) => doc.profileOverrideId === null) : all;
     if (docs.length === 0) {
-      // 空库：没有任何文档任务会回调，直接原子切换到新版本并清理旧切片。
+      // 空范围：没有任何文档任务会回调，直接原子切换到新版本并清理旧切片。
       await this.finalizeSwitch(kbId, buildingVersion, kb.activeVersion);
       return;
     }
@@ -53,7 +62,12 @@ export class KbRebuildService implements DocumentTerminalListener {
       new Set(docs.map((doc) => doc.id)),
     );
     for (const doc of docs) {
-      await this.ingestion.enqueue(doc.id, buildingVersion);
+      // flag 分流：开启走新 Run 路径（继承文档/ KB 默认 Profile）；关闭回退 legacy chunkTemplate 入队。
+      if (this.config.processingProfilesEnabled) {
+        await this.ingestion.createRun(doc.id);
+      } else {
+        await this.ingestion.enqueue(doc.id, buildingVersion);
+      }
     }
   }
 
