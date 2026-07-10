@@ -76,6 +76,31 @@ describe("KbRebuildService.startRebuild", () => {
     expect(deps.ingestion.createRun).not.toHaveBeenCalled();
   });
 
+  it("重建循环内单文档 createRun 抛 409（已有进行中任务）→ 跳过该文档继续，不中断整轮（review P1 回归）", async () => {
+    const deps = makeDeps();
+    deps.kbRepo.findById.mockResolvedValue({ id: "kb1", activeVersion: 1, buildingVersion: null });
+    deps.docsRepo.findByKb.mockResolvedValue([
+      { id: "d1", profileOverrideId: null },
+      { id: "d2", profileOverrideId: null },
+      { id: "d3", profileOverrideId: null },
+    ]);
+    // d2 已有进行中 Run → createRun 抛 409；d1/d3 正常。
+    deps.ingestion.createRun
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new ConflictException("该文档已有处理任务进行中"))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(makeService(deps).startRebuild("kb1")).resolves.toBeUndefined();
+    // 三个文档都被尝试（循环没有在 d2 中断）。
+    expect(deps.ingestion.createRun).toHaveBeenCalledTimes(3);
+    expect(deps.ingestion.createRun).toHaveBeenCalledWith("d3");
+    // KB 已置 building，不因单文档冲突回滚。
+    expect(deps.kbRepo.updateVersions).toHaveBeenCalledWith("kb1", {
+      buildingVersion: 2,
+      status: "building",
+    });
+  });
+
   it("kb 已在 building 中时抛 ConflictException(409)，不重复发任务", async () => {
     const deps = makeDeps();
     deps.kbRepo.findById.mockResolvedValue({ id: "kb1", activeVersion: 1, buildingVersion: 2 });

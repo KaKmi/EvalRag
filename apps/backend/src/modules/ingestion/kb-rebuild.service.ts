@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, Logger } from "@nestjs/common";
+import { ConflictException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { KnowledgeBasesRepository } from "../knowledge-bases/knowledge-bases.repository";
 import { DocumentsRepository } from "../documents/documents.repository";
 import { ChunksRepository } from "../chunks/chunks.repository";
@@ -63,10 +63,24 @@ export class KbRebuildService implements DocumentTerminalListener {
     );
     for (const doc of docs) {
       // flag 分流：开启走新 Run 路径（继承文档/ KB 默认 Profile）；关闭回退 legacy chunkTemplate 入队。
-      if (this.config.processingProfilesEnabled) {
-        await this.ingestion.createRun(doc.id);
-      } else {
-        await this.ingestion.enqueue(doc.id, buildingVersion);
+      // 关键：createRun 会对「已有进行中 Run」的文档抛 409（legacy enqueue 幂等不抛）——必须逐文档兜住，
+      // 否则单个文档冲突会中断整轮循环，令后续文档永不入队、KB 永久卡在 building（review P1）。
+      try {
+        if (this.config.processingProfilesEnabled) {
+          await this.ingestion.createRun(doc.id);
+        } else {
+          await this.ingestion.enqueue(doc.id, buildingVersion);
+        }
+      } catch (err) {
+        if (err instanceof ConflictException || err instanceof NotFoundException) {
+          // 已有进行中任务（复用其现有 Run 的终态回调）或文档已被删除：跳过该文档，不中断整轮重建。
+          // 该文档仍在 rebuildDocIds 快照内，其现有 Run 到达终态会照常触发 onDocumentTerminal 参与切换判定。
+          this.logger.warn(
+            `重建跳过文档 doc=${doc.id}（${err instanceof ConflictException ? "已有进行中任务" : "文档已删除"}）`,
+          );
+        } else {
+          throw err;
+        }
       }
     }
   }
