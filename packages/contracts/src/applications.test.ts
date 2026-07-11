@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   ApplicationChatResultSchema,
   ApplicationConfigFieldsSchema,
+  ApplicationConfigVersionSchema,
+  ApplicationDetailSchema,
   ApplicationSchema,
   CreateApplicationRequestSchema,
+  PromptUsageEntrySchema,
   UpdateApplicationRequestSchema,
 } from "./applications";
 
@@ -86,6 +89,16 @@ describe("application contracts", () => {
         nodes: { ...config.nodes, summary: node },
       }),
     ).toThrow();
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({
+        ...config,
+        nodes: { ...config.nodes, reply: { ...node, unknown: true } },
+      }),
+    ).toThrow();
+    const { fallback: _missing, ...incompleteNodes } = config.nodes;
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({ ...config, nodes: incompleteNodes }),
+    ).toThrow();
   });
 
   it("requires a valid slug and complete v1 config", () => {
@@ -118,6 +131,37 @@ describe("application contracts", () => {
       createdBy: "admin",
     };
     expect(ApplicationSchema.parse(value)).toEqual(value);
+    expect(() => ApplicationSchema.parse({ ...value, productionVersion: undefined })).toThrow();
+    expect(() =>
+      ApplicationSchema.parse({ ...value, productionConfigVersionId: undefined }),
+    ).toThrow();
+
+    const version = {
+      ...config,
+      id: "version",
+      applicationId: value.id,
+      version: 1,
+      configSchemaVersion: 1 as const,
+      createdBy: "admin",
+      createdAt: value.createdAt,
+    };
+    expect(ApplicationConfigVersionSchema.parse(version)).toEqual(version);
+    expect(ApplicationDetailSchema.parse({ ...value, versions: [version] }).versions).toHaveLength(1);
+    expect(() => ApplicationConfigVersionSchema.parse({ ...version, version: 0 })).toThrow();
+    expect(() => ApplicationDetailSchema.parse({ ...value, versions: undefined })).toThrow();
+  });
+
+  it("restricts prompt usage to the four application nodes", () => {
+    const usage = {
+      promptVersionId: "pv",
+      promptVersion: 1,
+      applicationId: "app",
+      applicationName: "售后",
+      node: "reply" as const,
+      configVersion: 1,
+    };
+    expect(PromptUsageEntrySchema.parse(usage)).toEqual(usage);
+    expect(() => PromptUsageEntrySchema.parse({ ...usage, node: "summary" })).toThrow();
   });
 
   it("defines the M7a chat placeholder", () => {
