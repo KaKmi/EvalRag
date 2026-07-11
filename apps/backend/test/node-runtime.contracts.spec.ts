@@ -1,3 +1,4 @@
+import { NODE_CONTRACTS } from "@codecrush/contracts";
 import { REWRITE_CONTRACT } from "../src/modules/node-runtime/contracts/rewrite.contract";
 import { INTENT_CONTRACT } from "../src/modules/node-runtime/contracts/intent.contract";
 import { REPLY_CONTRACT } from "../src/modules/node-runtime/contracts/reply.contract";
@@ -23,11 +24,20 @@ describe("REWRITE_CONTRACT", () => {
         .success,
     ).toBe(true);
   });
-  it("templateFields 与 012 静态字段契约一致（同一份表，非重复定义）", () => {
-    expect(REWRITE_CONTRACT.templateFields).toEqual(["query", "history"]);
-  });
   it("inputSchema 拒绝空 query", () => {
     expect(REWRITE_CONTRACT.inputSchema.safeParse({ query: "", history: "" }).success).toBe(false);
+  });
+});
+
+// review round 1：原测试用 toEqual 对比硬编码字面量，测不出"复用同一份表 vs
+// 重新拷贝了一份相同内容的字面量"——后者正是 011/012 明确禁止的字段名漂移风险。
+// 用 toBe（引用相等）四节点全覆盖，才能真正断言"同一份表"而非"内容恰好一致"。
+describe("templateFields 复用 012 静态字段契约（引用相等，非拷贝，四节点全覆盖）", () => {
+  it("rewrite/intent/reply/fallback 的 templateFields 与 NODE_CONTRACTS 是同一个数组引用", () => {
+    expect(REWRITE_CONTRACT.templateFields).toBe(NODE_CONTRACTS.rewrite.templateFields);
+    expect(INTENT_CONTRACT.templateFields).toBe(NODE_CONTRACTS.intent.templateFields);
+    expect(REPLY_CONTRACT.templateFields).toBe(NODE_CONTRACTS.reply.templateFields);
+    expect(FALLBACK_CONTRACT.templateFields).toBe(NODE_CONTRACTS.fallback.templateFields);
   });
 });
 
