@@ -1,6 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "./App";
+
+// 全量套件并发跑时，本文件每例都冷启动懒加载路由树（M7a 新增两个懒页后转换图更重），
+// 默认 1s 的 findBy 窗口偶发被冷转换击穿。放宽异步等待窗口与 it 超时，断言语义不变。
+configure({ asyncUtilTimeout: 5000 });
+vi.setConfig({ testTimeout: 15_000 });
 
 const NAV_LABELS = [
   "快速开始",
