@@ -12,6 +12,8 @@ vi.mock("../../api/client", () => ({
   createPrompt: vi.fn(),
   createPromptVersion: vi.fn(),
   deletePrompt: vi.fn(),
+  movePromptTag: vi.fn(),
+  removePromptTag: vi.fn(),
 }));
 
 const mocked = vi.mocked(client);
@@ -209,5 +211,92 @@ describe("Prompt 详情 Playground（012）", () => {
     expect(await screen.findByTestId("try-run-panel")).toBeInTheDocument();
     expect(screen.getByText("试运行能力接入中（保存的版本可随时回来试）")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^运行/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("Prompt 详情 · 标签面板（012 Story 6）", () => {
+  it("展示全部标签及指向版本，编辑版本以外的标签提供「移到 vX」", async () => {
+    renderRoutes("/admin/prompts/p1");
+    const panel = await screen.findByTestId("tag-panel");
+    expect(panel).toHaveTextContent("production → v2");
+    expect(panel).toHaveTextContent("只是记账标记，移动/摘除不影响任何服务");
+    // production 已指向当前编辑版本 v2 → 无移动按钮，只有摘除
+    expect(screen.queryByText("移到 v2")).not.toBeInTheDocument();
+  });
+
+  it("自定义标签入口校验：非法字符 / production / v（大小写不敏感）被拒", async () => {
+    renderRoutes("/admin/prompts/p1");
+    await screen.findByTestId("tag-panel");
+    const input = screen.getByPlaceholderText("自定义标识（字母/数字/._-）");
+    const submit = screen.getByText("标到当前版本");
+
+    fireEvent.change(input, { target: { value: "有 空格" } });
+    fireEvent.click(submit);
+    expect(await screen.findByText("仅允许字母、数字、.、_、-")).toBeInTheDocument();
+    expect(mocked.movePromptTag).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "PRODUCTION" } });
+    fireEvent.click(submit);
+    expect(await screen.findByText(/production 请通过/)).toBeInTheDocument();
+    expect(mocked.movePromptTag).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "V" } });
+    fireEvent.click(submit);
+    expect(await screen.findByText(/v 是保留字/)).toBeInTheDocument();
+    expect(mocked.movePromptTag).not.toHaveBeenCalled();
+  });
+
+  it("合法自定义标签归一小写后移动到当前编辑版本", async () => {
+    mocked.movePromptTag.mockResolvedValue([
+      { name: "beta.1", versionId: "pv2", version: 2 },
+      { name: "production", versionId: "pv2", version: 2 },
+    ]);
+    renderRoutes("/admin/prompts/p1");
+    await screen.findByTestId("tag-panel");
+    fireEvent.change(screen.getByPlaceholderText("自定义标识（字母/数字/._-）"), {
+      target: { value: "Beta.1" },
+    });
+    fireEvent.click(screen.getByText("标到当前版本"));
+    await waitFor(() =>
+      expect(mocked.movePromptTag).toHaveBeenCalledWith("p1", {
+        name: "beta.1",
+        versionId: "pv2",
+      }),
+    );
+    // 成功后 refetch 详情
+    await waitFor(() => expect(mocked.getPromptDetail.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it("移动标签需二次确认，文案明确不影响任何服务", async () => {
+    mocked.movePromptTag.mockResolvedValue([]);
+    renderRoutes("/admin/prompts/p1");
+    // 载入 v1（历史抽屉），production 指向 v2 → 出现「移到 v1」
+    fireEvent.click(await screen.findByText("🕑 历史版本 2"));
+    fireEvent.click(await screen.findByTestId("history-version-1"));
+    fireEvent.click(await screen.findByText("移到 v1"));
+    expect(await screen.findByText("仅移动 Prompt 标签，不影响任何服务。")).toBeInTheDocument();
+    // antd 两字中文按钮自动插空格（移 动）
+    fireEvent.click(screen.getByRole("button", { name: /移\s?动/ }));
+    await waitFor(() =>
+      expect(mocked.movePromptTag).toHaveBeenCalledWith("p1", {
+        name: "production",
+        versionId: "pv1",
+      }),
+    );
+  });
+
+  it("摘除标签需二次确认；失败时提示并 refetch 以服务端为准", async () => {
+    mocked.removePromptTag.mockRejectedValue(new Error("conflict"));
+    renderRoutes("/admin/prompts/p1");
+    await screen.findByTestId("tag-panel");
+    const before = mocked.getPromptDetail.mock.calls.length;
+    fireEvent.click(screen.getByLabelText("摘除 production"));
+    expect(await screen.findByText("仅摘除 Prompt 标签，不影响任何服务。")).toBeInTheDocument();
+    // 触发按钮 aria-label 也含「摘除」，用精确匹配 Popconfirm 的确认按钮
+    fireEvent.click(screen.getByRole("button", { name: "摘 除" }));
+    await waitFor(() => expect(mocked.removePromptTag).toHaveBeenCalledWith("p1", "production"));
+    await waitFor(() =>
+      expect(mocked.getPromptDetail.mock.calls.length).toBeGreaterThan(before),
+    );
   });
 });

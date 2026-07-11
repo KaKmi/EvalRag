@@ -378,6 +378,29 @@ function NodeConfigRow({
   );
 }
 
+/**
+ * 012 版本平权：候选 = 节点下全部具体版本（含无标签），带标签的排前（稳定排序，
+ * 组内保持后端 name asc + version desc 顺序），label 显示标签。
+ * 已绑定的历史版本兜底：全版本候选理论已覆盖，版本被删时避免显示裸 UUID。
+ * 导出纯函数便于单测。
+ */
+export function buildPromptVersionOptions(
+  candidates: PromptNodeVersionCandidate[],
+  current: string,
+): Array<{ value: string; label: string }> {
+  const sorted = [...candidates].sort(
+    (a, b) => (b.tags.length > 0 ? 1 : 0) - (a.tags.length > 0 ? 1 : 0),
+  );
+  const opts = sorted.map((c) => ({
+    value: c.versionId,
+    label: `${c.promptName} v${c.version}${c.tags.length ? `（${c.tags.join(" ")}）` : ""}`,
+  }));
+  if (current && !opts.some((o) => o.value === current)) {
+    opts.unshift({ value: current, label: "沿用原引用版本" });
+  }
+  return opts;
+}
+
 /** 五区块中 2-5 区块（知识库/模型/Prompt/检索）：新建 Agent 与新建配置版本共用 */
 function ConfigFields({
   draft,
@@ -401,21 +424,8 @@ function ConfigFields({
       .filter((m) => m.type === "rerank" && m.enabled)
       .map((m) => ({ value: m.id, label: m.name })),
   ];
-  // 012 版本平权：候选 = 节点下全部具体版本（含无标签），带标签的排前并在 label 显示标签
-  const promptOpts = (node: PromptNode, current: string) => {
-    const candidates = [...promptsByNode[node]].sort(
-      (a, b) => (b.tags.length > 0 ? 1 : 0) - (a.tags.length > 0 ? 1 : 0),
-    );
-    const opts = candidates.map((c) => ({
-      value: c.versionId,
-      label: `${c.promptName} v${c.version}${c.tags.length ? `（${c.tags.join(" ")}）` : ""}`,
-    }));
-    // 已绑定的历史版本兜底：理论上全版本候选已覆盖，版本被删时避免显示裸 UUID
-    if (current && !opts.some((o) => o.value === current)) {
-      opts.unshift({ value: current, label: "沿用原引用版本" });
-    }
-    return opts;
-  };
+  const promptOpts = (node: PromptNode, current: string) =>
+    buildPromptVersionOptions(promptsByNode[node], current);
   const promptField = (node: PromptNode) =>
     (`prompt${node.charAt(0).toUpperCase()}${node.slice(1)}VerId`) as
       | "promptRewriteVerId"

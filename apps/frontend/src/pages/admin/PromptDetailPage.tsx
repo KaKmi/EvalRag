@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Alert, Button, Drawer, Empty, Input, Space, Spin, Tag, Tooltip, message } from "antd";
+import {
+  Alert,
+  Button,
+  Drawer,
+  Empty,
+  Input,
+  Popconfirm,
+  Space,
+  Spin,
+  Tag,
+  Tooltip,
+  message,
+} from "antd";
 import {
   compilePromptBody,
   NODE_CONTRACTS,
@@ -8,7 +20,12 @@ import {
   type PromptDetail,
   type PromptVersion,
 } from "@codecrush/contracts";
-import { createPromptVersion, getPromptDetail } from "../../api/client";
+import {
+  createPromptVersion,
+  getPromptDetail,
+  movePromptTag,
+  removePromptTag,
+} from "../../api/client";
 import { NODE_LABEL, NODE_META } from "../../mocks/prompts";
 import { formatDateTime, tagColor } from "./PromptsPage";
 
@@ -45,6 +62,11 @@ export default function PromptDetailPage() {
   const [saveErr, setSaveErr] = useState("");
 
   const [historyOpen, setHistoryOpen] = useState(false);
+
+  // 标签面板：自定义标签输入（012 §3：production/v 不允许从自定义入口创建）
+  const [newTag, setNewTag] = useState("");
+  const [tagErr, setTagErr] = useState("");
+  const [tagBusy, setTagBusy] = useState(false);
 
   // 快速切换路由时的过期响应守卫（review P3）：旧 promptId 的响应回来晚了不覆盖当前页面
   const activePromptId = useRef(promptId);
@@ -99,6 +121,65 @@ export default function PromptDetailPage() {
 
   const insertField = (field: string) => {
     setBody((prev) => (prev ? prev + (/\s$/.test(prev) ? "" : " ") + `{${field}}` : `{${field}}`));
+  };
+
+  // Prompt 全部标签（含所指版本），从详情的版本标签聚合
+  const allTags = useMemo(
+    () =>
+      (detail?.versions ?? []).flatMap((v) =>
+        v.tags.map((name) => ({ name, version: v.version, versionId: v.id })),
+      ),
+    [detail],
+  );
+
+  // 移动/摘除失败（并发冲突等）→ 提示并 refetch，以服务端为准
+  const moveTagToCurrent = async (name: string) => {
+    if (!detail || !sourceVersion) return;
+    setTagBusy(true);
+    try {
+      await movePromptTag(detail.id, { name, versionId: sourceVersion.id });
+      message.success(`「${name}」已指向 v${sourceVersion.version}（不影响任何服务）`);
+    } catch (e) {
+      message.error(e instanceof Error ? `标签移动失败，已刷新：${e.message}` : "标签移动失败");
+    } finally {
+      setTagBusy(false);
+      await refresh(false);
+    }
+  };
+
+  const removeTagByName = async (name: string) => {
+    if (!detail) return;
+    setTagBusy(true);
+    try {
+      await removePromptTag(detail.id, name);
+      message.success(`已摘除「${name}」（不影响任何服务）`);
+    } catch (e) {
+      message.error(e instanceof Error ? `标签摘除失败，已刷新：${e.message}` : "标签摘除失败");
+    } finally {
+      setTagBusy(false);
+      await refresh(false);
+    }
+  };
+
+  const addCustomTag = async () => {
+    const raw = newTag.trim();
+    const name = raw.toLowerCase();
+    if (!raw) return;
+    if (!/^[A-Za-z0-9._-]+$/.test(raw)) {
+      setTagErr("仅允许字母、数字、.、_、-");
+      return;
+    }
+    if (name === "production") {
+      setTagErr("production 请通过下方「标为 production」入口移动，不能重复创建");
+      return;
+    }
+    if (name === "v") {
+      setTagErr("v 是保留字（与版本号前缀混淆），请换一个名称");
+      return;
+    }
+    setTagErr("");
+    await moveTagToCurrent(name);
+    setNewTag("");
   };
 
   const loadVersion = (v: PromptVersion, opts?: { copyNote?: boolean }) => {
@@ -268,6 +349,92 @@ export default function PromptDetailPage() {
                 </Tag>
               ))}
             </Space>
+          </div>
+
+          {/* 标签面板（012 §3）：排他移动 / 摘除 / 自定义创建。纯记账信号，无上线语义 */}
+          <div data-testid="tag-panel" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 500 }}>
+              标识{" "}
+              <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)", fontWeight: 400 }}>
+                · 只是记账标记，移动/摘除不影响任何服务
+              </span>
+            </div>
+            <Space size={6} wrap>
+              {allTags.map((t) => (
+                <span key={t.name} style={{ display: "inline-flex", alignItems: "center" }}>
+                  <Tag color={tagColor(t.name)} style={{ ...mono, marginRight: 0 }}>
+                    {t.name} → v{t.version}
+                  </Tag>
+                  {sourceVersion && t.versionId !== sourceVersion.id && (
+                    <Popconfirm
+                      title={`「${t.name}」当前指向 v${t.version}，移动到 v${sourceVersion.version}？`}
+                      description="仅移动 Prompt 标签，不影响任何服务。"
+                      okText="移动"
+                      cancelText="取消"
+                      onConfirm={() => void moveTagToCurrent(t.name)}
+                    >
+                      <Button type="link" size="small" style={{ fontSize: 12, padding: "0 4px" }}>
+                        移到 v{sourceVersion.version}
+                      </Button>
+                    </Popconfirm>
+                  )}
+                  <Popconfirm
+                    title={`确认摘除「${t.name}」？`}
+                    description="仅摘除 Prompt 标签，不影响任何服务。"
+                    okText="摘除"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    onConfirm={() => void removeTagByName(t.name)}
+                  >
+                    <Button
+                      type="link"
+                      size="small"
+                      danger
+                      style={{ fontSize: 12, padding: "0 4px" }}
+                      aria-label={`摘除 ${t.name}`}
+                    >
+                      ×
+                    </Button>
+                  </Popconfirm>
+                </span>
+              ))}
+              {allTags.length === 0 && (
+                <span style={{ fontSize: 12, color: "rgba(0,0,0,.35)" }}>暂无标识</span>
+              )}
+            </Space>
+            <Space size={6} wrap>
+              <Input
+                size="small"
+                value={newTag}
+                onChange={(e) => {
+                  setNewTag(e.target.value);
+                  setTagErr("");
+                }}
+                placeholder="自定义标识（字母/数字/._-）"
+                style={{ width: 220 }}
+                onPressEnter={() => void addCustomTag()}
+              />
+              <Button size="small" loading={tagBusy} onClick={() => void addCustomTag()}>
+                标到当前版本
+              </Button>
+              {sourceVersion &&
+                !allTags.some(
+                  (t) => t.name === "production" && t.versionId === sourceVersion.id,
+                ) && (
+                  <Popconfirm
+                    title={`将 production 标到 v${sourceVersion.version}？`}
+                    description="production 只是强调色标签，移动它不会改变任何线上应用。"
+                    okText="移动"
+                    cancelText="取消"
+                    onConfirm={() => void moveTagToCurrent("production")}
+                  >
+                    <Button size="small" loading={tagBusy}>
+                      标为 production
+                    </Button>
+                  </Popconfirm>
+                )}
+            </Space>
+            {tagErr && <div style={{ fontSize: 12, color: "#ff4d4f" }}>{tagErr}</div>}
           </div>
 
           <div

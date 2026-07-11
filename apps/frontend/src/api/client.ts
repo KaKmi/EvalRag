@@ -73,8 +73,12 @@ import {
   PromptListResponseSchema,
   type PromptListResponse,
   type PromptNode,
+  MovePromptTagRequestSchema,
+  type MovePromptTagRequest,
   PromptNodeVersionListResponseSchema,
   type PromptNodeVersionListResponse,
+  PromptTagListResponseSchema,
+  type PromptTagListResponse,
   PromptVersionListResponseSchema,
   type PromptVersionListResponse,
   PromptVersionSchema,
@@ -428,6 +432,26 @@ export async function createPromptVersion(
     CreatePromptVersionRequestSchema,
     PromptVersionSchema,
   );
+}
+
+// 标签排他移动/摘除（012 §3：production 与自定义同一写路径，无任何上线语义）
+export async function movePromptTag(
+  promptId: string,
+  req: MovePromptTagRequest,
+): Promise<PromptTagListResponse> {
+  const resp = await apiFetch(`/api/prompts/${encodeURIComponent(promptId)}/tags`, {
+    method: "PUT",
+    body: JSON.stringify(MovePromptTagRequestSchema.parse(req)),
+  });
+  if (!resp.ok) throw new Error(`move tag failed: ${resp.status} ${resp.statusText}`);
+  return PromptTagListResponseSchema.parse(await resp.json());
+}
+export async function removePromptTag(promptId: string, name: string): Promise<void> {
+  const resp = await apiFetch(
+    `/api/prompts/${encodeURIComponent(promptId)}/tags/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`remove tag failed: ${resp.status} ${resp.statusText}`);
 }
 
 // 删除 prompt（被应用配置引用时后端返 409。204 无响应体）
