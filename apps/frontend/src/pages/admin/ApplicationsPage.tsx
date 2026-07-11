@@ -9,6 +9,7 @@ import {
   Popconfirm,
   Select,
   Space,
+  Spin,
   Table,
   Tag,
   type TableColumnsType,
@@ -113,6 +114,7 @@ export default function ApplicationsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createErr, setCreateErr] = useState("");
   const [creating, setCreating] = useState(false);
+  const [refLoading, setRefLoading] = useState(false);
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [models, setModels] = useState<ModelProvider[]>([]);
   const [candidatesByNode, setCandidatesByNode] = useState<
@@ -142,6 +144,7 @@ export default function ApplicationsPage() {
     setCreateOpen(true);
     setCreateErr("");
     setSelectedKbIds([]);
+    setRefLoading(true);
     form.resetFields();
     try {
       const [kbList, modelList, ...nodeLists] = await Promise.all([
@@ -159,6 +162,8 @@ export default function ApplicationsPage() {
       });
     } catch (e) {
       setCreateErr(e instanceof Error ? e.message : "加载引用数据失败");
+    } finally {
+      setRefLoading(false);
     }
   };
 
@@ -355,7 +360,7 @@ export default function ApplicationsPage() {
         okText="创建并配置"
         cancelText="取消"
         confirmLoading={creating}
-        okButtonProps={{ disabled: missing.length > 0 || selectedKbIds.length === 0 }}
+        okButtonProps={{ disabled: refLoading || missing.length > 0 || selectedKbIds.length === 0 }}
         onOk={() => void submitCreate()}
         onCancel={() => {
           setCreateOpen(false);
@@ -364,7 +369,11 @@ export default function ApplicationsPage() {
         }}
         destroyOnHidden
       >
-        {missing.length > 0 ? (
+        {refLoading ? (
+          <div style={{ padding: 24, textAlign: "center" }}>
+            <Spin />
+          </div>
+        ) : missing.length > 0 ? (
           <Space direction="vertical" style={{ width: "100%" }}>
             {missing.map((m) => (
               <Alert key={m} type="warning" showIcon message={m} />
