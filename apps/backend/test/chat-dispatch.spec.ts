@@ -62,6 +62,19 @@ describe("ProtocolDispatchAdapter.chat()", () => {
     await expect(adapter.chat(config, input)).rejects.toThrow("chat 响应形状不符");
   });
 
+  it("200 但文本为空串 → 同样归一为 provider-response 错误（不静默返回空结果）", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { choices: [{ message: { content: "" } }] }),
+    );
+    await expect(adapter.chat(config, input)).rejects.toThrow("chat 响应形状不符");
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { content: [{ type: "text", text: "" }] }),
+    );
+    await expect(
+      adapter.chat({ ...config, protocol: "anthropic" }, input),
+    ).rejects.toThrow("chat 响应形状不符");
+  });
+
   it("网络错误消息里出现 key 也被擦除", async () => {
     fetchMock.mockRejectedValue(new Error("connect failed to sk-topsecret@host"));
     await expect(adapter.chat(config, input)).rejects.toThrow(/\[REDACTED\]/);

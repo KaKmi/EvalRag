@@ -144,9 +144,10 @@ export class ProtocolDispatchAdapter implements ModelProviderPort {
     }
     const json: unknown = await resp.json().catch(() => undefined);
     const text = req.parseText(json);
-    // 200 但形状不符/空输出 → 稳定的 provider-response 错误（不静默返回空串）
-    if (text === undefined) {
-      throw new Error("chat 响应形状不符：未找到规范文本输出");
+    // 200 但形状不符/空输出 → 稳定的 provider-response 错误（不静默返回空串；
+    // 空串统一在此收口，builder 只负责抽取——review round 1）
+    if (text === undefined || text.length === 0) {
+      throw new Error("chat 响应形状不符：未找到非空文本输出");
     }
     return { text };
   }
