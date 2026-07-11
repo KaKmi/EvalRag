@@ -186,7 +186,6 @@ describe("ProtocolDispatchAdapter.chatStream()", () => {
   it("网络错误/HTTP 失败 → 迭代抛错（by AsyncIterable 协议，for-await 内 throw）", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { error: { message: "boom" } }));
     await expect(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of adapter.chatStream(config, messages)) {
         // 不会执行到
       }
@@ -196,7 +195,6 @@ describe("ProtocolDispatchAdapter.chatStream()", () => {
   it("残缺/非法 JSON 分片 → 迭代抛错并擦除 key（不静默吞掉，Story 2 遗留风险在此收口）", async () => {
     fetchMock.mockResolvedValue(sseStreamResponse(['data: {"choices":[{"delta":{"content":"partial']));
     await expect(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of adapter.chatStream(config, messages)) {
         // 不会执行到
       }
@@ -205,7 +203,6 @@ describe("ProtocolDispatchAdapter.chatStream()", () => {
 
   it("不支持的协议 → 防御分支抛错", async () => {
     await expect(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of adapter.chatStream({ ...config, protocol: "cohere" }, messages)) {
         // 不会执行到
       }
