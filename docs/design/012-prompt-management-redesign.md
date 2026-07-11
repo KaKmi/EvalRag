@@ -3,7 +3,7 @@ title: "Prompt 管理模块重构"
 description: "Prompt 版本从三态状态机改为可排他移动的标识（标签）模型，详情页新增试运行，谁在用改为应用域只读派生视图。"
 category: "design"
 number: "012"
-status: draft
+status: current
 services: [backend, frontend, contracts]
 related: ["design/001", "design/002", "design/003", "design/009", "design/011"]
 last_modified: "2026-07-11"
@@ -13,7 +13,7 @@ last_modified: "2026-07-11"
 
 ## Status
 
-`draft` — 本文经 `/ship:arch-design` 完成需求梳理、高层设计、关键点深钻、规模评估与权衡分析五阶段自审（数据模型变更走深，观测/安全走简）。
+`current` — 本文经 `/ship:arch-design` 完成需求梳理、高层设计、关键点深钻、规模评估与权衡分析五阶段自审（数据模型变更走深，观测/安全走简），并已实现落地：`packages/contracts/src/node-contract.ts`（静态字段契约与 `compilePromptBody()`）、`apps/backend/src/modules/prompts/`（迁移 `0011_pink_falcon.sql` 加法 + `0012_charming_sphinx.sql` 破坏性清理、`prompt_version_tags` 排他标签、try-run 端点）、`apps/frontend/src/pages/admin/PromptsPage.tsx` + `PromptDetailPage.tsx`（列表 + 路由式 Playground + 历史抽屉）。经 dev/review/QA 三阶段校验（含真实模型 key 下 reply/fallback try-run 成功路径的人工验收）。009 依赖的“谁在用”跨域端点未随本文交付，属已声明的 out-of-scope，留给 009/M7a。
 
 本文替代两份此前存在、现已被用户删除且从未提交入库的草稿：`docs/design/proposals/prompt-management-redesign.md`（产品设计输入）与旧的 `011-prompt-assembly-node-contracts.md`（NodeContract 技术设计）。这两份文档的历史内容不再作为权威来源；本文重新收口其中「Prompt 管理」的那一半。NodeContract 执行引擎那一半已由 [011-prompt-assembly-node-contracts](011-prompt-assembly-node-contracts.md) 补齐，本文与之衔接。
 

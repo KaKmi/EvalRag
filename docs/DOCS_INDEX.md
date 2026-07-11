@@ -15,4 +15,4 @@
 | design | 009 | not-implemented | M7 应用管理与配置发布 | 应用以不可变配置版本和单一生产指针发布，上线前异步执行真实 NodeRuntime 预演。 | 2026-07-11 | [009](docs/design/009-m7-application-management.md) |
 | design | 010 | draft | 文档处理 Profile 与结构化入库管线 | 用版本化 Profile 编排解析、清洗与分块，统一输出可溯源 Markdown，并支持 PDF 版面解析与 OCR。 | 2026-07-10 | [010](docs/design/010-document-processing-profiles.md) |
 | design | 011 | draft | Prompt 组装与 LLM 节点契约（NodeContract 执行引擎） | 四个固定节点的完整 NodeContract 数据、三层 Prompt 组装与 NodeRuntimeService 执行/校验/Fallback 设计，本轮写死代码。 | 2026-07-11 | [011](docs/design/011-prompt-assembly-node-contracts.md) |
-| design | 012 | draft | Prompt 管理模块重构 | Prompt 版本从三态状态机改为可排他移动的标识（标签）模型，详情页新增试运行，谁在用改为应用域只读派生视图。 | 2026-07-11 | [012](docs/design/012-prompt-management-redesign.md) |
+| design | 012 | current | Prompt 管理模块重构 | Prompt 版本从三态状态机改为可排他移动的标识（标签）模型，详情页新增试运行，谁在用改为应用域只读派生视图。 | 2026-07-11 | [012](docs/design/012-prompt-management-redesign.md) |
