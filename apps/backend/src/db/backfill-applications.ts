@@ -106,38 +106,42 @@ export async function runBackfill(
     );
     const kbIds = kbRows.rows.map((item) => String((item as { kb_id: string }).kb_id));
     const config = mapVersion(raw, kbIds);
-    const inserted = await db
-      .insert(applicationConfigVersions)
-      .values({
-        id: raw.id,
-        applicationId: raw.agent_id,
-        version: raw.version,
-        configSchemaVersion: 1,
-        promptRewriteVersionId: config.nodes.rewrite.promptVersionId,
-        promptIntentVersionId: config.nodes.intent.promptVersionId,
-        promptReplyVersionId: config.nodes.reply.promptVersionId,
-        promptFallbackVersionId: config.nodes.fallback.promptVersionId,
-        rewriteModelId: config.nodes.rewrite.modelId,
-        intentModelId: config.nodes.intent.modelId,
-        replyModelId: config.nodes.reply.modelId,
-        fallbackModelId: config.nodes.fallback.modelId,
-        rerankModelId: config.retrieval.rerankModelId,
-        nodeParams: persistedNodeParams(config),
-        retrievalParams: config.retrieval,
-        fallbackParams: config.fallback,
-        note: raw.note,
-        createdBy: raw.created_by,
-        createdAt: raw.created_at instanceof Date ? raw.created_at : new Date(raw.created_at),
-      })
-      .onConflictDoNothing({ target: applicationConfigVersions.id })
-      .returning({ id: applicationConfigVersions.id });
-    versions += inserted.length;
-    if (inserted.length > 0 && kbIds.length > 0) {
-      await db
-        .insert(applicationConfigVersionKbs)
-        .values(kbIds.map((kbId) => ({ configVersionId: raw.id, kbId })));
-      kbs += kbIds.length;
-    }
+    await db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(applicationConfigVersions)
+        .values({
+          id: raw.id,
+          applicationId: raw.agent_id,
+          version: raw.version,
+          configSchemaVersion: 1,
+          promptRewriteVersionId: config.nodes.rewrite.promptVersionId,
+          promptIntentVersionId: config.nodes.intent.promptVersionId,
+          promptReplyVersionId: config.nodes.reply.promptVersionId,
+          promptFallbackVersionId: config.nodes.fallback.promptVersionId,
+          rewriteModelId: config.nodes.rewrite.modelId,
+          intentModelId: config.nodes.intent.modelId,
+          replyModelId: config.nodes.reply.modelId,
+          fallbackModelId: config.nodes.fallback.modelId,
+          rerankModelId: config.retrieval.rerankModelId,
+          nodeParams: persistedNodeParams(config),
+          retrievalParams: config.retrieval,
+          fallbackParams: config.fallback,
+          note: raw.note,
+          createdBy: raw.created_by,
+          createdAt: raw.created_at instanceof Date ? raw.created_at : new Date(raw.created_at),
+        })
+        .onConflictDoNothing({ target: applicationConfigVersions.id })
+        .returning({ id: applicationConfigVersions.id });
+      versions += inserted.length;
+      if (kbIds.length > 0) {
+        const insertedKbs = await tx
+          .insert(applicationConfigVersionKbs)
+          .values(kbIds.map((kbId) => ({ configVersionId: raw.id, kbId })))
+          .onConflictDoNothing()
+          .returning({ kbId: applicationConfigVersionKbs.kbId });
+        kbs += insertedKbs.length;
+      }
+    });
   }
   return { applications: appResult.rowCount ?? 0, versions, kbs };
 }
@@ -174,13 +178,30 @@ export async function verifyBackfill(db: DB): Promise<{ ok: boolean; problems: s
     problems.push("production 指针未指向所属应用配置版本");
   }
 
+  const badApplications = await db.execute(sql`
+    SELECT count(*)::int n FROM agents old
+    JOIN applications target ON target.id = old.id
+    WHERE target.slug <> old.id::text
+       OR target.name <> old.name
+       OR target.description <> old."desc"
+       OR target.enabled IS DISTINCT FROM old.enabled
+       OR target.created_by <> old.updated_by
+       OR target.updated_by <> old.updated_by
+       OR target.production_config_version_id IS DISTINCT FROM old.current_version_id
+  `);
+  if (Number((badApplications.rows[0] as { n: number }).n) > 0) {
+    problems.push("applications 存在与 legacy identity 映射不一致的行");
+  }
+
+  const legacyVersionRows = await db.execute(sql`SELECT * FROM agent_config_versions ORDER BY id`);
+  const legacyVersions = legacyVersionRows.rows as unknown as LegacyVersion[];
   const rows = await db.select().from(applicationConfigVersions);
   for (const row of rows) {
     const kbRows = await db
       .select({ kbId: applicationConfigVersionKbs.kbId })
       .from(applicationConfigVersionKbs)
       .where(eq(applicationConfigVersionKbs.configVersionId, row.id));
-    ApplicationConfigFieldsSchema.parse({
+    const targetConfig = ApplicationConfigFieldsSchema.parse({
       kbIds: kbRows.map((item) => item.kbId),
       nodes: {
         rewrite: {
@@ -207,6 +228,27 @@ export async function verifyBackfill(db: DB): Promise<{ ok: boolean; problems: s
       retrieval: row.retrievalParams,
       fallback: row.fallbackParams,
     });
+    const source = legacyVersions.find((legacy) => legacy.id === row.id);
+    if (!source) {
+      problems.push(`配置版本 ${row.id} 没有对应 legacy 源行`);
+      continue;
+    }
+    const sourceKbRows = await db.execute(
+      sql`SELECT kb_id FROM agent_config_version_kbs WHERE version_id = ${source.id} ORDER BY kb_id`,
+    );
+    const expectedConfig = mapVersion(
+      source,
+      sourceKbRows.rows.map((item) => String((item as { kb_id: string }).kb_id)),
+    );
+    if (
+      row.applicationId !== source.agent_id ||
+      row.version !== source.version ||
+      row.note !== source.note ||
+      row.createdBy !== source.created_by ||
+      JSON.stringify(targetConfig) !== JSON.stringify(expectedConfig)
+    ) {
+      problems.push(`配置版本 ${row.id} 与 legacy 映射不一致`);
+    }
   }
   return { ok: problems.length === 0, problems };
 }

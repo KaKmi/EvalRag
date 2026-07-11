@@ -119,6 +119,11 @@ describeDb("applications migration + backfill", () => {
   it("maps legacy identities, pointers, versions and snapshots idempotently", async () => {
     expect(await runBackfill(db)).toEqual({ applications: 1, versions: 1, kbs: 1 });
     expect(await runBackfill(db)).toEqual({ applications: 0, versions: 0, kbs: 0 });
+    await pool.query(
+      `DELETE FROM application_config_version_kbs WHERE config_version_id=$1 AND kb_id=$2`,
+      [ids.version, ids.kb],
+    );
+    expect(await runBackfill(db)).toEqual({ applications: 0, versions: 0, kbs: 1 });
     const app = (await pool.query(`SELECT * FROM applications WHERE id=$1`, [ids.agent])).rows[0];
     expect(app.slug).toBe(ids.agent);
     expect(app.production_config_version_id).toBe(ids.version);
@@ -173,6 +178,11 @@ describeDb("applications migration + backfill", () => {
       }),
     ).not.toThrow();
     expect(await verifyBackfill(db)).toEqual({ ok: true, problems: [] });
+    await pool.query(`UPDATE applications SET description='wrong' WHERE id=$1`, [ids.agent]);
+    const invalid = await verifyBackfill(db);
+    expect(invalid.ok).toBe(false);
+    expect(invalid.problems).toContain("applications 存在与 legacy identity 映射不一致的行");
+    await pool.query(`UPDATE applications SET description='' WHERE id=$1`, [ids.agent]);
   });
 
   it("keeps referenced prompts restricted and cascades application-owned rows", async () => {
