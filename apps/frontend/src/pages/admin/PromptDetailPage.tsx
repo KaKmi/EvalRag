@@ -422,8 +422,14 @@ export default function PromptDetailPage() {
                   (t) => t.name === "production" && t.versionId === sourceVersion.id,
                 ) && (
                   <Popconfirm
-                    title={`将 production 标到 v${sourceVersion.version}？`}
-                    description="production 只是强调色标签，移动它不会改变任何线上应用。"
+                    title={(() => {
+                      // production 已存在时确认文案必须显示当前指向（012 §3，review 修复）
+                      const existing = allTags.find((t) => t.name === "production");
+                      return existing
+                        ? `production 当前指向 v${existing.version}，移动到 v${sourceVersion.version}？`
+                        : `将 production 标到 v${sourceVersion.version}？`;
+                    })()}
+                    description="仅移动 Prompt 标签，不影响任何服务。production 只是强调色标记。"
                     okText="移动"
                     cancelText="取消"
                     onConfirm={() => void moveTagToCurrent("production")}
