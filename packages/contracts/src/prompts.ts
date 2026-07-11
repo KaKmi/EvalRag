@@ -1,7 +1,7 @@
 import { z } from "zod";
-
-export const PromptNodeSchema = z.enum(["rewrite", "intent", "reply", "fallback"]);
-export type PromptNode = z.infer<typeof PromptNodeSchema>;
+// PromptNodeSchema 移居 node-contract.ts（依赖方向 prompts → node-contract，防循环）；
+// barrel 仍导出，外部 import 位置不变。
+import { PromptNodeSchema } from "./node-contract";
 
 export const PromptVersionStatusSchema = z.enum(["draft", "prod", "archived"]);
 export type PromptVersionStatus = z.infer<typeof PromptVersionStatusSchema>;

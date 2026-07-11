@@ -1,4 +1,4 @@
-import type { PromptNode, PromptVersionStatus } from "@codecrush/contracts";
+import { NODE_CONTRACTS, type PromptNode, type PromptVersionStatus } from "@codecrush/contracts";
 import type { TagKey } from "./agents";
 
 /**
@@ -27,34 +27,28 @@ export const NODE_LABEL: Record<PromptNode, string> = {
   fallback: "兜底",
 };
 
-export const NODE_META: Record<PromptNode, { hint: string; vars: string[] }> = {
-  rewrite: {
-    hint: "结合历史对话把用户问题改写为独立、可检索的查询，输出改写结果与扩展关键词。",
-    vars: ["{query}", "{history}"],
-  },
-  intent: {
-    hint: "判断用户问题意图并路由到对应知识库，通常要求输出结构化 JSON。",
-    vars: ["{query}"],
-  },
-  reply: {
-    hint: "基于命中知识生成最终回复，需约束“不得编造”并为每条引用标注角标。",
-    vars: ["{context}", "{query}", "{policy_date}", "{user_level}"],
-  },
-  fallback: {
-    hint: "当问题超出知识库范围或相似度过低时的礼貌兜底话术。",
-    vars: ["{query}"],
-  },
+// vars 来自 contracts 的 NODE_CONTRACTS 静态字段契约（012 §5 唯一事实源），
+// 此处只补 UI 文案（hint），不再重复维护字段表。
+const NODE_HINT: Record<PromptNode, string> = {
+  rewrite: "结合历史对话把用户问题改写为独立、可检索的查询，输出改写结果与扩展关键词。",
+  intent: "判断用户问题意图并路由到对应知识库，通常要求输出结构化 JSON。",
+  reply: "基于命中知识生成最终回复，需约束“不得编造”并为每条引用标注角标。",
+  fallback: "当问题超出知识库范围或相似度过低时的礼貌兜底话术。",
 };
+
+export const NODE_META: Record<PromptNode, { hint: string; vars: string[] }> = Object.fromEntries(
+  (Object.keys(NODE_HINT) as PromptNode[]).map((node) => [
+    node,
+    { hint: NODE_HINT[node], vars: NODE_CONTRACTS[node].templateFields.map((f) => `{${f}}`) },
+  ]),
+) as Record<PromptNode, { hint: string; vars: string[] }>;
 
 /** 变量 → 示例值（预览填充用）。 */
 export const VAR_PH: Record<string, string> = {
   "{query}": "如：7 天内没学能全额退吗",
-  "{question}": "如：7 天内没学能全额退吗",
   "{history}": "如：用户此前咨询过退款政策",
-  "{context}": "如：第二条 七天无理由退款…",
-  "{policy_date}": "2026-06-18",
-  "{user_level}": "零基础",
-  "{intent}": "售后",
+  "{retrievalContext}": "如：第二条 七天无理由退款…",
+  "{reason}": "如：知识库中未命中相关内容",
 };
 
 /** 版本状态 → 色板（对齐 contracts draft/prod/archived）。 */

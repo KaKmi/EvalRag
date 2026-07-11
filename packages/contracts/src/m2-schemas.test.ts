@@ -3,6 +3,9 @@ import {
   AgentSchema,
   ChatRequestSchema,
   ChatStreamEventSchema,
+  CompileIssueSchema,
+  CompileResultSchema,
+  CompileStatusSchema,
   ConversationSchema,
   CreateAgentRequestSchema,
   CreateModelRequestSchema,
@@ -416,5 +419,44 @@ describe("M2 request schemas (skeleton DTOs)", () => {
     expect(() =>
       PromptListResponseSchema.parse({ items: [], total: -1, page: 1, pageSize: 10 }),
     ).toThrow();
+  });
+});
+
+// M6 重构（012）：编译结果/状态 schema（compile_status/compile_errors 的契约形状）
+describe("Compile result schemas (012)", () => {
+  it("CompileStatusSchema accepts ok/has_errors/has_warnings only", () => {
+    expect(CompileStatusSchema.parse("ok")).toBe("ok");
+    expect(CompileStatusSchema.parse("has_errors")).toBe("has_errors");
+    expect(CompileStatusSchema.parse("has_warnings")).toBe("has_warnings");
+    expect(() => CompileStatusSchema.parse("draft")).toThrow();
+  });
+  it("CompileIssueSchema accepts issue with optional field/suggestion", () => {
+    const minimal = {
+      code: "INVALID_TEMPLATE_SYNTAX",
+      severity: "error",
+      message: "存在未闭合的 {",
+    };
+    expect(CompileIssueSchema.parse(minimal)).toEqual(minimal);
+    const full = {
+      code: "UNKNOWN_VARIABLE",
+      severity: "error",
+      message: "未知字段",
+      field: "qeury",
+      suggestion: "query",
+    };
+    expect(CompileIssueSchema.parse(full)).toEqual(full);
+  });
+  it("CompileIssueSchema rejects unknown code/severity", () => {
+    expect(() =>
+      CompileIssueSchema.parse({ code: "NOPE", severity: "error", message: "x" }),
+    ).toThrow();
+    expect(() =>
+      CompileIssueSchema.parse({ code: "RESERVED_FIELD", severity: "fatal", message: "x" }),
+    ).toThrow();
+  });
+  it("CompileResultSchema accepts { status, issues[] }", () => {
+    const r = { status: "has_warnings", issues: [] };
+    expect(CompileResultSchema.parse(r)).toEqual(r);
+    expect(() => CompileResultSchema.parse({ status: "ok" })).toThrow();
   });
 });

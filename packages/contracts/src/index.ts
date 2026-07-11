@@ -11,6 +11,7 @@ export * from "./retrieval";
 export * from "./agents";
 export * from "./prompts";
 export * from "./prompt-template";
+export * from "./node-contract";
 export * from "./chat";
 export * from "./conversations";
 export * from "./evalsets";
