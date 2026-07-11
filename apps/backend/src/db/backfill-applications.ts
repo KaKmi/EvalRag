@@ -6,7 +6,6 @@ import { Pool } from "pg";
 import {
   applicationConfigVersionKbs,
   applicationConfigVersions,
-  applications,
 } from "../modules/applications/schema";
 
 type DB = ReturnType<typeof drizzle>;
