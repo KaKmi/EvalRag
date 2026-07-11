@@ -77,7 +77,7 @@ export class ApplicationsController {
   ): Promise<ApplicationConfigVersion> {
     return this.service.createVersion(id, body, req.user.email);
   }
-  @Post(":id/config-versions/:versionId/chat") chat(
+  @Post(":id/config-versions/:versionId/chat") @HttpCode(200) chat(
     @Param("id") id: string,
     @Param("versionId") versionId: string,
   ): Promise<ApplicationChatResult> {
