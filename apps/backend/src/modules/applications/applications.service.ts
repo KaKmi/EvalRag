@@ -15,7 +15,7 @@ import type {
   PromptUsageEntry,
   UpdateApplicationRequest,
 } from "@codecrush/contracts";
-import { KnowledgeBasesRepository } from "../knowledge-bases/knowledge-bases.repository";
+import { KnowledgeBasesService } from "../knowledge-bases/knowledge-bases.service";
 import { ModelsService } from "../models/models.service";
 import { PromptsService } from "../prompts/prompts.service";
 import { ApplicationsRepository, type ApplicationListRow } from "./applications.repository";
@@ -27,7 +27,7 @@ const nodes = ["rewrite", "intent", "reply", "fallback"] as const;
 export class ApplicationsService {
   constructor(
     private readonly repo: ApplicationsRepository,
-    private readonly kbRepo: KnowledgeBasesRepository,
+    private readonly knowledgeBases: KnowledgeBasesService,
     private readonly models: ModelsService,
     private readonly prompts: PromptsService,
   ) {}
@@ -158,7 +158,7 @@ export class ApplicationsService {
   }
   private async validate(config: ApplicationConfigFields): Promise<string[]> {
     const kbIds = [...new Set(config.kbIds)];
-    const kbs = await this.kbRepo.findByIds(kbIds);
+    const kbs = await this.knowledgeBases.findByIds(kbIds);
     if (kbs.length !== kbIds.length) throw new NotFoundException("knowledge base not found");
     if (new Set(kbs.map((k) => k.embeddingModelId)).size > 1)
       throw new BadRequestException("知识库 embedding 模型不一致");
@@ -172,8 +172,8 @@ export class ApplicationsService {
       if (meta.node !== node)
         throw new BadRequestException(`prompt version node 与 ${node} 不匹配`);
     }
-    if (config.retrieval.rerankEnabled) {
-      const model = await this.models.get(config.retrieval.rerankModelId!);
+    if (config.retrieval.rerankModelId) {
+      const model = await this.models.get(config.retrieval.rerankModelId);
       if (model.type !== "rerank" || !model.enabled)
         throw new BadRequestException("rerank model 必须是启用的 rerank");
     }

@@ -115,6 +115,20 @@ describe("ApplicationsService", () => {
       app.create({ slug: "after-sale", name: "售后", description: "", config }, "u"),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
+  it("validates an explicitly supplied rerank model even when rerank is disabled", async () => {
+    const { app } = service();
+    await expect(
+      app.create(
+        {
+          slug: "after-sale",
+          name: "售后",
+          description: "",
+          config: { ...config, retrieval: { ...config.retrieval, rerankModelId: "llm" } },
+        },
+        "u",
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
   it("rejects a version owned by a different application", async () => {
     const { app, repo } = service({
       findVersionById: jest.fn(async () => ({ ...version, applicationId: "other" })),
