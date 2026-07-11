@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Alert, Button, Drawer, Empty, Input, Space, Spin, Tag, Tooltip, message } from "antd";
 import {
@@ -46,11 +46,18 @@ export default function PromptDetailPage() {
 
   const [historyOpen, setHistoryOpen] = useState(false);
 
+  // 快速切换路由时的过期响应守卫（review P3）：旧 promptId 的响应回来晚了不覆盖当前页面
+  const activePromptId = useRef(promptId);
+  useEffect(() => {
+    activePromptId.current = promptId;
+  }, [promptId]);
+
   const refresh = useCallback(
     async (loadLatestIntoEditor: boolean) => {
       setLoadErr("");
       try {
         const d = await getPromptDetail(promptId);
+        if (activePromptId.current !== promptId) return null;
         setDetail(d);
         if (loadLatestIntoEditor && d.versions.length > 0) {
           setSourceVersion(d.versions[0]);
@@ -59,6 +66,7 @@ export default function PromptDetailPage() {
         }
         return d;
       } catch (e) {
+        if (activePromptId.current !== promptId) return null;
         setLoadErr(e instanceof Error ? e.message : "加载失败");
         return null;
       } finally {
