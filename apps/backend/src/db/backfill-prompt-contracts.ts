@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { compilePromptBody, NODE_CONTRACT_VERSION, PromptNodeSchema } from "@codecrush/contracts";
-import { prompts, promptVersions, promptVersionTags } from "../modules/prompts/schema";
+import { prompts, promptVersions } from "../modules/prompts/schema";
 
 // 012 Story 2 显式 backfill（迁移 0011 之后、清理迁移 0012 之前运行）：
 // 1. 为所有 compile_status 为空的版本用共享编译器计算 contract_version/compile_status/compile_errors；

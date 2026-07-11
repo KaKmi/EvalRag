@@ -25,8 +25,8 @@ import type {
   ModelProvider,
   NodeConfig,
   NodeParams,
-  Prompt,
   PromptNode,
+  PromptNodeVersionCandidate,
 } from "@codecrush/contracts";
 import {
   createAgent,
@@ -35,7 +35,7 @@ import {
   getAgents,
   getKnowledgeBases,
   getModels,
-  getPrompts,
+  getPromptNodeVersions,
   publishAgentConfigVersion,
   rollbackAgentConfigVersion,
   runAgentConfigVersionEval,
@@ -390,7 +390,7 @@ function ConfigFields({
   patch: (p: Partial<ConfigDraft>) => void;
   kbs: KnowledgeBase[];
   models: ModelProvider[];
-  promptsByNode: Record<PromptNode, Prompt[]>;
+  promptsByNode: Record<PromptNode, PromptNodeVersionCandidate[]>;
 }) {
   const llmOpts = models
     .filter((m) => m.type === "llm" && m.enabled)
@@ -401,14 +401,16 @@ function ConfigFields({
       .filter((m) => m.type === "rerank" && m.enabled)
       .map((m) => ({ value: m.id, label: m.name })),
   ];
+  // 012 版本平权：候选 = 节点下全部具体版本（含无标签），带标签的排前并在 label 显示标签
   const promptOpts = (node: PromptNode, current: string) => {
-    const opts = promptsByNode[node]
-      .filter((p) => p.currentVersionId !== null)
-      .map((p) => ({
-        value: p.currentVersionId as string,
-        label: `${p.name} v${p.currentVersionNumber}`,
-      }));
-    // 预填的引用可能指向旧版本（不在"当前生产版本"选项里），补一项避免显示裸 UUID
+    const candidates = [...promptsByNode[node]].sort(
+      (a, b) => (b.tags.length > 0 ? 1 : 0) - (a.tags.length > 0 ? 1 : 0),
+    );
+    const opts = candidates.map((c) => ({
+      value: c.versionId,
+      label: `${c.promptName} v${c.version}${c.tags.length ? `（${c.tags.join(" ")}）` : ""}`,
+    }));
+    // 已绑定的历史版本兜底：理论上全版本候选已覆盖，版本被删时避免显示裸 UUID
     if (current && !opts.some((o) => o.value === current)) {
       opts.unshift({ value: current, label: "沿用原引用版本" });
     }
@@ -619,7 +621,9 @@ export default function AgentsPage() {
   const [listErr, setListErr] = useState("");
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [models, setModels] = useState<ModelProvider[]>([]);
-  const [promptsByNode, setPromptsByNode] = useState<Record<PromptNode, Prompt[]>>({
+  const [promptsByNode, setPromptsByNode] = useState<
+    Record<PromptNode, PromptNodeVersionCandidate[]>
+  >({
     rewrite: [],
     intent: [],
     reply: [],
@@ -671,18 +675,18 @@ export default function AgentsPage() {
   // 引用数据（知识库/模型/各节点 Prompt）一次拉全，供表单与列表名称映射
   const loadRefs = useCallback(async () => {
     try {
-      const [kbList, modelList, ...promptPages] = await Promise.all([
+      const [kbList, modelList, ...nodeVersions] = await Promise.all([
         getKnowledgeBases(),
         getModels(),
-        ...PROMPT_NODES.map((node) => getPrompts({ page: 1, pageSize: 100, node })),
+        ...PROMPT_NODES.map((node) => getPromptNodeVersions(node)),
       ]);
       setKbs(kbList);
       setModels(modelList);
       setPromptsByNode({
-        rewrite: promptPages[0].items,
-        intent: promptPages[1].items,
-        reply: promptPages[2].items,
-        fallback: promptPages[3].items,
+        rewrite: nodeVersions[0],
+        intent: nodeVersions[1],
+        reply: nodeVersions[2],
+        fallback: nodeVersions[3],
       });
     } catch (e) {
       setListErr(e instanceof Error ? e.message : "加载引用数据失败");

@@ -68,11 +68,13 @@ import {
   type CreatePromptRequest,
   CreatePromptVersionRequestSchema,
   type CreatePromptVersionRequest,
+  PromptDetailSchema,
+  type PromptDetail,
   PromptListResponseSchema,
   type PromptListResponse,
   type PromptNode,
-  PromptSchema,
-  type Prompt,
+  PromptNodeVersionListResponseSchema,
+  type PromptNodeVersionListResponse,
   PromptVersionListResponseSchema,
   type PromptVersionListResponse,
   PromptVersionSchema,
@@ -389,28 +391,32 @@ export const getConversation = (id: string): Promise<Conversation> =>
 export const getMessages = (convId: string): Promise<MessageListResponse> =>
   getJson(`/api/conversations/${encodeURIComponent(convId)}/messages`, MessageListResponseSchema);
 
-// prompts — @Controller("prompts")
+// prompts — @Controller("prompts")（012：版本平权 + 排他标签 + 路由式详情，无发布/回滚）
 export async function getPrompts(query: {
   page: number;
   pageSize: number;
   search?: string;
   node?: PromptNode;
-  status?: "prod" | "draft";
 }): Promise<PromptListResponse> {
   const params = new URLSearchParams();
   params.set("page", String(query.page));
   params.set("pageSize", String(query.pageSize));
   if (query.search) params.set("search", query.search);
   if (query.node) params.set("node", query.node);
-  if (query.status) params.set("status", query.status);
   return getJson(`/api/prompts?${params.toString()}`, PromptListResponseSchema);
 }
+export const getPromptDetail = (promptId: string): Promise<PromptDetail> =>
+  getJson(`/api/prompts/${encodeURIComponent(promptId)}`, PromptDetailSchema);
+// 节点下全部具体版本（012 版本平权：应用/旧 Agent 表单候选，不按标签过滤）
+export const getPromptNodeVersions = (node: PromptNode): Promise<PromptNodeVersionListResponse> =>
+  getJson(`/api/prompts/versions?node=${encodeURIComponent(node)}`, PromptNodeVersionListResponseSchema);
 export const getPromptVersions = (promptId: string): Promise<PromptVersionListResponse> =>
   getJson(`/api/prompts/${encodeURIComponent(promptId)}/versions`, PromptVersionListResponseSchema);
 
-// M6 写操作：建 Prompt / 出新版本 / 发布 / 回滚（author 由后端从 JWT 填，D6）
-export async function createPrompt(req: CreatePromptRequest): Promise<Prompt> {
-  return postJson("/api/prompts", req, CreatePromptRequestSchema, PromptSchema);
+// 写操作（author 由后端从 JWT 填）：新建 = {name,node}（服务端事务生成空 v1），
+// 保存 = 总是产生不可变新版本（sourceVersionId 供「创建副本」沿用 contractVersion）
+export async function createPrompt(req: CreatePromptRequest): Promise<PromptDetail> {
+  return postJson("/api/prompts", req, CreatePromptRequestSchema, PromptDetailSchema);
 }
 export async function createPromptVersion(
   promptId: string,
@@ -423,30 +429,8 @@ export async function createPromptVersion(
     PromptVersionSchema,
   );
 }
-export async function publishPromptVersion(
-  promptId: string,
-  versionId: string,
-): Promise<PromptVersion> {
-  const resp = await apiFetch(
-    `/api/prompts/${encodeURIComponent(promptId)}/versions/${encodeURIComponent(versionId)}/publish`,
-    { method: "POST" },
-  );
-  if (!resp.ok) throw new Error(`publish failed: ${resp.status}`);
-  return PromptVersionSchema.parse(await resp.json());
-}
-export async function rollbackPromptVersion(
-  promptId: string,
-  versionId: string,
-): Promise<PromptVersion> {
-  const resp = await apiFetch(
-    `/api/prompts/${encodeURIComponent(promptId)}/versions/${encodeURIComponent(versionId)}/rollback`,
-    { method: "POST" },
-  );
-  if (!resp.ok) throw new Error(`rollback failed: ${resp.status}`);
-  return PromptVersionSchema.parse(await resp.json());
-}
 
-// 删除 prompt（仅草稿可删；已启用后端返 409。204 无响应体）
+// 删除 prompt（被应用配置引用时后端返 409。204 无响应体）
 export async function deletePrompt(promptId: string): Promise<void> {
   const resp = await apiFetch(`/api/prompts/${encodeURIComponent(promptId)}`, {
     method: "DELETE",

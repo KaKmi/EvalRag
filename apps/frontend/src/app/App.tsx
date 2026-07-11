@@ -15,6 +15,7 @@ const DocumentsPage = lazy(() => import("../pages/admin/DocumentsPage"));
 const ChunksPage = lazy(() => import("../pages/admin/ChunksPage"));
 const RetrievalTestPage = lazy(() => import("../pages/admin/RetrievalTestPage"));
 const PromptsPage = lazy(() => import("../pages/admin/PromptsPage"));
+const PromptDetailPage = lazy(() => import("../pages/admin/PromptDetailPage"));
 const GapsPage = lazy(() => import("../pages/admin/GapsPage"));
 const EvalSetsPage = lazy(() => import("../pages/admin/EvalSetsPage"));
 const EvalsPage = lazy(() => import("../pages/admin/EvalsPage"));
@@ -62,6 +63,7 @@ export function App() {
           <Route path="knowledge-bases/:kbId/documents/:docId/chunks" element={<ChunksPage />} />
           <Route path="retrieval-test" element={<RetrievalTestPage />} />
           <Route path="prompts" element={<PromptsPage />} />
+          <Route path="prompts/:promptId" element={<PromptDetailPage />} />
           <Route path="gaps" element={<GapsPage />} />
           <Route path="evalsets" element={<EvalSetsPage />} />
           <Route path="evaluations" element={<EvalsPage />} />
