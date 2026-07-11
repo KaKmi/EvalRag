@@ -10,6 +10,8 @@
     "test": "jest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:backfill-prompts": "tsx src/db/backfill-prompt-contracts.ts",
+    "test:db": "cross-env RUN_DB_TESTS=1 jest test/prompts.migration.spec.ts",
     "db:seed": "tsx src/db/seed.ts",
     "observability:verify": "node scripts/verify-observability.mjs"
   },
@@ -50,6 +52,7 @@
     "@types/pdf-parse": "^1.1.5",
     "@types/pg": "^8.20.0",
     "@types/supertest": "^6.0.2",
+    "cross-env": "^10.1.0",
     "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10",
     "jest": "^30.4.2",

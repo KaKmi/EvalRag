@@ -25,8 +25,8 @@ import type {
   ModelProvider,
   NodeConfig,
   NodeParams,
-  Prompt,
   PromptNode,
+  PromptNodeVersionCandidate,
 } from "@codecrush/contracts";
 import {
   createAgent,
@@ -35,7 +35,7 @@ import {
   getAgents,
   getKnowledgeBases,
   getModels,
-  getPrompts,
+  getPromptNodeVersions,
   publishAgentConfigVersion,
   rollbackAgentConfigVersion,
   runAgentConfigVersionEval,
@@ -378,6 +378,29 @@ function NodeConfigRow({
   );
 }
 
+/**
+ * 012 版本平权：候选 = 节点下全部具体版本（含无标签），带标签的排前（稳定排序，
+ * 组内保持后端 name asc + version desc 顺序），label 显示标签。
+ * 已绑定的历史版本兜底：全版本候选理论已覆盖，版本被删时避免显示裸 UUID。
+ * 导出纯函数便于单测。
+ */
+export function buildPromptVersionOptions(
+  candidates: PromptNodeVersionCandidate[],
+  current: string,
+): Array<{ value: string; label: string }> {
+  const sorted = [...candidates].sort(
+    (a, b) => (b.tags.length > 0 ? 1 : 0) - (a.tags.length > 0 ? 1 : 0),
+  );
+  const opts = sorted.map((c) => ({
+    value: c.versionId,
+    label: `${c.promptName} v${c.version}${c.tags.length ? `（${c.tags.join(" ")}）` : ""}`,
+  }));
+  if (current && !opts.some((o) => o.value === current)) {
+    opts.unshift({ value: current, label: "沿用原引用版本" });
+  }
+  return opts;
+}
+
 /** 五区块中 2-5 区块（知识库/模型/Prompt/检索）：新建 Agent 与新建配置版本共用 */
 function ConfigFields({
   draft,
@@ -390,7 +413,7 @@ function ConfigFields({
   patch: (p: Partial<ConfigDraft>) => void;
   kbs: KnowledgeBase[];
   models: ModelProvider[];
-  promptsByNode: Record<PromptNode, Prompt[]>;
+  promptsByNode: Record<PromptNode, PromptNodeVersionCandidate[]>;
 }) {
   const llmOpts = models
     .filter((m) => m.type === "llm" && m.enabled)
@@ -401,19 +424,8 @@ function ConfigFields({
       .filter((m) => m.type === "rerank" && m.enabled)
       .map((m) => ({ value: m.id, label: m.name })),
   ];
-  const promptOpts = (node: PromptNode, current: string) => {
-    const opts = promptsByNode[node]
-      .filter((p) => p.currentVersionId !== null)
-      .map((p) => ({
-        value: p.currentVersionId as string,
-        label: `${p.name} v${p.currentVersionNumber}`,
-      }));
-    // 预填的引用可能指向旧版本（不在"当前生产版本"选项里），补一项避免显示裸 UUID
-    if (current && !opts.some((o) => o.value === current)) {
-      opts.unshift({ value: current, label: "沿用原引用版本" });
-    }
-    return opts;
-  };
+  const promptOpts = (node: PromptNode, current: string) =>
+    buildPromptVersionOptions(promptsByNode[node], current);
   const promptField = (node: PromptNode) =>
     (`prompt${node.charAt(0).toUpperCase()}${node.slice(1)}VerId`) as
       | "promptRewriteVerId"
@@ -619,7 +631,9 @@ export default function AgentsPage() {
   const [listErr, setListErr] = useState("");
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [models, setModels] = useState<ModelProvider[]>([]);
-  const [promptsByNode, setPromptsByNode] = useState<Record<PromptNode, Prompt[]>>({
+  const [promptsByNode, setPromptsByNode] = useState<
+    Record<PromptNode, PromptNodeVersionCandidate[]>
+  >({
     rewrite: [],
     intent: [],
     reply: [],
@@ -671,18 +685,18 @@ export default function AgentsPage() {
   // 引用数据（知识库/模型/各节点 Prompt）一次拉全，供表单与列表名称映射
   const loadRefs = useCallback(async () => {
     try {
-      const [kbList, modelList, ...promptPages] = await Promise.all([
+      const [kbList, modelList, ...nodeVersions] = await Promise.all([
         getKnowledgeBases(),
         getModels(),
-        ...PROMPT_NODES.map((node) => getPrompts({ page: 1, pageSize: 100, node })),
+        ...PROMPT_NODES.map((node) => getPromptNodeVersions(node)),
       ]);
       setKbs(kbList);
       setModels(modelList);
       setPromptsByNode({
-        rewrite: promptPages[0].items,
-        intent: promptPages[1].items,
-        reply: promptPages[2].items,
-        fallback: promptPages[3].items,
+        rewrite: nodeVersions[0],
+        intent: nodeVersions[1],
+        reply: nodeVersions[2],
+        fallback: nodeVersions[3],
       });
     } catch (e) {
       setListErr(e instanceof Error ? e.message : "加载引用数据失败");

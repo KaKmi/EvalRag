@@ -1,57 +1,76 @@
 import { z } from "zod";
+import { CompileIssueSchema, CompileStatusSchema, PromptNodeSchema } from "./node-contract";
 
-export const PromptNodeSchema = z.enum(["rewrite", "intent", "reply", "fallback"]);
-export type PromptNode = z.infer<typeof PromptNodeSchema>;
+// 012 重构：版本平权（无 status 三态、无 currentVersion 指针）+ 排他标签。
+// Prompt 列表行的 tags/variables 均取自最新版本（列表「标识」「变量」列语义，012 §1）。
 
-export const PromptVersionStatusSchema = z.enum(["draft", "prod", "archived"]);
-export type PromptVersionStatus = z.infer<typeof PromptVersionStatusSchema>;
+// PromptNodeSchema/PromptNode 由 node-contract.ts 经 barrel 导出（此处不再 re-export，
+// 避免 export * 撞名被 TS 静默省略）。
 
-// M6: currentVersionId 改 nullable（未发布时为 null）；读侧补 updatedAt/updatedBy（发布/回滚时刷新）
-// M6 fix: 加 currentVersionNumber + versionCount（后端 list join，前端列表一次拿全，避免 N+1）
+// 标签名：仅字母/数字/./_/-，服务边界统一小写（大小写不敏感排他由 DB lower(name) 唯一索引兜底）。
+// 保留字 v / production 的「禁止自定义创建」是前端自定义入口的校验（012 §3）；
+// 后端通用写路径不拒绝 production——移动 production 走同一 PUT（drill Story 3 决议）。
+export const PromptTagNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9._-]+$/, "标签名仅允许字母、数字、.、_、-")
+  .transform((s) => s.toLowerCase());
+
+export const PromptVersionSchema = z.object({
+  id: z.string().min(1),
+  promptId: z.string().min(1),
+  version: z.number().int().positive(),
+  // 012：允许空 body（新建 Prompt 自动生成空 v1；错误也允许保存）
+  body: z.string(),
+  variables: z.array(z.string()),
+  note: z.string().optional(),
+  author: z.string().min(1),
+  contractVersion: z.number().int().positive(),
+  compileStatus: CompileStatusSchema,
+  compileErrors: z.array(CompileIssueSchema),
+  tags: z.array(z.string()),
+  createdAt: z.string().datetime(),
+});
+export type PromptVersion = z.infer<typeof PromptVersionSchema>;
+
 export const PromptSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   node: PromptNodeSchema,
-  currentVersionId: z.string().min(1).nullable(),
-  currentVersionNumber: z.number().int().positive().nullable(),
-  versionCount: z.number().int().nonnegative(),
+  /** 最新版本号（v1 随建随生，恒 ≥1） */
+  latestVersion: z.number().int().positive(),
+  versionCount: z.number().int().positive(),
+  /** 最新版本携带的标签 */
+  tags: z.array(z.string()),
+  /** 最新版本的变量 */
+  variables: z.array(z.string()),
+  createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1),
 });
 export type Prompt = z.infer<typeof PromptSchema>;
 
-// M6: body 改 min(1)（空 prompt 无意义）；author 改必填（来自 JWT，不再 optional）；补 createdAt
-export const PromptVersionSchema = z.object({
-  id: z.string().min(1),
-  promptId: z.string().min(1),
-  version: z.number().int().positive(),
-  body: z.string().min(1),
-  variables: z.array(z.string()),
-  note: z.string().optional(),
-  author: z.string().min(1),
-  status: PromptVersionStatusSchema,
-  createdAt: z.string().datetime(),
+// 详情 = 摘要 + 全部历史版本（降序，供历史抽屉一次拿全）
+export const PromptDetailSchema = PromptSchema.extend({
+  versions: z.array(PromptVersionSchema),
 });
-export type PromptVersion = z.infer<typeof PromptVersionSchema>;
+export type PromptDetail = z.infer<typeof PromptDetailSchema>;
 
 export const PromptVersionListResponseSchema = z.array(PromptVersionSchema);
 export type PromptVersionListResponse = z.infer<typeof PromptVersionListResponseSchema>;
 
-// M6: list 端点查询参数（分页 + 条件）。query param 均为 string，经 z.coerce.number() 转 number。
-// status 为列表筛选语义（草稿/生产中，按 currentVersionId 是否 null 判断），不同于 PromptVersionStatus。
 export const PromptListQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(10),
   search: z
     .string()
     .optional()
-    .transform(s => (s && s.trim() ? s.trim() : undefined)),
+    .transform((s) => (s && s.trim() ? s.trim() : undefined)),
   node: PromptNodeSchema.optional(),
-  status: z.enum(["prod", "draft"]).optional(),
 });
 export type PromptListQuery = z.infer<typeof PromptListQuerySchema>;
 
-// M6: list 响应改分页结构 { items, total, page, pageSize }（前端受控分页，后端真分页+条件查询）
 export const PromptListResponseSchema = z.object({
   items: z.array(PromptSchema),
   total: z.number().int().nonnegative(),
@@ -60,27 +79,100 @@ export const PromptListResponseSchema = z.object({
 });
 export type PromptListResponse = z.infer<typeof PromptListResponseSchema>;
 
-// M6: 建 Prompt（自动起 v1 draft）。body 用于首版本，note 可选
+// 012：新建只填 name + node，事务内自动创建空 body 的 v1（无标签），返回详情供跳转
 export const CreatePromptRequestSchema = z.object({
   name: z.string().min(1),
   node: PromptNodeSchema,
-  body: z.string().min(1),
-  note: z.string().optional(),
 });
 export type CreatePromptRequest = z.infer<typeof CreatePromptRequestSchema>;
 
-// M6: 出新版本。variables 由后端 extractVars 计算、author 来自 JWT，故 DTO 仅 { body, note? }
+// 保存新版本：body 允许空、错误允许保存（服务端重新编译并持久化结果）。
+// sourceVersionId 仅用于「创建副本」沿用来源版本的 contractVersion，必须属于同一 Prompt。
 export const CreatePromptVersionRequestSchema = z.object({
-  body: z.string().min(1),
+  body: z.string(),
   note: z.string().optional(),
+  sourceVersionId: z.string().min(1).optional(),
 });
 export type CreatePromptVersionRequest = z.infer<typeof CreatePromptVersionRequestSchema>;
 
-// M6: 发布/回滚响应（draft→prod / archived→prod）
-export const PublishPromptVersionResponseSchema = z.object({
-  promptId: z.string().min(1),
+// 标签排他移动（PUT /api/prompts/:id/tags）：name 归一小写后 upsert 到 versionId
+export const MovePromptTagRequestSchema = z.object({
+  name: PromptTagNameSchema,
+  versionId: z.string().min(1),
+});
+export type MovePromptTagRequest = z.infer<typeof MovePromptTagRequestSchema>;
+
+export const PromptTagSchema = z.object({
+  name: z.string().min(1),
   versionId: z.string().min(1),
   version: z.number().int().positive(),
-  status: PromptVersionStatusSchema,
 });
-export type PublishPromptVersionResponse = z.infer<typeof PublishPromptVersionResponseSchema>;
+export type PromptTag = z.infer<typeof PromptTagSchema>;
+
+export const PromptTagListResponseSchema = z.array(PromptTagSchema);
+export type PromptTagListResponse = z.infer<typeof PromptTagListResponseSchema>;
+
+// 节点全版本候选（GET /api/prompts/versions?node=）：应用/旧 Agent 表单选择任意具体版本，
+// 不再按「已发布」过滤（012 版本平权）；标签仅作排序/高亮信号
+export const PromptNodeVersionsQuerySchema = z.object({
+  node: PromptNodeSchema,
+});
+export type PromptNodeVersionsQuery = z.infer<typeof PromptNodeVersionsQuerySchema>;
+
+export const PromptNodeVersionCandidateSchema = z.object({
+  promptId: z.string().min(1),
+  promptName: z.string().min(1),
+  versionId: z.string().min(1),
+  version: z.number().int().positive(),
+  tags: z.array(z.string()),
+  compileStatus: CompileStatusSchema,
+  createdAt: z.string().datetime(),
+});
+export type PromptNodeVersionCandidate = z.infer<typeof PromptNodeVersionCandidateSchema>;
+
+export const PromptNodeVersionListResponseSchema = z.array(PromptNodeVersionCandidateSchema);
+export type PromptNodeVersionListResponse = z.infer<typeof PromptNodeVersionListResponseSchema>;
+
+// —— 试运行（012 §6，分阶段能力契约）——
+// M6 阶段：reply/fallback 走真实模型调用返回 text；rewrite/intent 返回
+// unavailable/pending_node_runtime（011 落地后升级 structured，联合形状预留不再破坏性变更）。
+// 支持协议矩阵（drill 收口）：当前全部三种 LLM 协议；其余协议返回 unavailable/unsupported_protocol。
+export const TRY_RUN_CHAT_PROTOCOLS = ["openai_compat", "anthropic", "gemini"] as const;
+
+export const TryRunTestVarsSchema = z.object({
+  query: z.string(),
+  history: z.string().optional(),
+  retrievalContext: z.string().optional(),
+  reason: z.string().optional(),
+});
+export type TryRunTestVars = z.infer<typeof TryRunTestVarsSchema>;
+
+export const TryRunPromptRequestSchema = z.object({
+  modelId: z.string().min(1),
+  /** 覆盖模型存量默认值，仅影响本次试跑 */
+  temperature: z.number().min(0).max(2).optional(),
+  testVars: TryRunTestVarsSchema,
+  /** 012 阶段依赖门控：非空即返回 unavailable/application_context_not_available（009 落地后启用） */
+  refApplicationId: z.string().optional(),
+});
+export type TryRunPromptRequest = z.infer<typeof TryRunPromptRequestSchema>;
+
+export const TryRunUnavailableReasonSchema = z.enum([
+  "pending_node_runtime",
+  "unsupported_protocol",
+  "application_context_not_available",
+]);
+export type TryRunUnavailableReason = z.infer<typeof TryRunUnavailableReasonSchema>;
+
+export const TryRunResultSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("text"), text: z.string() }),
+  z.object({ mode: z.literal("unavailable"), reason: TryRunUnavailableReasonSchema }),
+  // 011 落地后启用：结构化字段 + 校验步骤 + 是否触发 fallback
+  z.object({
+    mode: z.literal("structured"),
+    fields: z.record(z.string(), z.unknown()),
+    validateSteps: z.array(z.unknown()),
+    fallbackUsed: z.boolean(),
+  }),
+]);
+export type TryRunResult = z.infer<typeof TryRunResultSchema>;

@@ -25,7 +25,9 @@ import {
   KnowledgeBaseSchema,
   MessageSchema,
   ModelProviderSchema,
+  PromptDetailSchema,
   type PromptListQuery,
+  PromptNodeVersionCandidateSchema,
   PromptSchema,
   PromptVersionSchema,
   RetrievalTestResponseSchema,
@@ -84,17 +86,61 @@ process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/skeleton_e2e_u
 process.env.JWT_SECRET ??= SECRET;
 process.env.MODEL_API_KEY_ENCRYPTION_KEY ??= Buffer.alloc(32, 7).toString("base64");
 
-// M6 PromptsRepository 内存实现（DB-free，对齐 skeleton.e2e 现状）
+// M6(012) PromptsRepository 内存实现（DB-free）：版本平权 + 排他标签 + 复合 FK/唯一约束模拟
+let promptSeq = 0;
+let promptVersionSeq = 0;
+let promptTagSeq = 0;
 const inMemoryPrompts: PromptRow[] = [];
 const inMemoryVersions: PromptVersionRow[] = [];
-// 方案 A：findPrompts/findPromptById 返回带聚合的行（currentVersionNumber + versionCount）
+const inMemoryPromptTags: Array<{
+  id: string;
+  promptId: string;
+  promptVersionId: string;
+  name: string;
+  createdAt: Date;
+  createdBy: string;
+}> = [];
+
+const pgError = (code: string) =>
+  Object.assign(new Error(`pg error ${code}`), { cause: { code } });
+
 const toListRow = (p: PromptRow): PromptListRow => {
-  const versions = inMemoryVersions.filter((v) => v.promptId === p.id);
-  const current = p.currentVersionId
-    ? (versions.find((v) => v.id === p.currentVersionId)?.version ?? null)
-    : null;
-  return { ...p, currentVersionNumber: current, versionCount: versions.length };
+  const versions = inMemoryVersions
+    .filter((v) => v.promptId === p.id)
+    .sort((a, b) => b.version - a.version);
+  const latest = versions[0];
+  return {
+    ...p,
+    latestVersionId: latest?.id ?? null,
+    latestVersion: latest?.version ?? null,
+    latestVariables: latest?.variables ?? null,
+    versionCount: versions.length,
+  };
 };
+
+const makeVersionRow = (row: NewPromptVersion): PromptVersionRow => {
+  if (
+    inMemoryVersions.some((v) => v.promptId === row.promptId && v.version === row.version)
+  ) {
+    throw pgError("23505"); // unique(promptId, version)
+  }
+  const r: PromptVersionRow = {
+    id: `pv${++promptVersionSeq}`,
+    promptId: row.promptId,
+    version: row.version,
+    body: row.body,
+    variables: row.variables ?? [],
+    contractVersion: row.contractVersion ?? 1,
+    compileStatus: row.compileStatus,
+    compileErrors: row.compileErrors ?? [],
+    note: row.note ?? null,
+    author: row.author,
+    createdAt: new Date(),
+  };
+  inMemoryVersions.push(r);
+  return r;
+};
+
 const inMemoryPromptsRepo = {
   findPrompts: async (q: PromptListQuery): Promise<PromptListResult> => {
     let list = inMemoryPrompts.map(toListRow);
@@ -105,8 +151,6 @@ const inMemoryPromptsRepo = {
       );
     }
     if (q.node) list = list.filter((r) => r.node === q.node);
-    if (q.status === "prod") list = list.filter((r) => r.currentVersionId !== null);
-    if (q.status === "draft") list = list.filter((r) => r.currentVersionId === null);
     const total = list.length;
     const start = (q.page - 1) * q.pageSize;
     return { items: list.slice(start, start + q.pageSize), total };
@@ -115,63 +159,120 @@ const inMemoryPromptsRepo = {
     const p = inMemoryPrompts.find((x) => x.id === id);
     return p ? toListRow(p) : undefined;
   },
-  insertPrompt: async (row: NewPrompt): Promise<PromptRow> => {
-    const r: PromptRow = {
-      id: `p${inMemoryPrompts.length + 1}`,
-      name: row.name,
-      node: row.node,
-      currentVersionId: row.currentVersionId ?? null,
-      updatedBy: row.updatedBy,
+  createPromptWithV1: async (
+    prompt: NewPrompt,
+    versionSeed: Omit<NewPromptVersion, "promptId">,
+  ): Promise<{ prompt: PromptRow; version: PromptVersionRow }> => {
+    if (inMemoryPrompts.some((x) => x.name === prompt.name)) throw pgError("23505");
+    const p: PromptRow = {
+      id: `p${++promptSeq}`,
+      name: prompt.name,
+      node: prompt.node,
+      updatedBy: prompt.updatedBy,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
-    inMemoryPrompts.push(r);
-    return r;
+    inMemoryPrompts.push(p);
+    const version = makeVersionRow({ ...versionSeed, promptId: p.id } as NewPromptVersion);
+    return { prompt: p, version };
   },
   findVersions: async (promptId: string): Promise<PromptVersionRow[]> =>
-    inMemoryVersions.filter((v) => v.promptId === promptId),
+    inMemoryVersions
+      .filter((v) => v.promptId === promptId)
+      .sort((a, b) => b.version - a.version),
   findVersionById: async (id: string): Promise<PromptVersionRow | undefined> =>
     inMemoryVersions.find((v) => v.id === id),
-  insertVersion: async (row: NewPromptVersion): Promise<PromptVersionRow> => {
-    const r: PromptVersionRow = {
-      id: `pv${inMemoryVersions.length + 1}`,
-      promptId: row.promptId,
-      version: row.version,
-      body: row.body,
-      variables: row.variables ?? [],
-      note: row.note ?? null,
-      author: row.author,
-      status: row.status ?? "draft",
-      createdAt: new Date(),
-    };
-    inMemoryVersions.push(r);
+  insertVersion: async (row: NewPromptVersion, actorEmail: string): Promise<PromptVersionRow> => {
+    const r = makeVersionRow(row);
+    const p = inMemoryPrompts.find((x) => x.id === row.promptId);
+    if (p) {
+      p.updatedBy = actorEmail;
+      p.updatedAt = new Date();
+    }
     return r;
   },
-  findProdVersion: async (promptId: string): Promise<PromptVersionRow | undefined> =>
-    inMemoryVersions.find((v) => v.promptId === promptId && v.status === "prod"),
-  publishVersion: async (
-    promptId: string,
-    versionId: string,
-    actorEmail: string,
-  ): Promise<PromptVersionRow> => {
-    for (const v of inMemoryVersions) {
-      if (v.promptId === promptId && v.status === "prod") v.status = "archived";
+  findTagsByPromptId: async (promptId: string) =>
+    inMemoryPromptTags
+      .filter((t) => t.promptId === promptId)
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((t) => ({ promptVersionId: t.promptVersionId, name: t.name })),
+  findTagsByVersionIds: async (versionIds: string[]) =>
+    inMemoryPromptTags
+      .filter((t) => versionIds.includes(t.promptVersionId))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((t) => ({ promptVersionId: t.promptVersionId, name: t.name })),
+  findTagsWithVersion: async (promptId: string) =>
+    inMemoryPromptTags
+      .filter((t) => t.promptId === promptId)
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((t) => ({
+        name: t.name,
+        versionId: t.promptVersionId,
+        version: inMemoryVersions.find((v) => v.id === t.promptVersionId)?.version ?? 0,
+      })),
+  upsertTag: async (promptId: string, versionId: string, name: string, actorEmail: string) => {
+    // 复合 FK 模拟：版本必须存在且属于同一 prompt
+    const version = inMemoryVersions.find((v) => v.id === versionId);
+    if (!version || version.promptId !== promptId) throw pgError("23503");
+    const existing = inMemoryPromptTags.find(
+      (t) => t.promptId === promptId && t.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (existing) {
+      existing.promptVersionId = versionId;
+      existing.createdAt = new Date();
+      existing.createdBy = actorEmail;
+    } else {
+      inMemoryPromptTags.push({
+        id: `pt${++promptTagSeq}`,
+        promptId,
+        promptVersionId: versionId,
+        name,
+        createdAt: new Date(),
+        createdBy: actorEmail,
+      });
     }
-    const v = inMemoryVersions.find((x) => x.id === versionId);
-    if (!v) throw new Error(`version ${versionId} not found`);
-    v.status = "prod";
-    const p = inMemoryPrompts.find((x) => x.id === promptId);
-    if (!p) throw new Error(`prompt ${promptId} not found`);
-    p.currentVersionId = versionId;
-    p.updatedBy = actorEmail;
-    p.updatedAt = new Date();
-    return v;
   },
+  deleteTag: async (promptId: string, name: string): Promise<number> => {
+    const before = inMemoryPromptTags.length;
+    for (let i = inMemoryPromptTags.length - 1; i >= 0; i--) {
+      const t = inMemoryPromptTags[i];
+      if (t.promptId === promptId && t.name === name) inMemoryPromptTags.splice(i, 1);
+    }
+    return before - inMemoryPromptTags.length;
+  },
+  findNodeVersionCandidates: async (node: string) =>
+    inMemoryVersions
+      .map((v) => ({ v, p: inMemoryPrompts.find((x) => x.id === v.promptId) }))
+      .filter((x): x is { v: PromptVersionRow; p: PromptRow } => !!x.p && x.p.node === node)
+      .sort((a, b) => a.p.name.localeCompare(b.p.name) || b.v.version - a.v.version)
+      .map(({ v, p }) => ({
+        promptId: p.id,
+        promptName: p.name,
+        versionId: v.id,
+        version: v.version,
+        compileStatus: v.compileStatus,
+        createdAt: v.createdAt,
+      })),
   deletePrompt: async (id: string): Promise<void> => {
+    // FK RESTRICT 模拟：agent 配置版本引用该 prompt 的任一版本时拒删（23503）
+    const versionIds = new Set(
+      inMemoryVersions.filter((v) => v.promptId === id).map((v) => v.id),
+    );
+    const referenced = inMemoryAgentVersions.some(
+      (av) =>
+        versionIds.has(av.promptRewriteVerId) ||
+        versionIds.has(av.promptIntentVerId) ||
+        versionIds.has(av.promptReplyVerId) ||
+        versionIds.has(av.promptFallbackVerId),
+    );
+    if (referenced) throw pgError("23503");
     const idx = inMemoryPrompts.findIndex((x) => x.id === id);
     if (idx >= 0) inMemoryPrompts.splice(idx, 1);
     for (let i = inMemoryVersions.length - 1; i >= 0; i--) {
       if (inMemoryVersions[i].promptId === id) inMemoryVersions.splice(i, 1);
+    }
+    for (let i = inMemoryPromptTags.length - 1; i >= 0; i--) {
+      if (inMemoryPromptTags[i].promptId === id) inMemoryPromptTags.splice(i, 1);
     }
   },
 };
@@ -214,6 +315,10 @@ const inMemoryModelsRepo = {
 };
 const fakeModelProviderPort = {
   testConnection: jest.fn(async () => ({ ok: true, latencyMs: 5, statusCode: 200 })),
+  // 012 Story 7 try-run 走到这里：回显 system/user，e2e 可断言渲染结果
+  chat: jest.fn(async (_config: unknown, input: { system: string; user: string }) => ({
+    text: `echo:${input.system}|${input.user}`,
+  })),
   // KnowledgeBasesService.create() 的 1024 维探针会走到这里
   embed: jest.fn(async (_config: unknown, texts: string[]) => ({
     vectors: texts.map(() => Array.from({ length: 1024 }, () => 0.01)),
@@ -1153,16 +1258,13 @@ describe("M2 domain skeleton", () => {
       const nodes = ["rewrite", "intent", "reply", "fallback"] as const;
       const ids: Partial<Record<(typeof nodes)[number], string>> = {};
       for (const node of nodes) {
+        // 012：创建返回 PromptDetail（含空 v1），直接取 versions[0].id
         const pRes = await request(app.getHttpServer())
           .post("/api/prompts")
           .set(auth())
-          .send({ name: `agent-e2e-${node}`, node, body: "内容 {x}" })
+          .send({ name: `agent-e2e-${node}`, node })
           .expect(201);
-        const versions = await request(app.getHttpServer())
-          .get(`/api/prompts/${pRes.body.id}/versions`)
-          .set(auth())
-          .expect(200);
-        ids[node] = versions.body[0].id;
+        ids[node] = pRes.body.versions[0].id;
       }
       promptVerIds = ids as Record<(typeof nodes)[number], string>;
     });
@@ -1322,173 +1424,305 @@ describe("M2 domain skeleton", () => {
     });
   });
 
-  describe("prompts", () => {
+  describe("prompts (012)", () => {
     let promptId: string;
     let v1Id: string;
     let v2Id: string;
 
-    it("POST /api/prompts → 201 + currentVersionId:null + currentVersionNumber:null + versionCount:1 + updatedBy=JWT email", async () => {
+    it("POST /api/prompts {name,node} → 201 PromptDetail：空 v1、无标签、updatedBy=JWT email", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/prompts")
         .set(auth())
-        .send({ name: "测试 Prompt", node: "rewrite", body: "你好 {query}", note: "n" })
+        .send({ name: "测试 Prompt", node: "rewrite" })
         .expect(201);
-      expect(() => PromptSchema.parse(res.body)).not.toThrow();
-      expect(res.body.currentVersionId).toBeNull();
-      expect(res.body.currentVersionNumber).toBeNull();
+      expect(() => PromptDetailSchema.parse(res.body)).not.toThrow();
+      expect(res.body.latestVersion).toBe(1);
       expect(res.body.versionCount).toBe(1);
+      expect(res.body.tags).toEqual([]);
       expect(res.body.updatedBy).toBe(PRINCIPAL.email);
-      expect(res.body.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(res.body.versions).toHaveLength(1);
+      expect(res.body.versions[0].body).toBe("");
+      expect(res.body.versions[0].compileStatus).toBe("ok");
+      expect(res.body.versions[0].author).toBe(PRINCIPAL.email);
       promptId = res.body.id;
+      v1Id = res.body.versions[0].id;
     });
 
-    it("GET /api/prompts/:id/versions → v1 draft（variables 含 query，author 来自 JWT）", async () => {
-      const res = await request(app.getHttpServer())
-        .get(`/api/prompts/${promptId}/versions`)
-        .set(auth())
-        .expect(200);
-      expect(Array.isArray(res.body)).toBe(true);
-      expect(res.body).toHaveLength(1);
-      const v1 = res.body[0];
-      expect(() => PromptVersionSchema.parse(v1)).not.toThrow();
-      expect(v1.status).toBe("draft");
-      expect(v1.version).toBe(1);
-      expect(v1.variables).toContain("query");
-      expect(v1.author).toBe(PRINCIPAL.email);
-      expect(v1.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-      v1Id = v1.id;
-    });
-
-    it("POST publish v1 → 200 + v1 prod + currentVersionId 指向 v1 + currentVersionNumber:1", async () => {
-      const res = await request(app.getHttpServer())
-        .post(`/api/prompts/${promptId}/versions/${v1Id}/publish`)
-        .set(auth())
-        .expect(200);
-      expect(res.body.status).toBe("prod");
-      const p = await request(app.getHttpServer())
-        .get(`/api/prompts/${promptId}`)
-        .set(auth())
-        .expect(200);
-      expect(p.body.currentVersionId).toBe(v1Id);
-      expect(p.body.currentVersionNumber).toBe(1);
-      expect(p.body.versionCount).toBe(1);
-    });
-
-    it("POST publish v1（已 prod）→ 409（D15）", async () => {
+    it("POST 同名 → 409（name 唯一）", async () => {
       await request(app.getHttpServer())
-        .post(`/api/prompts/${promptId}/versions/${v1Id}/publish`)
+        .post("/api/prompts")
         .set(auth())
+        .send({ name: "测试 Prompt", node: "reply" })
         .expect(409);
     });
 
-    it("建 v2 → publish v2 → 200 + v2 prod + v1 archived + updatedBy 推进（D2 + D16）", async () => {
-      const created = await request(app.getHttpServer())
-        .post(`/api/prompts/${promptId}/versions`)
-        .set(auth())
-        .send({ body: "v2 你好 {query}" })
-        .expect(201);
-      expect(created.body.version).toBe(2);
-      expect(created.body.status).toBe("draft");
-      v2Id = created.body.id;
-
-      const pub = await request(app.getHttpServer())
-        .post(`/api/prompts/${promptId}/versions/${v2Id}/publish`)
-        .set(auth())
-        .expect(200);
-      expect(pub.body.status).toBe("prod");
-
-      const versions = await request(app.getHttpServer())
-        .get(`/api/prompts/${promptId}/versions`)
-        .set(auth())
-        .expect(200);
-      const v1 = versions.body.find((v: { id: string }) => v.id === v1Id);
-      const v2 = versions.body.find((v: { id: string }) => v.id === v2Id);
-      expect(v1.status).toBe("archived");
-      expect(v2.status).toBe("prod");
-
-      const p = await request(app.getHttpServer())
-        .get(`/api/prompts/${promptId}`)
-        .set(auth())
-        .expect(200);
-      expect(p.body.currentVersionId).toBe(v2Id);
-      expect(p.body.currentVersionNumber).toBe(2);
-      expect(p.body.versionCount).toBe(2);
-      expect(p.body.updatedBy).toBe(PRINCIPAL.email);
-    });
-
-    it("POST rollback v1 → 200 + v1 prod + v2 archived（D2）", async () => {
-      const res = await request(app.getHttpServer())
-        .post(`/api/prompts/${promptId}/versions/${v1Id}/rollback`)
-        .set(auth())
-        .expect(200);
-      expect(res.body.status).toBe("prod");
-
-      const versions = await request(app.getHttpServer())
-        .get(`/api/prompts/${promptId}/versions`)
-        .set(auth())
-        .expect(200);
-      const v1 = versions.body.find((v: { id: string }) => v.id === v1Id);
-      const v2 = versions.body.find((v: { id: string }) => v.id === v2Id);
-      expect(v1.status).toBe("prod");
-      expect(v2.status).toBe("archived");
-
-      const p = await request(app.getHttpServer())
-        .get(`/api/prompts/${promptId}`)
-        .set(auth())
-        .expect(200);
-      expect(p.body.currentVersionId).toBe(v1Id);
-    });
-
-    it("D6 不接受请求体 author（服务端从 JWT 填）", async () => {
+    it("POST /:id/versions → 201 不可变新版本（服务端编译持久化，作者来自 JWT）", async () => {
       const res = await request(app.getHttpServer())
         .post(`/api/prompts/${promptId}/versions`)
         .set(auth())
-        .send({ body: "v3 {query}", author: "forged@evil.com" })
+        .send({ body: "改写 {query}", note: "v2", author: "forged@evil.com" })
         .expect(201);
+      expect(() => PromptVersionSchema.parse(res.body)).not.toThrow();
+      expect(res.body.version).toBe(2);
+      expect(res.body.compileStatus).toBe("ok");
+      expect(res.body.variables).toEqual(["query"]);
       expect(res.body.author).toBe(PRINCIPAL.email);
-      expect(res.body.author).not.toBe("forged@evil.com");
+      v2Id = res.body.id;
     });
 
-    it("GET /api/prompts → 200 { items, total, page, pageSize }（分页响应）", async () => {
+    it("编译错误的 body 允许保存（compileStatus=has_errors + issues）", async () => {
+      const res = await request(app.getHttpServer())
+        .post(`/api/prompts/${promptId}/versions`)
+        .set(auth())
+        .send({ body: "未知 {nonexistent_field}" })
+        .expect(201);
+      expect(res.body.compileStatus).toBe("has_errors");
+      expect(res.body.compileErrors[0].code).toBe("UNKNOWN_VARIABLE");
+    });
+
+    it("GET /:id → PromptDetail：versions 降序 + 最新版本摘要", async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/api/prompts/${promptId}`)
+        .set(auth())
+        .expect(200);
+      expect(() => PromptDetailSchema.parse(res.body)).not.toThrow();
+      expect(res.body.latestVersion).toBe(3);
+      expect(res.body.versions.map((v: { version: number }) => v.version)).toEqual([3, 2, 1]);
+    });
+
+    it("PUT /:id/tags 移动标签：大小写归一小写 + 排他移动", async () => {
+      // Production → 归一 production，指到 v2
+      const first = await request(app.getHttpServer())
+        .put(`/api/prompts/${promptId}/tags`)
+        .set(auth())
+        .send({ name: "Production", versionId: v2Id })
+        .expect(200);
+      expect(first.body).toEqual([{ name: "production", versionId: v2Id, version: 2 }]);
+      // 再移到 v1 —— 同名标签只有一行，指向变更
+      const moved = await request(app.getHttpServer())
+        .put(`/api/prompts/${promptId}/tags`)
+        .set(auth())
+        .send({ name: "production", versionId: v1Id })
+        .expect(200);
+      expect(moved.body).toEqual([{ name: "production", versionId: v1Id, version: 1 }]);
+      // 详情里 v1 带标签、v2 无标签
+      const detail = await request(app.getHttpServer())
+        .get(`/api/prompts/${promptId}`)
+        .set(auth())
+        .expect(200);
+      const v1 = detail.body.versions.find((v: { id: string }) => v.id === v1Id);
+      const v2 = detail.body.versions.find((v: { id: string }) => v.id === v2Id);
+      expect(v1.tags).toEqual(["production"]);
+      expect(v2.tags).toEqual([]);
+    });
+
+    it("PUT tags 指向别的 Prompt 的版本 → 404；非法标签名 → 400", async () => {
+      const other = await request(app.getHttpServer())
+        .post("/api/prompts")
+        .set(auth())
+        .send({ name: "另一个 Prompt", node: "rewrite" })
+        .expect(201);
+      await request(app.getHttpServer())
+        .put(`/api/prompts/${promptId}/tags`)
+        .set(auth())
+        .send({ name: "cross", versionId: other.body.versions[0].id })
+        .expect(404);
+      await request(app.getHttpServer())
+        .put(`/api/prompts/${promptId}/tags`)
+        .set(auth())
+        .send({ name: "有 空格", versionId: v1Id })
+        .expect(400);
+      await request(app.getHttpServer())
+        .delete(`/api/prompts/${other.body.id}`)
+        .set(auth())
+        .expect(204);
+    });
+
+    it("DELETE /:id/tags/:name → 204；再删 → 404", async () => {
+      await request(app.getHttpServer())
+        .put(`/api/prompts/${promptId}/tags`)
+        .set(auth())
+        .send({ name: "beta", versionId: v2Id })
+        .expect(200);
+      await request(app.getHttpServer())
+        .delete(`/api/prompts/${promptId}/tags/beta`)
+        .set(auth())
+        .expect(204);
+      await request(app.getHttpServer())
+        .delete(`/api/prompts/${promptId}/tags/beta`)
+        .set(auth())
+        .expect(404);
+    });
+
+    it("GET /api/prompts/versions?node= → 节点全版本候选（含无标签版本，静态路由不被 :id 捕获）", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/prompts/versions?node=rewrite")
+        .set(auth())
+        .expect(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      for (const c of res.body) expect(() => PromptNodeVersionCandidateSchema.parse(c)).not.toThrow();
+      const mine = res.body.filter((c: { promptId: string }) => c.promptId === promptId);
+      expect(mine).toHaveLength(3); // 全部版本平权，不过滤
+      expect(mine.some((c: { tags: string[] }) => c.tags.includes("production"))).toBe(true);
+      expect(mine.some((c: { tags: string[] }) => c.tags.length === 0)).toBe(true);
+      // 非法 node → 400
+      await request(app.getHttpServer())
+        .get("/api/prompts/versions?node=summary")
+        .set(auth())
+        .expect(400);
+    });
+
+    it("GET /api/prompts → 分页响应 + PromptSchema（携带最新版本 tags/variables）", async () => {
       const res = await request(app.getHttpServer()).get("/api/prompts").set(auth()).expect(200);
-      expect(res.body).toHaveProperty("items");
       expect(res.body).toHaveProperty("total");
       expect(res.body).toHaveProperty("page", 1);
       expect(res.body).toHaveProperty("pageSize", 10);
-      expect(Array.isArray(res.body.items)).toBe(true);
       for (const p of res.body.items) expect(() => PromptSchema.parse(p)).not.toThrow();
     });
 
-    it("GET /api/prompts?node=rewrite&status=prod&page=1&pageSize=5 → 条件筛选 + 分页", async () => {
-      const res = await request(app.getHttpServer())
-        .get("/api/prompts?node=rewrite&status=prod&page=1&pageSize=5")
+    it("旧发布状态机端点已删除：publish/rollback → 404", async () => {
+      await request(app.getHttpServer())
+        .post(`/api/prompts/${promptId}/versions/${v1Id}/publish`)
         .set(auth())
-        .expect(200);
-      expect(res.body.pageSize).toBe(5);
-      for (const p of res.body.items) {
-        expect(p.node).toBe("rewrite");
-        expect(p.currentVersionId).not.toBeNull();
-      }
+        .expect(404);
+      await request(app.getHttpServer())
+        .post(`/api/prompts/${promptId}/versions/${v1Id}/rollback`)
+        .set(auth())
+        .expect(404);
     });
 
-    it("DELETE /api/prompts/:id 草稿 → 204 + 级联；已启用 → 409；不存在 → 404", async () => {
-      // 新建一个草稿 prompt（currentVersionId:null）
-      const created = await request(app.getHttpServer())
-        .post("/api/prompts")
+    it("DELETE /api/prompts/:id：无引用 → 204（含标签级联）；不存在 → 404", async () => {
+      // promptId 带着 production 标签也可删——不再有「已发布不可删」语义
+      await request(app.getHttpServer())
+        .delete(`/api/prompts/${promptId}`)
         .set(auth())
-        .send({ name: "待删除草稿", node: "reply", body: "临时 {q}" })
-        .expect(201);
-      const draftId: string = created.body.id;
-      // 草稿可删 → 204
-      await request(app.getHttpServer()).delete(`/api/prompts/${draftId}`).set(auth()).expect(204);
-      // 删除后再 GET → 404
-      await request(app.getHttpServer()).get(`/api/prompts/${draftId}`).set(auth()).expect(404);
-      // 已启用（块前 publish/rollback 过的 promptId）→ 409
-      await request(app.getHttpServer()).delete(`/api/prompts/${promptId}`).set(auth()).expect(409);
-      // 不存在 → 404
+        .expect(204);
+      await request(app.getHttpServer()).get(`/api/prompts/${promptId}`).set(auth()).expect(404);
       await request(app.getHttpServer())
         .delete("/api/prompts/nonexistent-id")
         .set(auth())
+        .expect(404);
+    });
+
+    it("DELETE 被 Agent 配置引用的 Prompt → 409（FK RESTRICT 事实）", async () => {
+      // agents describe 的 fixture prompt（agent-e2e-rewrite）已被 Agent 配置引用
+      const list = await request(app.getHttpServer())
+        .get("/api/prompts?search=agent-e2e-rewrite")
+        .set(auth())
+        .expect(200);
+      expect(list.body.items).toHaveLength(1);
+      await request(app.getHttpServer())
+        .delete(`/api/prompts/${list.body.items[0].id}`)
+        .set(auth())
+        .expect(409);
+    });
+  });
+
+  describe("prompts try-run (012 Story 7)", () => {
+    let replyPromptId: string;
+    let replyVersionId: string;
+    let errorVersionId: string;
+    let rewritePromptId: string;
+    let rewriteVersionId: string;
+    let llmModelId: string;
+
+    beforeAll(async () => {
+      const model = await request(app.getHttpServer())
+        .post("/api/models")
+        .set(auth())
+        .send({
+          type: "llm",
+          protocol: "openai_compat",
+          name: "tryrun-e2e-llm",
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "sk-tryrune2e12345",
+        })
+        .expect(201);
+      llmModelId = model.body.id;
+
+      const reply = await request(app.getHttpServer())
+        .post("/api/prompts")
+        .set(auth())
+        .send({ name: "tryrun-reply", node: "reply" })
+        .expect(201);
+      replyPromptId = reply.body.id;
+      const v2 = await request(app.getHttpServer())
+        .post(`/api/prompts/${replyPromptId}/versions`)
+        .set(auth())
+        .send({ body: "依据 {retrievalContext} 回答 {query}" })
+        .expect(201);
+      replyVersionId = v2.body.id;
+      const bad = await request(app.getHttpServer())
+        .post(`/api/prompts/${replyPromptId}/versions`)
+        .set(auth())
+        .send({ body: "坏字段 {unknown_field_x}" })
+        .expect(201);
+      errorVersionId = bad.body.id;
+
+      const rewrite = await request(app.getHttpServer())
+        .post("/api/prompts")
+        .set(auth())
+        .send({ name: "tryrun-rewrite", node: "rewrite" })
+        .expect(201);
+      rewritePromptId = rewrite.body.id;
+      rewriteVersionId = rewrite.body.versions[0].id;
+    });
+
+    it("reply 真实调用：渲染不可变 body 为 system + query 作 user → mode:text", async () => {
+      const res = await request(app.getHttpServer())
+        .post(`/api/prompts/${replyPromptId}/versions/${replyVersionId}/try-run`)
+        .set(auth())
+        .send({
+          modelId: llmModelId,
+          temperature: 0.5,
+          testVars: { query: "怎么退货", retrievalContext: "第二条 七天无理由" },
+        })
+        .expect(200);
+      expect(res.body).toEqual({
+        mode: "text",
+        text: "echo:依据 第二条 七天无理由 回答 怎么退货|怎么退货",
+      });
+    });
+
+    it("rewrite 节点 → unavailable/pending_node_runtime（不伪造结构化结果）", async () => {
+      const res = await request(app.getHttpServer())
+        .post(`/api/prompts/${rewritePromptId}/versions/${rewriteVersionId}/try-run`)
+        .set(auth())
+        .send({ modelId: llmModelId, testVars: { query: "q" } })
+        .expect(200);
+      expect(res.body).toEqual({ mode: "unavailable", reason: "pending_node_runtime" });
+    });
+
+    it("存量编译错误的版本 → 422，不调用 provider", async () => {
+      await request(app.getHttpServer())
+        .post(`/api/prompts/${replyPromptId}/versions/${errorVersionId}/try-run`)
+        .set(auth())
+        .send({ modelId: llmModelId, testVars: { query: "q" } })
+        .expect(422);
+    });
+
+    it("refApplicationId 非空 → unavailable/application_context_not_available（009 门控）", async () => {
+      const res = await request(app.getHttpServer())
+        .post(`/api/prompts/${replyPromptId}/versions/${replyVersionId}/try-run`)
+        .set(auth())
+        .send({ modelId: llmModelId, testVars: { query: "q" }, refApplicationId: "app-x" })
+        .expect(200);
+      expect(res.body).toEqual({
+        mode: "unavailable",
+        reason: "application_context_not_available",
+      });
+    });
+
+    it("temperature 越界（>2）→ 400；版本不属于该 Prompt → 404", async () => {
+      await request(app.getHttpServer())
+        .post(`/api/prompts/${replyPromptId}/versions/${replyVersionId}/try-run`)
+        .set(auth())
+        .send({ modelId: llmModelId, temperature: 3, testVars: { query: "q" } })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`/api/prompts/${replyPromptId}/versions/${rewriteVersionId}/try-run`)
+        .set(auth())
+        .send({ modelId: llmModelId, testVars: { query: "q" } })
         .expect(404);
     });
   });
@@ -1567,8 +1801,12 @@ describe("M2 domain skeleton", () => {
       expect(paths).toContain("/api/agents");
       expect(paths).toContain("/api/prompts");
       expect(paths).toContain("/api/prompts/{id}/versions");
-      expect(paths).toContain("/api/prompts/{id}/versions/{versionId}/publish");
-      expect(paths).toContain("/api/prompts/{id}/versions/{versionId}/rollback");
+      // 012：新静态候选路由 + 标签路由；旧发布状态机路由必须不存在
+      expect(paths).toContain("/api/prompts/versions");
+      expect(paths).toContain("/api/prompts/{id}/tags");
+      expect(paths).toContain("/api/prompts/{id}/tags/{name}");
+      expect(paths).not.toContain("/api/prompts/{id}/versions/{versionId}/publish");
+      expect(paths).not.toContain("/api/prompts/{id}/versions/{versionId}/rollback");
       expect(paths).toContain("/api/chat");
       expect(paths).toContain("/api/conversations/{id}/messages");
     });

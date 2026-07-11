@@ -3,6 +3,9 @@ import {
   AgentSchema,
   ChatRequestSchema,
   ChatStreamEventSchema,
+  CompileIssueSchema,
+  CompileResultSchema,
+  CompileStatusSchema,
   ConversationSchema,
   CreateAgentRequestSchema,
   CreateModelRequestSchema,
@@ -14,8 +17,14 @@ import {
   MessageSchema,
   ModelProviderSchema,
   PaginatedResponseSchema,
+  MovePromptTagRequestSchema,
+  PromptDetailSchema,
+  TRY_RUN_CHAT_PROTOCOLS,
+  TryRunPromptRequestSchema,
+  TryRunResultSchema,
   PromptListQuerySchema,
   PromptListResponseSchema,
+  PromptNodeVersionCandidateSchema,
   PromptSchema,
   PromptVersionSchema,
   RetrievalTestRequestSchema,
@@ -108,9 +117,11 @@ const valid = {
     id: "p1",
     name: "问题改写-通用",
     node: "rewrite",
-    currentVersionId: "pv1",
-    currentVersionNumber: 7,
+    latestVersion: 7,
     versionCount: 3,
+    tags: ["production"],
+    variables: ["query"],
+    createdAt: "2026-07-01T00:00:00.000Z",
     updatedAt: "2026-07-01T00:00:00.000Z",
     updatedBy: "demo@codecrush.local",
   },
@@ -122,10 +133,13 @@ const valid = {
     variables: ["query"],
     note: "通用版",
     author: "admin",
-    status: "prod",
+    contractVersion: 1,
+    compileStatus: "ok",
+    compileErrors: [],
+    tags: ["production"],
     createdAt: "2026-07-01T00:00:00.000Z",
   },
-  createPromptReq: { name: "新 Prompt", node: "rewrite", body: "你好 {query}", note: "test" },
+  createPromptReq: { name: "新 Prompt", node: "rewrite" },
   chatReq: { agentId: "aftersale", query: "怎么退货" },
   conv: { id: "c1", agentId: "aftersale", title: "退货咨询" },
   msg: { id: "m1", convId: "c1", role: "user", content: "怎么退货" },
@@ -157,14 +171,18 @@ describe("M2 contracts — positive cases", () => {
   it("PromptSchema accepts a valid prompt", () => {
     expect(PromptSchema.parse(valid.prompt)).toEqual(valid.prompt);
   });
-  it("PromptSchema accepts currentVersionId:null + currentVersionNumber:null (未发布)", () => {
-    const p = PromptSchema.parse({
-      ...valid.prompt,
-      currentVersionId: null,
-      currentVersionNumber: null,
-    });
-    expect(p.currentVersionId).toBeNull();
-    expect(p.currentVersionNumber).toBeNull();
+  it("PromptSchema accepts 无标签空变量（tags/variables 允许空数组）", () => {
+    const p = PromptSchema.parse({ ...valid.prompt, tags: [], variables: [] });
+    expect(p.tags).toEqual([]);
+    expect(p.variables).toEqual([]);
+  });
+  it("PromptDetailSchema = Prompt + versions[]（012 详情一次拿全）", () => {
+    const d = PromptDetailSchema.parse({ ...valid.prompt, versions: [valid.promptVersion] });
+    expect(d.versions).toHaveLength(1);
+    expect(() => PromptDetailSchema.parse({ ...valid.prompt })).toThrow();
+  });
+  it("PromptVersionSchema 允许空 body（012 空 v1 / 错误允许保存）", () => {
+    expect(PromptVersionSchema.parse({ ...valid.promptVersion, body: "" }).body).toBe("");
   });
   it("PromptVersionSchema accepts a valid version", () => {
     expect(PromptVersionSchema.parse(valid.promptVersion)).toEqual(valid.promptVersion);
@@ -224,17 +242,20 @@ describe("M2 contracts — negative cases", () => {
   it("PromptSchema rejects unknown node", () => {
     expect(() => PromptSchema.parse({ ...valid.prompt, node: "summary" })).toThrow();
   });
-  it("PromptSchema rejects currentVersionId:undefined (nullable 非 optional)", () => {
-    const { currentVersionId: _v, ...rest } = valid.prompt;
-    void _v;
-    expect(() => PromptSchema.parse(rest)).toThrow();
+  it("PromptSchema rejects 缺 latestVersion / 缺 tags（012 必填）", () => {
+    expect(() => PromptSchema.parse({ ...valid.prompt, latestVersion: undefined })).toThrow();
+    expect(() => PromptSchema.parse({ ...valid.prompt, tags: undefined })).toThrow();
+  });
+  it("PromptVersionSchema rejects 旧 status 值形状（compileStatus 枚举外值）", () => {
+    expect(() =>
+      PromptVersionSchema.parse({ ...valid.promptVersion, compileStatus: "prod" }),
+    ).toThrow();
   });
   it("PromptSchema rejects missing updatedAt/updatedBy", () => {
     expect(() => PromptSchema.parse({ ...valid.prompt, updatedAt: undefined })).toThrow();
     expect(() => PromptSchema.parse({ ...valid.prompt, updatedBy: undefined })).toThrow();
   });
-  it("PromptSchema rejects missing currentVersionNumber/versionCount", () => {
-    expect(() => PromptSchema.parse({ ...valid.prompt, currentVersionNumber: undefined })).toThrow();
+  it("PromptSchema rejects missing versionCount", () => {
     expect(() => PromptSchema.parse({ ...valid.prompt, versionCount: undefined })).toThrow();
   });
   it("PromptSchema rejects negative versionCount", () => {
@@ -328,12 +349,11 @@ describe("M2 request schemas (skeleton DTOs)", () => {
     expect(() => UpdateAgentRequestSchema.parse({ topK: 10 })).toThrow();
     expect(() => UpdateAgentRequestSchema.parse({ genModelId: "m2" })).toThrow();
   });
-  it("CreatePromptRequestSchema accepts { name, node, body, note? }", () => {
+  it("CreatePromptRequestSchema = { name, node }（012：v1 空 body 服务端生成）", () => {
     const parsed = CreatePromptRequestSchema.parse(valid.createPromptReq);
     expect(parsed.name).toBe("新 Prompt");
     expect(parsed.node).toBe("rewrite");
-    expect(parsed.body).toBe("你好 {query}");
-    expect(parsed.note).toBe("test");
+    expect((parsed as Record<string, unknown>).body).toBeUndefined();
     // 客户端塞 id/currentVersionId/updatedAt/updatedBy 被 strip（后端分配）
     expect(
       (
@@ -344,13 +364,16 @@ describe("M2 request schemas (skeleton DTOs)", () => {
       ).id,
     ).toBeUndefined();
   });
-  it("CreatePromptVersionRequestSchema = { body, note? } (variables/author 服务端填)", () => {
+  it("CreatePromptVersionRequestSchema = { body, note?, sourceVersionId? }，body 允许空", () => {
     const parsed = CreatePromptVersionRequestSchema.parse({
       body: valid.promptVersion.body,
       note: "v2",
+      sourceVersionId: "pv1",
     });
     expect(parsed.body).toBe(valid.promptVersion.body);
     expect(parsed.note).toBe("v2");
+    expect(parsed.sourceVersionId).toBe("pv1");
+    expect(CreatePromptVersionRequestSchema.parse({ body: "" }).body).toBe("");
     // variables 由后端 extractVars 计算、author 来自 JWT —— 客户端不可塞
     expect(
       (
@@ -375,7 +398,6 @@ describe("M2 request schemas (skeleton DTOs)", () => {
       pageSize: 10,
       search: undefined,
       node: undefined,
-      status: undefined,
     });
     expect(PromptListQuerySchema.parse({ page: "2", pageSize: "20" })).toMatchObject({
       page: 2,
@@ -386,12 +408,36 @@ describe("M2 request schemas (skeleton DTOs)", () => {
     expect(PromptListQuerySchema.parse({ search: "   " }).search).toBeUndefined();
     expect(PromptListQuerySchema.parse({ search: " x " }).search).toBe("x");
   });
-  it("PromptListQuerySchema rejects page=0 / pageSize 越界 / 非法 node / 非法 status", () => {
+  it("PromptListQuerySchema rejects page=0 / pageSize 越界 / 非法 node", () => {
     expect(() => PromptListQuerySchema.parse({ page: "0" })).toThrow();
     expect(() => PromptListQuerySchema.parse({ pageSize: "0" })).toThrow();
     expect(() => PromptListQuerySchema.parse({ pageSize: "101" })).toThrow();
     expect(() => PromptListQuerySchema.parse({ node: "summary" })).toThrow();
-    expect(() => PromptListQuerySchema.parse({ status: "archived" })).toThrow();
+  });
+  it("MovePromptTagRequestSchema：name 归一小写 + 命名校验（012 §3）", () => {
+    expect(MovePromptTagRequestSchema.parse({ name: "Production", versionId: "pv1" }).name).toBe(
+      "production",
+    );
+    expect(MovePromptTagRequestSchema.parse({ name: "v1.2_beta-x", versionId: "pv1" }).name).toBe(
+      "v1.2_beta-x",
+    );
+    expect(() => MovePromptTagRequestSchema.parse({ name: "有 空格", versionId: "pv1" })).toThrow();
+    expect(() => MovePromptTagRequestSchema.parse({ name: "", versionId: "pv1" })).toThrow();
+  });
+  it("PromptNodeVersionCandidateSchema：候选形状（全版本平权 + 标签信号）", () => {
+    const c = PromptNodeVersionCandidateSchema.parse({
+      promptId: "p1",
+      promptName: "问题改写-通用",
+      versionId: "pv1",
+      version: 7,
+      tags: [],
+      compileStatus: "ok",
+      createdAt: "2026-07-01T00:00:00.000Z",
+    });
+    expect(c.version).toBe(7);
+    expect(() =>
+      PromptNodeVersionCandidateSchema.parse({ promptId: "p1", promptName: "x" }),
+    ).toThrow();
   });
   it("PromptListResponseSchema 接受 { items, total, page, pageSize }", () => {
     const res = PromptListResponseSchema.parse({
@@ -416,5 +462,80 @@ describe("M2 request schemas (skeleton DTOs)", () => {
     expect(() =>
       PromptListResponseSchema.parse({ items: [], total: -1, page: 1, pageSize: 10 }),
     ).toThrow();
+  });
+});
+
+// M6 重构（012）：编译结果/状态 schema（compile_status/compile_errors 的契约形状）
+describe("Compile result schemas (012)", () => {
+  it("CompileStatusSchema accepts ok/has_errors/has_warnings only", () => {
+    expect(CompileStatusSchema.parse("ok")).toBe("ok");
+    expect(CompileStatusSchema.parse("has_errors")).toBe("has_errors");
+    expect(CompileStatusSchema.parse("has_warnings")).toBe("has_warnings");
+    expect(() => CompileStatusSchema.parse("draft")).toThrow();
+  });
+  it("CompileIssueSchema accepts issue with optional field/suggestion", () => {
+    const minimal = {
+      code: "INVALID_TEMPLATE_SYNTAX",
+      severity: "error",
+      message: "存在未闭合的 {",
+    };
+    expect(CompileIssueSchema.parse(minimal)).toEqual(minimal);
+    const full = {
+      code: "UNKNOWN_VARIABLE",
+      severity: "error",
+      message: "未知字段",
+      field: "qeury",
+      suggestion: "query",
+    };
+    expect(CompileIssueSchema.parse(full)).toEqual(full);
+  });
+  it("CompileIssueSchema rejects unknown code/severity", () => {
+    expect(() =>
+      CompileIssueSchema.parse({ code: "NOPE", severity: "error", message: "x" }),
+    ).toThrow();
+    expect(() =>
+      CompileIssueSchema.parse({ code: "RESERVED_FIELD", severity: "fatal", message: "x" }),
+    ).toThrow();
+  });
+  it("CompileResultSchema accepts { status, issues[] }", () => {
+    const r = { status: "has_warnings", issues: [] };
+    expect(CompileResultSchema.parse(r)).toEqual(r);
+    expect(() => CompileResultSchema.parse({ status: "ok" })).toThrow();
+  });
+});
+
+// 012 Story 7：try-run 请求与判别联合（text/unavailable/structured 预留）
+describe("Try-run schemas (012 Story 7)", () => {
+  it("请求：modelId 必填、temperature 0..2、testVars.query 必填字段", () => {
+    const parsed = TryRunPromptRequestSchema.parse({
+      modelId: "m1",
+      temperature: 1.5,
+      testVars: { query: "q", history: "h", retrievalContext: "c", reason: "r" },
+    });
+    expect(parsed.modelId).toBe("m1");
+    expect(() =>
+      TryRunPromptRequestSchema.parse({ modelId: "m1", temperature: 2.5, testVars: { query: "q" } }),
+    ).toThrow();
+    expect(() => TryRunPromptRequestSchema.parse({ testVars: { query: "q" } })).toThrow();
+    expect(() => TryRunPromptRequestSchema.parse({ modelId: "m1", testVars: {} })).toThrow();
+  });
+  it("结果联合按 mode 判别：text / unavailable / structured（预留）", () => {
+    expect(TryRunResultSchema.parse({ mode: "text", text: "回答" }).mode).toBe("text");
+    expect(
+      TryRunResultSchema.parse({ mode: "unavailable", reason: "pending_node_runtime" }).mode,
+    ).toBe("unavailable");
+    expect(
+      TryRunResultSchema.parse({
+        mode: "structured",
+        fields: { intent: "aftersale" },
+        validateSteps: [],
+        fallbackUsed: false,
+      }).mode,
+    ).toBe("structured");
+    expect(() => TryRunResultSchema.parse({ mode: "unavailable", reason: "nope" })).toThrow();
+    expect(() => TryRunResultSchema.parse({ mode: "text" })).toThrow();
+  });
+  it("支持矩阵常量恰为当前三种 LLM 协议", () => {
+    expect([...TRY_RUN_CHAT_PROTOCOLS].sort()).toEqual(["anthropic", "gemini", "openai_compat"]);
   });
 });
