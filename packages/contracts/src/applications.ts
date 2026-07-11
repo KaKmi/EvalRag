@@ -85,7 +85,11 @@ export const ApplicationDetailSchema = ApplicationSchema.extend({
 export type ApplicationDetail = z.infer<typeof ApplicationDetailSchema>;
 
 export const ApplicationListResponseSchema = z.array(ApplicationSchema);
+export type ApplicationListResponse = z.infer<typeof ApplicationListResponseSchema>;
 export const ApplicationConfigVersionListResponseSchema = z.array(ApplicationConfigVersionSchema);
+export type ApplicationConfigVersionListResponse = z.infer<
+  typeof ApplicationConfigVersionListResponseSchema
+>;
 
 export const CreateApplicationRequestSchema = z.strictObject({
   slug: z.string().regex(APPLICATION_SLUG_RE),
@@ -121,13 +125,12 @@ export const PromptUsageEntrySchema = z.strictObject({
 });
 export type PromptUsageEntry = z.infer<typeof PromptUsageEntrySchema>;
 export const PromptUsageResponseSchema = z.array(PromptUsageEntrySchema);
+export type PromptUsageResponse = z.infer<typeof PromptUsageResponseSchema>;
 
 export const ApplicationChatResultSchema = z.discriminatedUnion("mode", [
   z.strictObject({
     mode: z.literal("unavailable"),
     reason: z.literal("pending_orchestration"),
   }),
-  z.strictObject({ mode: z.literal("text"), text: z.string() }),
-  z.strictObject({ mode: z.literal("stream"), streamUrl: z.string().min(1) }),
 ]);
 export type ApplicationChatResult = z.infer<typeof ApplicationChatResultSchema>;

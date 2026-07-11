@@ -46,6 +46,46 @@ describe("application contracts", () => {
         retrieval: { ...config.retrieval, rerankEnabled: true },
       }),
     ).toThrow();
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({
+        ...config,
+        retrieval: { ...config.retrieval, topK: 0 },
+      }),
+    ).toThrow();
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({
+        ...config,
+        retrieval: { ...config.retrieval, vectorWeight: 1.1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({
+        ...config,
+        retrieval: { ...config.retrieval, schemaVersion: 2 },
+      }),
+    ).toThrow();
+  });
+
+  it("enforces node and complete-config boundaries", () => {
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({
+        ...config,
+        nodes: { ...config.nodes, reply: { ...node, temperature: 2.1 } },
+      }),
+    ).toThrow();
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({
+        ...config,
+        nodes: { ...config.nodes, reply: { ...node, topP: 1.1 } },
+      }),
+    ).toThrow();
+    expect(() => ApplicationConfigFieldsSchema.parse({ ...config, kbIds: [] })).toThrow();
+    expect(() =>
+      ApplicationConfigFieldsSchema.parse({
+        ...config,
+        nodes: { ...config.nodes, summary: node },
+      }),
+    ).toThrow();
   });
 
   it("requires a valid slug and complete v1 config", () => {
@@ -87,5 +127,7 @@ describe("application contracts", () => {
         reason: "pending_orchestration",
       }),
     ).toEqual({ mode: "unavailable", reason: "pending_orchestration" });
+    expect(() => ApplicationChatResultSchema.parse({ mode: "text", text: "premature" })).toThrow();
+    expect(() => ApplicationChatResultSchema.parse({ mode: "unknown" })).toThrow();
   });
 });
