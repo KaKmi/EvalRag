@@ -36,9 +36,11 @@ export class ApplicationsService {
   }
   async getDetail(id: string): Promise<ApplicationDetail> {
     const app = await this.mustFind(id);
+    const versions = await this.repo.findVersions(id);
+    const kbIds = await this.repo.findKbIdsByVersionIds(versions.map((v) => v.id));
     return {
       ...(await this.toApplication(app)),
-      versions: await Promise.all((await this.repo.findVersions(id)).map((v) => this.toVersion(v))),
+      versions: await Promise.all(versions.map((v) => this.toVersion(v, kbIds.get(v.id) ?? []))),
     };
   }
   async create(req: CreateApplicationRequest, actor: string): Promise<ApplicationDetail> {
@@ -47,25 +49,31 @@ export class ApplicationsService {
     if (await this.repo.findByName(req.name))
       throw new ConflictException(`name ${req.name} 已存在`);
     const kbIds = await this.validate(req.config);
-    const { application } = await this.repo.createApplicationWithV1(
-      {
-        slug: req.slug,
-        name: req.name,
-        description: req.description,
-        enabled: true,
-        productionConfigVersionId: null,
-        createdBy: actor,
-        updatedBy: actor,
-      },
-      {
-        version: 1,
-        configSchemaVersion: 1,
-        ...this.columns(req.config),
-        note: null,
-        createdBy: actor,
-      },
-      kbIds,
-    );
+    let application;
+    try {
+      ({ application } = await this.repo.createApplicationWithV1(
+        {
+          slug: req.slug,
+          name: req.name,
+          description: req.description,
+          enabled: true,
+          productionConfigVersionId: null,
+          createdBy: actor,
+          updatedBy: actor,
+        },
+        {
+          version: 1,
+          configSchemaVersion: 1,
+          ...this.columns(req.config),
+          note: null,
+          createdBy: actor,
+        },
+        kbIds,
+      ));
+    } catch (e) {
+      if (pgCode(e) === "23505") throw new ConflictException("slug 或 name 已存在");
+      throw e;
+    }
     return this.getDetail(application.id);
   }
   async updateBase(id: string, req: UpdateApplicationRequest, actor: string): Promise<Application> {
@@ -74,7 +82,13 @@ export class ApplicationsService {
       const same = await this.repo.findByName(req.name);
       if (same && same.id !== id) throw new ConflictException(`name ${req.name} 已存在`);
     }
-    const updated = await this.repo.updateBase(id, { ...req, updatedBy: actor });
+    let updated;
+    try {
+      updated = await this.repo.updateBase(id, { ...req, updatedBy: actor });
+    } catch (e) {
+      if (pgCode(e) === "23505") throw new ConflictException("name 已存在");
+      throw e;
+    }
     if (!updated) throw new NotFoundException(`application ${id} not found`);
     return this.toApplication(await this.mustFind(id));
   }
@@ -84,7 +98,9 @@ export class ApplicationsService {
   }
   async listVersions(id: string): Promise<ApplicationConfigVersion[]> {
     await this.mustFind(id);
-    return Promise.all((await this.repo.findVersions(id)).map((v) => this.toVersion(v)));
+    const versions = await this.repo.findVersions(id);
+    const kbIds = await this.repo.findKbIdsByVersionIds(versions.map((v) => v.id));
+    return Promise.all(versions.map((v) => this.toVersion(v, kbIds.get(v.id) ?? [])));
   }
   async getVersion(id: string, versionId: string): Promise<ApplicationConfigVersion> {
     const v = await this.mustFindVersion(id, versionId);

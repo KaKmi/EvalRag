@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { desc, eq, sql } from "drizzle-orm";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
@@ -90,6 +90,20 @@ export class ApplicationsRepository {
         .from(applicationConfigVersionKbs)
         .where(eq(applicationConfigVersionKbs.configVersionId, id))
     ).map((r) => r.kbId);
+  }
+  async findKbIdsByVersionIds(ids: string[]): Promise<Map<string, string[]>> {
+    if (ids.length === 0) return new Map();
+    const rows = await this.db
+      .select({
+        versionId: applicationConfigVersionKbs.configVersionId,
+        kbId: applicationConfigVersionKbs.kbId,
+      })
+      .from(applicationConfigVersionKbs)
+      .where(inArray(applicationConfigVersionKbs.configVersionId, ids));
+    const result = new Map<string, string[]>();
+    for (const row of rows)
+      result.set(row.versionId, [...(result.get(row.versionId) ?? []), row.kbId]);
+    return result;
   }
   async createApplicationWithV1(
     app: NewApplication,

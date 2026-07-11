@@ -74,6 +74,7 @@ function service(overrides: Record<string, unknown> = {}) {
     findVersions: jest.fn(async () => [version]),
     findVersionById: jest.fn(async () => version),
     findVersionKbIds: jest.fn(async () => ["kb"]),
+    findKbIdsByVersionIds: jest.fn(async () => new Map([["v1", ["kb"]]])),
     createApplicationWithV1: jest.fn(async () => ({ application: { id: "a1" }, version })),
     insertVersion: jest.fn(async () => version),
     findPromptUsage: jest.fn(async () => []),
