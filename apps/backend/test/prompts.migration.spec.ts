@@ -27,6 +27,8 @@ jest.setTimeout(180_000);
 const MIGRATIONS_DIR = join(__dirname, "..", "drizzle");
 /** Story 2 的加法迁移；Story 4 的清理迁移在其后追加并被 applyMigrations(upToTag) 分段控制 */
 const ADDITIVE_TAG = "0011_pink_falcon";
+/** Story 4 的破坏性清理迁移（带 DO $$ 前置断言） */
+const CLEANUP_TAG = "0012_charming_sphinx";
 
 function journalTags(): string[] {
   const journal = JSON.parse(
@@ -46,6 +48,15 @@ async function applyMigrations(pool: Pool, upToTag?: string): Promise<void> {
     if (tag === upToTag) return;
   }
   if (upToTag) throw new Error(`journal 中不存在迁移 ${upToTag}`);
+}
+
+/** 单独施加某个迁移文件（分段验证清理门禁用） */
+async function applyMigrationFile(pool: Pool, tag: string): Promise<void> {
+  const text = readFileSync(join(MIGRATIONS_DIR, `${tag}.sql`), "utf8");
+  for (const raw of text.split("--> statement-breakpoint")) {
+    const stmt = raw.trim();
+    if (stmt) await pool.query(stmt);
+  }
 }
 
 async function resetSchema(pool: Pool): Promise<void> {
@@ -227,5 +238,73 @@ describeDb("prompts 迁移 + backfill（RUN_DB_TESTS=1）", () => {
     ]);
     expect(versions.rows).toHaveLength(0);
     expect(tags.rows).toHaveLength(0);
+  });
+});
+
+describeDb("0012 清理迁移门禁（Story 4）", () => {
+  let pool: Pool;
+  let db: ReturnType<typeof drizzle>;
+  let fx: LegacyFixture;
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: process.env.MIGRATION_TEST_DATABASE_URL });
+    await resetSchema(pool);
+    await applyMigrations(pool, ADDITIVE_TAG);
+    db = drizzle(pool);
+    fx = await seedLegacy(pool);
+  });
+
+  afterAll(async () => {
+    await pool?.end();
+  });
+
+  it("backfill 未完成的故意残缺 fixture → DO $$ 前置断言 RAISE，旧列保留", async () => {
+    await expect(applyMigrationFile(pool, CLEANUP_TAG)).rejects.toThrow(/0012 前置失败/);
+    // 迁移未生效：status 列仍存在
+    const col = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'prompt_versions' AND column_name = 'status'`,
+    );
+    expect(col.rows).toHaveLength(1);
+  });
+
+  it("backfill 完成后 → 0012 成功：旧列/索引消失，compile 列 NOT NULL", async () => {
+    await runBackfill(db);
+    const verification = await verifyBackfill(db);
+    expect(verification.ok).toBe(true);
+
+    await applyMigrationFile(pool, CLEANUP_TAG);
+
+    const cols = await pool.query(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+       WHERE table_name IN ('prompt_versions', 'prompts')
+         AND column_name IN ('status', 'current_version_id', 'compile_status', 'compile_errors')`,
+    );
+    const byName = new Map(cols.rows.map((r) => [r.column_name, r.is_nullable]));
+    expect(byName.has("status")).toBe(false);
+    expect(byName.has("current_version_id")).toBe(false);
+    expect(byName.get("compile_status")).toBe("NO");
+    expect(byName.get("compile_errors")).toBe("NO");
+
+    const idx = await pool.query(
+      `SELECT 1 FROM pg_indexes WHERE indexname = 'prompt_versions_prompt_id_status_idx'`,
+    );
+    expect(idx.rows).toHaveLength(0);
+
+    // 数据完整保留：production 标签仍指向旧 prod 版本
+    const tag = await pool.query(
+      `SELECT prompt_version_id FROM prompt_version_tags WHERE prompt_id = $1 AND name = 'production'`,
+      [fx.promptA],
+    );
+    expect(tag.rows[0].prompt_version_id).toBe(fx.a2);
+
+    // NOT NULL 收紧生效：缺 compile_status 的插入被拒绝
+    await expect(
+      pool.query(
+        `INSERT INTO prompt_versions (prompt_id, version, body, variables, author)
+         VALUES ($1, 99, 'x', '[]'::jsonb, 't@test')`,
+        [fx.promptA],
+      ),
+    ).rejects.toMatchObject({ code: "23502" });
   });
 });

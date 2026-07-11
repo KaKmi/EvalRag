@@ -11,7 +11,6 @@ const promptRow: PromptRow = {
   id: "p1",
   name: "回复生成-通用",
   node: "reply",
-  currentVersionId: null,
   updatedBy: "u@x",
   createdAt: now,
   updatedAt: now,
@@ -39,7 +38,6 @@ const versionRow: PromptVersionRow = {
   compileErrors: [],
   note: null,
   author: "u@x",
-  status: "draft",
   createdAt: now,
 };
 
@@ -86,7 +84,6 @@ describe("PromptsService · createPrompt（事务空 v1）", () => {
         compileStatus: "ok",
         compileErrors: [],
         author: "actor@x",
-        status: "draft",
       }),
     );
     expect(res.versions).toHaveLength(1);
@@ -116,7 +113,6 @@ describe("PromptsService · createVersion（不可变保存 + 服务端编译）
     const inserted = insertVersion.mock.calls[0][0];
     expect(inserted.compileStatus).toBe("has_errors");
     expect(inserted.compileErrors[0].code).toBe("UNKNOWN_VARIABLE");
-    expect(inserted.status).toBe("draft"); // 兼容窗口显式写
     expect(res.compileStatus).toBe("has_errors");
   });
 
@@ -239,10 +235,14 @@ describe("PromptsService · 详情与版本列表", () => {
     await expect(service.getDetail("nope")).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it("兼容窗口：compile_status 为空的旧行按需用共享编译器重算", async () => {
+  it("版本 DTO 直读持久化编译结果（0012 起列 NOT NULL，不再有兼容回退）", async () => {
     const repo = makeRepo({
       findVersions: jest.fn(async () => [
-        { ...versionRow, compileStatus: null, compileErrors: null, body: "{nope_x}" },
+        {
+          ...versionRow,
+          compileStatus: "has_errors",
+          compileErrors: [{ code: "UNKNOWN_VARIABLE", severity: "error", message: "x" }],
+        },
       ]),
     });
     const service = new PromptsService(repo);
@@ -339,8 +339,6 @@ describe("PromptsService · 节点全版本候选", () => {
           versionId: "pv2",
           version: 2,
           compileStatus: "ok",
-          body: "b",
-          node: "reply",
           createdAt: now,
         },
         {
@@ -348,9 +346,7 @@ describe("PromptsService · 节点全版本候选", () => {
           promptName: "回复生成-通用",
           versionId: "pv1",
           version: 1,
-          compileStatus: null, // 兼容窗口旧行 → 按需重算
-          body: "{bad_var}",
-          node: "reply",
+          compileStatus: "has_errors",
           createdAt: now,
         },
       ]),

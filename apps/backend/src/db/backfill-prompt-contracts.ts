@@ -54,15 +54,28 @@ export async function runBackfill(db: DB): Promise<{ compiled: number; tagged: n
   }
 
   // legacy prod → production 标签。ON CONFLICT 目标是 (prompt_id, lower(name)) 表达式唯一索引；
-  // 旧状态机保证每 prompt 至多一个 prod 版本，重复运行时 DO NOTHING（已指向即不动）
-  const tagged = await db.execute(sql`
-    INSERT INTO prompt_version_tags (prompt_id, prompt_version_id, name, created_by)
-    SELECT pv.prompt_id, pv.id, 'production', ${BACKFILL_ACTOR}
-    FROM prompt_versions pv
-    WHERE pv.status = 'prod'
-    ON CONFLICT (prompt_id, lower(name)) DO NOTHING
+  // 旧状态机保证每 prompt 至多一个 prod 版本，重复运行时 DO NOTHING（已指向即不动）。
+  // 0012 清理迁移删掉 status 列之后本步骤没有工作对象，跳过（脚本对已完成升级的库保持幂等无害）
+  let tagged = 0;
+  if (await hasLegacyStatusColumn(db)) {
+    const res = await db.execute(sql`
+      INSERT INTO prompt_version_tags (prompt_id, prompt_version_id, name, created_by)
+      SELECT pv.prompt_id, pv.id, 'production', ${BACKFILL_ACTOR}
+      FROM prompt_versions pv
+      WHERE pv.status = 'prod'
+      ON CONFLICT (prompt_id, lower(name)) DO NOTHING
+    `);
+    tagged = res.rowCount ?? 0;
+  }
+  return { compiled, tagged };
+}
+
+async function hasLegacyStatusColumn(db: DB): Promise<boolean> {
+  const res = await db.execute(sql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'prompt_versions' AND column_name = 'status'
   `);
-  return { compiled, tagged: tagged.rowCount ?? 0 };
+  return res.rows.length > 0;
 }
 
 export interface BackfillVerification {
@@ -87,17 +100,19 @@ export async function verifyBackfill(db: DB): Promise<BackfillVerification> {
     problems.push(`${badCompileCount} 个版本缺少合法编译元数据`);
   }
 
-  const prodMissingTag = await db.execute(sql`
-    SELECT COUNT(*)::int AS n FROM prompt_versions pv
-    WHERE pv.status = 'prod'
-      AND NOT EXISTS (
-        SELECT 1 FROM prompt_version_tags t
-        WHERE t.prompt_version_id = pv.id AND t.prompt_id = pv.prompt_id AND t.name = 'production'
-      )
-  `);
-  const prodMissing = Number((prodMissingTag.rows[0] as { n: number }).n);
-  if (prodMissing > 0) {
-    problems.push(`${prodMissing} 个 legacy prod 版本没有指向自己的 production 标签`);
+  if (await hasLegacyStatusColumn(db)) {
+    const prodMissingTag = await db.execute(sql`
+      SELECT COUNT(*)::int AS n FROM prompt_versions pv
+      WHERE pv.status = 'prod'
+        AND NOT EXISTS (
+          SELECT 1 FROM prompt_version_tags t
+          WHERE t.prompt_version_id = pv.id AND t.prompt_id = pv.prompt_id AND t.name = 'production'
+        )
+    `);
+    const prodMissing = Number((prodMissingTag.rows[0] as { n: number }).n);
+    if (prodMissing > 0) {
+      problems.push(`${prodMissing} 个 legacy prod 版本没有指向自己的 production 标签`);
+    }
   }
 
   return { ok: problems.length === 0, problems };

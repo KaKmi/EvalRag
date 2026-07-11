@@ -1,4 +1,16 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query, Req } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Put,
+  Query,
+  Req,
+} from "@nestjs/common";
 import { createZodDto } from "nestjs-zod";
 import {
   CreatePromptRequestSchema,
@@ -35,8 +47,10 @@ export class PromptsController {
   // 静态路由必须声明在 :id 之前（Nest 按声明序匹配，否则 "versions" 被 :id 捕获）
   @Get("versions")
   nodeVersions(@Query() raw: Record<string, unknown>): Promise<PromptNodeVersionCandidate[]> {
-    const q = PromptNodeVersionsQuerySchema.parse(raw ?? {});
-    return this.promptsService.nodeVersionCandidates(q.node);
+    // query 手动 parse（非 DTO 管道），失败要归一 400 而不是裸 ZodError 变 500
+    const q = PromptNodeVersionsQuerySchema.safeParse(raw ?? {});
+    if (!q.success) throw new BadRequestException("node 参数非法（rewrite|intent|reply|fallback）");
+    return this.promptsService.nodeVersionCandidates(q.data.node);
   }
 
   @Get(":id")

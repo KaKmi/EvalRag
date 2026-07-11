@@ -8,7 +8,6 @@ import {
   compilePromptBody,
   extractVars,
   NODE_CONTRACT_VERSION,
-  type CompileResult,
   type CreatePromptRequest,
   type CreatePromptVersionRequest,
   type Prompt,
@@ -54,10 +53,9 @@ export class PromptsService {
       this.repo.findTagsByPromptId(id),
     ]);
     const tagsByVersion = groupTags(tagRows);
-    const node = row.node as PromptNode;
     return {
       ...toPrompt(row, tagsByVersion.get(row.latestVersionId ?? "") ?? []),
-      versions: versions.map((v) => toVersion(v, node, tagsByVersion.get(v.id) ?? [])),
+      versions: versions.map((v) => toVersion(v, tagsByVersion.get(v.id) ?? [])),
     };
   }
 
@@ -75,8 +73,6 @@ export class PromptsService {
           compileStatus: compiled.status,
           compileErrors: compiled.issues,
           author: actorEmail,
-          // 兼容窗口：旧 status 列 NOT NULL，显式写 draft（Story 4 随列删除）
-          status: "draft",
         },
       );
       return await this.getDetail(prompt.id);
@@ -87,14 +83,13 @@ export class PromptsService {
   }
 
   async listVersions(promptId: string): Promise<PromptVersion[]> {
-    const prompt = await this.mustFindPrompt(promptId);
+    await this.mustFindPrompt(promptId);
     const [versions, tagRows] = await Promise.all([
       this.repo.findVersions(promptId),
       this.repo.findTagsByPromptId(promptId),
     ]);
     const tagsByVersion = groupTags(tagRows);
-    const node = prompt.node as PromptNode;
-    return versions.map((v) => toVersion(v, node, tagsByVersion.get(v.id) ?? []));
+    return versions.map((v) => toVersion(v, tagsByVersion.get(v.id) ?? []));
   }
 
   // 保存总是创建不可变新版本：body 允许空、错误允许保存，服务端编译结果是最终事实。
@@ -134,12 +129,10 @@ export class PromptsService {
             compileErrors: compiled.issues,
             note: req.note,
             author: actorEmail,
-            // 兼容窗口：显式写 draft（Story 4 随列删除）
-            status: "draft",
           },
           actorEmail,
         );
-        return toVersion(row, node, []);
+        return toVersion(row, []);
       } catch (e) {
         if (isUniqueViolation(e) && attempt === 0) continue;
         if (isUniqueViolation(e)) throw new ConflictException("版本号冲突，重试失败");
@@ -191,7 +184,7 @@ export class PromptsService {
       versionId: r.versionId,
       version: r.version,
       tags: tagsByVersion.get(r.versionId) ?? [],
-      compileStatus: normalizeCompile(r.compileStatus, r.body, r.node as PromptNode).status,
+      compileStatus: r.compileStatus as PromptNodeVersionCandidate["compileStatus"],
       createdAt: r.createdAt.toISOString(),
     }));
   }
@@ -258,21 +251,7 @@ function toPrompt(row: PromptListRow, latestTags: string[]): Prompt {
   };
 }
 
-// 兼容窗口防御：backfill 前的旧行 compile_status 可能为空——用共享编译器按需重算（纯函数，代价可忽略）
-function normalizeCompile(
-  status: string | null,
-  body: string,
-  node: PromptNode,
-): CompileResult {
-  if (status === "ok" || status === "has_errors" || status === "has_warnings") {
-    return { status, issues: [] };
-  }
-  return compilePromptBody(body, node);
-}
-
-function toVersion(row: PromptVersionRow, node: PromptNode, tags: string[]): PromptVersion {
-  const fallback =
-    row.compileStatus == null ? compilePromptBody(row.body, node) : undefined;
+function toVersion(row: PromptVersionRow, tags: string[]): PromptVersion {
   return {
     id: row.id,
     promptId: row.promptId,
@@ -282,8 +261,8 @@ function toVersion(row: PromptVersionRow, node: PromptNode, tags: string[]): Pro
     note: row.note ?? undefined,
     author: row.author,
     contractVersion: row.contractVersion,
-    compileStatus: (fallback?.status ?? row.compileStatus) as PromptVersion["compileStatus"],
-    compileErrors: fallback?.issues ?? row.compileErrors ?? [],
+    compileStatus: row.compileStatus as PromptVersion["compileStatus"],
+    compileErrors: row.compileErrors,
     tags,
     createdAt: row.createdAt.toISOString(),
   };

@@ -42,9 +42,7 @@ export interface NodeVersionCandidateRow {
   promptName: string;
   versionId: string;
   version: number;
-  compileStatus: string | null;
-  body: string;
-  node: string;
+  compileStatus: string;
   createdAt: Date;
 }
 
@@ -231,8 +229,6 @@ export class PromptsRepository {
         versionId: promptVersions.id,
         version: promptVersions.version,
         compileStatus: promptVersions.compileStatus,
-        body: promptVersions.body,
-        node: prompts.node,
         createdAt: promptVersions.createdAt,
       })
       .from(promptVersions)
