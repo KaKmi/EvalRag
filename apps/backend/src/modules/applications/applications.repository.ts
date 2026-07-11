@@ -157,18 +157,22 @@ export class ApplicationsRepository {
   }
   async findPromptUsage(promptVersionIds: string[]) {
     if (promptVersionIds.length === 0) return [];
+    const ids = sql`ARRAY[${sql.join(
+      promptVersionIds.map((id) => sql`${id}`),
+      sql`, `,
+    )}]::uuid[]`;
     const result = await this.db.execute(sql`
       SELECT a.id application_id, a.name application_name, v.version config_version,
-        CASE WHEN v.prompt_rewrite_version_id = ANY(${promptVersionIds}) THEN 'rewrite'
-             WHEN v.prompt_intent_version_id = ANY(${promptVersionIds}) THEN 'intent'
-             WHEN v.prompt_reply_version_id = ANY(${promptVersionIds}) THEN 'reply'
+        CASE WHEN v.prompt_rewrite_version_id = ANY(${ids}) THEN 'rewrite'
+             WHEN v.prompt_intent_version_id = ANY(${ids}) THEN 'intent'
+             WHEN v.prompt_reply_version_id = ANY(${ids}) THEN 'reply'
              ELSE 'fallback' END node,
-        CASE WHEN v.prompt_rewrite_version_id = ANY(${promptVersionIds}) THEN v.prompt_rewrite_version_id
-             WHEN v.prompt_intent_version_id = ANY(${promptVersionIds}) THEN v.prompt_intent_version_id
-             WHEN v.prompt_reply_version_id = ANY(${promptVersionIds}) THEN v.prompt_reply_version_id
+        CASE WHEN v.prompt_rewrite_version_id = ANY(${ids}) THEN v.prompt_rewrite_version_id
+             WHEN v.prompt_intent_version_id = ANY(${ids}) THEN v.prompt_intent_version_id
+             WHEN v.prompt_reply_version_id = ANY(${ids}) THEN v.prompt_reply_version_id
              ELSE v.prompt_fallback_version_id END prompt_version_id
       FROM applications a JOIN application_config_versions v ON v.id = a.production_config_version_id
-      WHERE v.prompt_rewrite_version_id = ANY(${promptVersionIds}) OR v.prompt_intent_version_id = ANY(${promptVersionIds}) OR v.prompt_reply_version_id = ANY(${promptVersionIds}) OR v.prompt_fallback_version_id = ANY(${promptVersionIds})
+      WHERE v.prompt_rewrite_version_id = ANY(${ids}) OR v.prompt_intent_version_id = ANY(${ids}) OR v.prompt_reply_version_id = ANY(${ids}) OR v.prompt_fallback_version_id = ANY(${ids})
     `);
     return result.rows as {
       application_id: string;
