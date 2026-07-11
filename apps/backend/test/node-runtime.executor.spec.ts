@@ -90,6 +90,42 @@ describe("NodeRuntimeService.executeStructured · rewrite", () => {
   });
 });
 
+describe("NodeRuntimeService.executeStructured · reservedDataSchema 校验（review round 1）", () => {
+  it("intent 节点 reserved 缺 availableRoutes（optional 字段，TS 层不拦截）→ 优雅降级 fallback，不抛未捕获异常，不调用 chat", async () => {
+    const chat = jest.fn();
+    const svc = makeService(chat);
+    // reservedDataSchema 要求 availableRoutes: string[]（非 optional），传入 {} 应该
+    // 在 extraValidate 访问 reserved.availableRoutes.includes(...) 抛 TypeError 之前
+    // 就被 reservedDataSchema.safeParse 拦下来。
+    const res = await svc.executeStructured(
+      "intent", 1, "{query}", "m1", { query: "q", history: "" }, {} as never,
+    );
+    expect(res.fallbackUsed).toBe(true);
+    expect(res.output).toEqual({ intent: "unknown", routeIds: [], confidence: 0 });
+    expect(chat).not.toHaveBeenCalled();
+  });
+});
+
+describe("NodeRuntimeService.executeStructured · validateSteps 区分失败阶段（review round 1）", () => {
+  it("模型输出非法 JSON → 首次失败步骤标记为 output_schema", async () => {
+    const chat = jest.fn(async () => ({ content: "不是 JSON" }));
+    const svc = makeService(chat);
+    const res = await svc.executeStructured("rewrite", 1, "{query}", "m1", { query: "q", history: "" }, {});
+    expect(res.validateSteps.find((s) => s.ok === false)?.step).toBe("output_schema");
+  });
+
+  it("模型输出结构合法但 extraValidate 越权 → 首次失败步骤标记为 extra_validate（而非笼统的 output_schema）", async () => {
+    const chat = jest.fn(async () => ({
+      content: '{"intent":"售后","routeIds":["kb_illegal"],"confidence":0.9}',
+    }));
+    const svc = makeService(chat);
+    const res = await svc.executeStructured(
+      "intent", 1, "{query}", "m1", { query: "q", history: "" }, { availableRoutes: ["kb_a"] },
+    );
+    expect(res.validateSteps.find((s) => s.step === "extra_validate")).toBeDefined();
+  });
+});
+
 describe("NodeRuntimeService.executeStructured · intent extraValidate", () => {
   it("routeIds 越权 → 修复重试；仍越权 → fallback unknown", async () => {
     const chat = jest.fn(async () => ({
@@ -135,6 +171,21 @@ describe("NodeRuntimeService.streamText · reply/fallback", () => {
       { citations: [] },
     );
     expect(res.text).toBe("你好");
+    expect(res.fallbackUsed).toBe(false);
+  });
+
+  it("reply：已产出部分内容后报错 → 保留已产出文本，不触发 fallback（review round 1，011 Design：不可撤回已展示内容）", async () => {
+    async function* gen() {
+      yield { delta: "已经生成的部分答案" };
+      yield { error: "连接中断" };
+    }
+    const svc = makeService(jest.fn(), jest.fn(() => gen()));
+    const res = await svc.streamText(
+      "reply", 1, "{query}", "m1",
+      { query: "q", history: "", retrievalContext: "" },
+      { citations: [] },
+    );
+    expect(res.text).toBe("已经生成的部分答案");
     expect(res.fallbackUsed).toBe(false);
   });
 

@@ -93,8 +93,16 @@ export class NodeRuntimeService {
     >;
     const steps: ValidateStep[] = [];
 
+    // review round 1：reservedDataSchema 此前从未校验——intent 的 extraValidate 直接
+    // 索引 reserved.availableRoutes，caller 传入缺字段的 reserved（RuntimeContext 里
+    // availableRoutes 是 optional）会在 extraValidate 内部抛未捕获 TypeError，而不是
+    // 像 input 校验失败那样优雅降级。两个前置校验都过了才进入真正的模型调用。
     const inputCheck = contract.inputSchema.safeParse(input);
-    steps.push({ step: "input", ok: inputCheck.success });
+    steps.push({
+      step: "input",
+      ok: inputCheck.success,
+      issues: inputCheck.success ? undefined : inputCheck.error.issues.map((i) => i.message),
+    });
     if (!inputCheck.success) {
       return {
         output: contract.fallback(input, reserved),
@@ -102,6 +110,24 @@ export class NodeRuntimeService {
         validateSteps: [...steps, { step: "fallback", ok: true }],
       };
     }
+
+    const reservedCheck = contract.reservedDataSchema.safeParse(reserved);
+    steps.push({
+      step: "input",
+      ok: reservedCheck.success,
+      issues: reservedCheck.success ? undefined : reservedCheck.error.issues.map((i) => i.message),
+    });
+    if (!reservedCheck.success) {
+      return {
+        output: contract.fallback(input, reserved),
+        fallbackUsed: true,
+        validateSteps: [...steps, { step: "fallback", ok: true }],
+      };
+    }
+    // 后续统一用校验/归一后的值（含 Zod default，如 REPLY_CONTRACT.citations 缺省 []），
+    // 不再用调用方传入的原始 input/reserved——两者在校验通过后语义等价，但已归一化的值更可信。
+    const validInput = inputCheck.data;
+    const validReserved = reservedCheck.data;
 
     const model = await this.resolveModel(modelId);
 
@@ -126,36 +152,52 @@ export class NodeRuntimeService {
         };
         const chatOpts = { structuredOutput, temperature: opts?.temperature };
 
+        // review round 1：区分"输出不是合法结构"(output_schema) 与"结构合法但触发
+        // 动态值域校验"(extra_validate) 两类失败原因，validateSteps 才能真正驱动
+        // 前端按阶段渲染的"校验步骤图标"，而不是把两种性质不同的失败都糊成一个标签。
         const attempt = async (
           messages: ChatMessage[],
-        ): Promise<{ ok: true; output: TOutput } | { ok: false; issues: string[] }> => {
+        ): Promise<
+          | { ok: true; output: TOutput }
+          | { ok: false; step: "output_schema" | "extra_validate"; issues: string[] }
+        > => {
           const res = await this.models.chat(modelId, messages, chatOpts);
           const normalized = normalizeStructuredOutput(res.content);
           let parsed: unknown;
           try {
             parsed = JSON.parse(normalized);
           } catch {
-            return { ok: false, issues: ["模型输出不是合法 JSON"] };
+            return { ok: false, step: "output_schema", issues: ["模型输出不是合法 JSON"] };
           }
           const outCheck = contract.outputSchema.safeParse(parsed);
           if (!outCheck.success) {
-            return { ok: false, issues: outCheck.error.issues.map((i) => i.message) };
+            return {
+              ok: false,
+              step: "output_schema",
+              issues: outCheck.error.issues.map((i) => i.message),
+            };
           }
-          const extra = contract.extraValidate?.(outCheck.data, reserved) ?? [];
+          const extra = contract.extraValidate?.(outCheck.data, validReserved) ?? [];
           if (extra.length > 0) {
-            return { ok: false, issues: extra.map((i) => i.message) };
+            return { ok: false, step: "extra_validate", issues: extra.map((i) => i.message) };
           }
           return { ok: true, output: outCheck.data };
         };
 
-        const messages = assembleMessages({ contract, promptBody, input, reserved });
+        const messages = assembleMessages({
+          contract,
+          promptBody,
+          input: validInput,
+          reserved: validReserved,
+        });
         const first = await attempt(messages);
-        steps.push({ step: "output_schema", ok: first.ok, issues: first.ok ? undefined : first.issues });
         if (first.ok) {
+          steps.push({ step: "output_schema", ok: true });
           span.setAttribute(RAG.FALLBACK_USED, false);
           span.setAttribute(RAG.REPAIR_RETRY_COUNT, 0);
           return { output: first.output, fallbackUsed: false, validateSteps: steps };
         }
+        steps.push({ step: first.step, ok: false, issues: first.issues });
         span.setAttribute(RAG.VALIDATION_ERROR_CODE, first.issues[0] ?? "unknown");
 
         const repairMessages: ChatMessage[] = [
@@ -166,16 +208,21 @@ export class NodeRuntimeService {
           },
         ];
         const second = await attempt(repairMessages);
-        steps.push({ step: "repair", ok: second.ok, issues: second.ok ? undefined : second.issues });
         span.setAttribute(RAG.REPAIR_RETRY_COUNT, 1);
         if (second.ok) {
+          steps.push({ step: "repair", ok: true });
           span.setAttribute(RAG.FALLBACK_USED, false);
           return { output: second.output, fallbackUsed: false, validateSteps: steps };
         }
+        steps.push({ step: "repair", ok: false, issues: second.issues });
 
         steps.push({ step: "fallback", ok: true });
         span.setAttribute(RAG.FALLBACK_USED, true);
-        return { output: contract.fallback(input, reserved), fallbackUsed: true, validateSteps: steps };
+        return {
+          output: contract.fallback(validInput, validReserved),
+          fallbackUsed: true,
+          validateSteps: steps,
+        };
       },
     );
   }
@@ -220,13 +267,16 @@ export class NodeRuntimeService {
           const stream = await this.models.chatStream(modelId, messages, { temperature: opts?.temperature });
           for await (const chunk of stream) {
             if (chunk.error) {
-              throw new Error(chunk.error);
+              // review round 1：报错时不再无条件清空 text——011 Design 明确区分"首 token
+              // 前报错/空响应"(无痕切 fallback) 和"已发送 token 后断流"(不可撤回已产出内容)。
+              // 是否触发 fallback 完全由下面 text.length===0 判断，不在这里预先决定。
+              break;
             }
             if (chunk.delta) text += chunk.delta;
             if (chunk.done) break;
           }
         } catch {
-          text = "";
+          // 网络层异常同样只看已产出内容：text 非空则保留，不清空。
         }
         if (text.length === 0) {
           span.setAttribute(RAG.FALLBACK_USED, true);
