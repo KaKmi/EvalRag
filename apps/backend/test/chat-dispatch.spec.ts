@@ -211,4 +211,25 @@ describe("ProtocolDispatchAdapter.chatStream()", () => {
       }
     }).rejects.toThrow("unsupported protocol cohere for chatStream");
   });
+
+  it("消费方提前 break（未读到 chunk.done）→ 底层 reader 被 cancel，不悬挂连接（review round 1）", async () => {
+    const cancelSpy = jest.fn(async () => undefined);
+    const encoder = new TextEncoder();
+    let pulled = 0;
+    const stream = new ReadableStream({
+      pull(controller) {
+        // 持续产出分片，模拟消费方在流结束前主动 break 的场景
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"片"}}]}\n\n'));
+        pulled++;
+      },
+      cancel: cancelSpy,
+    });
+    fetchMock.mockResolvedValue({ ok: true, status: 200, body: stream } as unknown as Response);
+
+    for await (const chunk of adapter.chatStream(config, messages)) {
+      if (chunk.delta) break; // 拿到第一个 delta 就提前退出，不等待 done
+    }
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+    expect(pulled).toBeGreaterThan(0);
+  });
 });

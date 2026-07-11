@@ -214,6 +214,11 @@ export class ProtocolDispatchAdapter implements ModelProviderPort {
       }
     } catch (err) {
       throw new Error(redactSecret(err instanceof Error ? err.message : String(err), config.apiKey));
+    } finally {
+      // review round 1：consumer 提前 break（for-await 触发 generator.return()）时
+      // finally 仍会执行——释放 reader 锁并取消底层连接，防止连接悬挂不释放。
+      // cancel() 对已经自然读完（done）的流是安全 no-op，吞掉其自身可能的 reject。
+      await reader.cancel().catch(() => undefined);
     }
   }
 
