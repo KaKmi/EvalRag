@@ -194,7 +194,7 @@ describe("buildDefaultConfig", () => {
 });
 
 describe("应用列表页", () => {
-  it("未上线态显示「未上线」，服务中态显示「● 服务中 · vN」", async () => {
+  it("未上线态显示「未上线」，服务中态显示「production → vN」", async () => {
     mocked.getApplications.mockResolvedValue([
       application(),
       application({ id: "app2", name: "已上线应用", slug: "live-bot", productionVersion: 3 }),
@@ -202,7 +202,7 @@ describe("应用列表页", () => {
     renderRoutes("/admin/applications");
     expect(await screen.findByText("售后助手")).toBeInTheDocument();
     expect(screen.getByText("未上线")).toBeInTheDocument();
-    expect(screen.getByText("● 服务中 · v3")).toBeInTheDocument();
+    expect(screen.getByText("production → v3")).toBeInTheDocument();
   });
 
   it("点行导航到详情", async () => {
@@ -212,11 +212,16 @@ describe("应用列表页", () => {
   });
 });
 
-describe("新建应用弹窗", () => {
+describe("新建应用抽屉", () => {
+  const openDrawer = async () => {
+    fireEvent.click(await screen.findByText("＋ 新建应用"));
+    return screen.findByRole("dialog");
+  };
+
   it("无知识库时禁用提交并提示先建知识库", async () => {
     mocked.getKnowledgeBases.mockResolvedValue([]);
     renderRoutes("/admin/applications");
-    fireEvent.click(await screen.findByText("＋ 新建应用"));
+    await openDrawer();
     expect(await screen.findByText(/请先到「知识库」创建/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /创建并配置/ })).toBeDisabled();
   });
@@ -224,7 +229,7 @@ describe("新建应用弹窗", () => {
   it("无启用 llm 模型时提示先启用模型", async () => {
     mocked.getModels.mockResolvedValue([llm({ enabled: false })]);
     renderRoutes("/admin/applications");
-    fireEvent.click(await screen.findByText("＋ 新建应用"));
+    await openDrawer();
     expect(await screen.findByText(/请先到「模型接入」启用一个 LLM 模型/)).toBeInTheDocument();
   });
 
@@ -233,26 +238,23 @@ describe("新建应用弹窗", () => {
       node === "intent" ? [] : [candidate(node)],
     );
     renderRoutes("/admin/applications");
-    fireEvent.click(await screen.findByText("＋ 新建应用"));
+    await openDrawer();
     expect(await screen.findByText(/请先到「Prompt 管理」为 意图识别 创建 Prompt/)).toBeInTheDocument();
   });
 
-  it("填 slug/name + 选知识库后提交调 createApplication 并跳详情", async () => {
+  it("填 name/slug + 选知识库后提交调 createApplication 并跳详情", async () => {
     mocked.createApplication.mockResolvedValue(detail({ id: "app9" }));
     mocked.getApplicationDetail.mockResolvedValue(detail({ id: "app9" }));
     renderRoutes("/admin/applications");
-    fireEvent.click(await screen.findByText("＋ 新建应用"));
-    // 引用数据加载完成后表单出现
-    fireEvent.change(await screen.findByPlaceholderText("如：aftersale-bot"), {
-      target: { value: "new-bot" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("如：售后助手"), {
+    const dialog = await openDrawer();
+    fireEvent.change(await within(dialog).findByPlaceholderText("如：售后助手"), {
       target: { value: "新应用" },
     });
-    // 选知识库（antd 多选）
-    const kbSelect = screen.getByText("选择该应用检索的知识库（必选，至少一个）");
-    fireEvent.mouseDown(kbSelect);
-    fireEvent.click(await screen.findByText("售后知识库"));
+    fireEvent.change(within(dialog).getByPlaceholderText(/aftersale-bot/), {
+      target: { value: "new-bot" },
+    });
+    // 选知识库（chip，drawer 内唯一）
+    fireEvent.click(within(dialog).getByText("售后知识库"));
 
     fireEvent.click(screen.getByRole("button", { name: /创建并配置/ }));
     await waitFor(() =>
@@ -260,7 +262,12 @@ describe("新建应用弹窗", () => {
         expect.objectContaining({
           slug: "new-bot",
           name: "新应用",
-          config: expect.objectContaining({ kbIds: ["kb1"] }),
+          config: expect.objectContaining({
+            kbIds: ["kb1"],
+            nodes: expect.objectContaining({
+              reply: expect.objectContaining({ promptVersionId: "pv-reply", modelId: "m1" }),
+            }),
+          }),
         }),
       ),
     );
@@ -285,7 +292,7 @@ describe("应用详情骨架", () => {
     expect(btn).toBeDisabled();
   });
 
-  it("改自由度产生 dirty，保存调 createApplicationConfigVersion 并切到新版本", async () => {
+  it("改配置产生 dirty，保存调 createApplicationConfigVersion 并切到新版本", async () => {
     mocked.createApplicationConfigVersion.mockResolvedValue(version({ id: "appv2", version: 2 }));
     mocked.getApplicationDetail
       .mockResolvedValueOnce(detail())
@@ -301,20 +308,16 @@ describe("应用详情骨架", () => {
     // 保存按钮初始禁用（无修改）
     const saveBtn = screen.getByRole("button", { name: /保存为新版本/ });
     expect(saveBtn).toBeDisabled();
-    // reply 卡自由度切到「精确」→ 温度/TopP 变化 → dirty
-    const replyCard = screen.getByText("回复生成").closest("div")!.parentElement!;
-    fireEvent.click(within(replyCard).getByText("精确"));
+    // 关掉「查不到答案时转人工」→ fallback.toHuman false → dirty（转人工是最后一个 Switch）
+    const switches = screen.getAllByRole("switch");
+    fireEvent.click(switches[switches.length - 1]);
     await waitFor(() => expect(saveBtn).toBeEnabled());
     fireEvent.click(saveBtn);
     await waitFor(() =>
       expect(mocked.createApplicationConfigVersion).toHaveBeenCalledWith(
         "app1",
         expect.objectContaining({
-          config: expect.objectContaining({
-            nodes: expect.objectContaining({
-              reply: expect.objectContaining({ freedom: "precise", temperature: 0.2, topP: 0.6 }),
-            }),
-          }),
+          config: expect.objectContaining({ fallback: { toHuman: false } }),
         }),
       ),
     );
@@ -337,8 +340,8 @@ describe("应用详情骨架", () => {
     expect(screen.getByTestId("history-version-2")).toBeInTheDocument();
     // v1 是服务中版本
     expect(within(screen.getByTestId("history-version-1")).getByText("服务中")).toBeInTheDocument();
-    // 点 v2 载入编辑
-    fireEvent.click(screen.getByTestId("history-version-2"));
+    // 点 v2 的「载入编辑」按钮
+    fireEvent.click(within(screen.getByTestId("history-version-2")).getByText("载入编辑"));
     await waitFor(() => expect(screen.getByText(/正在编辑/)).toHaveTextContent("v2"));
   });
 

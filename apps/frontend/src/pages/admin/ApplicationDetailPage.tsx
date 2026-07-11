@@ -3,13 +3,11 @@ import { useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
   Button,
-  Divider,
   Drawer,
   Input,
-  Radio,
+  InputNumber,
   Select,
   Slider,
-  Space,
   Spin,
   Switch,
   Tag,
@@ -36,9 +34,10 @@ import {
 } from "../../api/client";
 
 /**
- * 应用详情 · Playground 骨架（M7a Story 5）：载入最新版本进编辑态，四节点卡 + 检索卡 +
- * 兜底 + 知识库；「保存为新版本」只追加，「上线这个版本」禁用（ReleaseCheck 属 M7b）；
- * 版本历史抽屉可载入历史版本编辑；对话测试面板按骨架 unavailable 渲染占位。
+ * 应用详情 · Playground（M7a Story 5，对齐原型 CodeCrushBot.dc.html「应用管理」详情屏）：
+ * 左右两栏——左栏 Prompt 配置 / 检索设置 / 知识库 三卡，右栏「上线」区 + 提示卡。
+ * 载入最新版本进草稿编辑，「保存为新版本」只追加；「上线这个版本」M7a 禁用（ReleaseCheck 属 M7b）；
+ * 「以线上版本重置草稿」重置到 production/最新；版本历史抽屉可载入编辑 / 对话测试骨架。
  */
 
 const PROMPT_NODES: PromptNode[] = ["rewrite", "intent", "reply", "fallback"];
@@ -48,21 +47,41 @@ const NODE_LABELS: Record<PromptNode, string> = {
   reply: "回复生成",
   fallback: "兜底话术",
 };
+const NODE_DESC: Record<PromptNode, string> = {
+  rewrite: "把用户口语问题整理成更利于检索的形式",
+  intent: "判断用户想做什么，决定走哪条路",
+  reply: "根据检索到的资料生成最终回答",
+  fallback: "没查到答案时怎么回应",
+};
 
-// 自由度预设 → 温度/Top P（custom 不写值，解锁滑杆）。温度值域 0..2（对齐契约）。
+// 自由度预设 → 温度/Top P（custom 解锁滑杆）。温度值域 0..2（对齐契约）。
 const FREEDOM_PRESET: Record<Exclude<Freedom, "custom">, { temperature: number; topP: number }> = {
   precise: { temperature: 0.2, topP: 0.6 },
   balance: { temperature: 0.7, topP: 0.9 },
   improvise: { temperature: 1.2, topP: 0.95 },
 };
-const FREEDOM_LABEL: Record<Freedom, string> = {
-  precise: "精确",
-  balance: "平衡",
-  improvise: "创意",
-  custom: "自定义",
-};
+const FREEDOM_OPTIONS: Array<{ value: Freedom; label: string }> = [
+  { value: "precise", label: "精确" },
+  { value: "balance", label: "平衡" },
+  { value: "improvise", label: "创意" },
+  { value: "custom", label: "自定义" },
+];
 
 const mono: CSSProperties = { fontFamily: "ui-monospace, Menlo, monospace" };
+const cardStyle: CSSProperties = {
+  background: "#fff",
+  border: "1px solid #f0f0f0",
+  borderRadius: 12,
+  overflow: "hidden",
+};
+const cardHeadStyle: CSSProperties = {
+  padding: "13px 18px",
+  borderBottom: "1px solid #f0f0f0",
+  fontSize: 13,
+  fontWeight: 600,
+  color: "rgba(0,0,0,.8)",
+};
+const cardBodyStyle: CSSProperties = { padding: "14px 18px" };
 
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
@@ -74,7 +93,7 @@ function formatDateTime(iso: string): string {
   return `${mm}-${dd} ${hh}:${mi}`;
 }
 
-/** version → 可编辑 config 字段（深拷贝，编辑不改原对象）。 */
+/** version → 可编辑 config 字段（深拷贝）。 */
 function versionToFields(v: ApplicationConfigVersion): ApplicationConfigFields {
   return {
     kbIds: [...v.kbIds],
@@ -89,7 +108,7 @@ function versionToFields(v: ApplicationConfigVersion): ApplicationConfigFields {
   };
 }
 
-/** 候选版本 → Select options（有标签的排前，稳定排序）。 */
+/** 候选版本 → Select options（有标签的排前）。 */
 function promptOptions(
   candidates: PromptNodeVersionCandidate[],
   current: string,
@@ -106,25 +125,10 @@ function promptOptions(
   return opts;
 }
 
-function SectionTitle({ children }: { children: ReactNode }) {
+function FieldRow({ label, children }: { label: ReactNode; children: ReactNode }) {
   return (
-    <div style={{ fontSize: 14, fontWeight: 600, color: "rgba(0,0,0,.88)", margin: "12px 0 8px" }}>
-      {children}
-    </div>
-  );
-}
-
-function Card({ children }: { children: ReactNode }) {
-  return (
-    <div
-      style={{
-        border: "1px solid #f0f0f0",
-        borderRadius: 8,
-        padding: 16,
-        background: "#fff",
-        marginBottom: 12,
-      }}
-    >
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ width: 96, flex: "none", fontSize: 13, color: "rgba(0,0,0,.65)" }}>{label}</div>
       {children}
     </div>
   );
@@ -138,7 +142,6 @@ export default function ApplicationDetailPage() {
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
 
-  // 编辑态：来源版本 + 可编辑 config 字段 + 版本说明
   const [basedOnVersionId, setBasedOnVersionId] = useState("");
   const [draft, setDraft] = useState<ApplicationConfigFields | null>(null);
   const [note, setNote] = useState("");
@@ -147,18 +150,16 @@ export default function ApplicationDetailPage() {
 
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  // 表单候选引用数据
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [models, setModels] = useState<ModelProvider[]>([]);
   const [candidatesByNode, setCandidatesByNode] = useState<
     Record<PromptNode, PromptNodeVersionCandidate[]>
   >({ rewrite: [], intent: [], reply: [], fallback: [] });
+  const [kbPickerOpen, setKbPickerOpen] = useState(false);
 
-  // 对话测试骨架
   const [chatBusy, setChatBusy] = useState(false);
   const [chatUnavailable, setChatUnavailable] = useState(false);
 
-  // 快速切换路由时的过期响应守卫：旧 appId 的响应回来晚了不覆盖当前页面
   const activeAppId = useRef(appId);
   useEffect(() => {
     activeAppId.current = appId;
@@ -200,7 +201,6 @@ export default function ApplicationDetailPage() {
     void refresh(true);
   }, [refresh]);
 
-  // 候选引用数据（知识库/模型/四节点 Prompt 版本）一次拉全
   useEffect(() => {
     let active = true;
     Promise.all([
@@ -220,7 +220,7 @@ export default function ApplicationDetailPage() {
         });
       })
       .catch(() => {
-        /* 候选缺失不阻塞详情展示；Select 退化为已选值 */
+        /* 候选缺失不阻塞详情展示 */
       });
     return () => {
       active = false;
@@ -240,7 +240,10 @@ export default function ApplicationDetailPage() {
     .filter((m) => m.type === "rerank" && m.enabled)
     .map((m) => ({ value: m.id, label: m.name }));
 
-  const patchNode = (node: PromptNode, patch: Partial<ApplicationConfigFields["nodes"][PromptNode]>) =>
+  const patchNode = (
+    node: PromptNode,
+    patch: Partial<ApplicationConfigFields["nodes"][PromptNode]>,
+  ) =>
     setDraft((prev) =>
       prev ? { ...prev, nodes: { ...prev.nodes, [node]: { ...prev.nodes[node], ...patch } } } : prev,
     );
@@ -256,17 +259,21 @@ export default function ApplicationDetailPage() {
     }
   };
 
-  const toggleKb = (id: string) =>
+  const removeKb = (id: string) =>
+    setDraft((prev) => (prev ? { ...prev, kbIds: prev.kbIds.filter((x) => x !== id) } : prev));
+  const addKb = (id: string) => {
     setDraft((prev) =>
-      prev
-        ? {
-            ...prev,
-            kbIds: prev.kbIds.includes(id)
-              ? prev.kbIds.filter((x) => x !== id)
-              : [...prev.kbIds, id],
-          }
-        : prev,
+      prev && !prev.kbIds.includes(id) ? { ...prev, kbIds: [...prev.kbIds, id] } : prev,
     );
+    setKbPickerOpen(false);
+  };
+
+  const resetToProduction = () => {
+    if (!detail) return;
+    const prod = detail.versions.find((v) => v.id === detail.productionConfigVersionId);
+    const target = prod ?? detail.versions[0];
+    if (target) loadVersionIntoEditor(target);
+  };
 
   const save = async () => {
     if (!draft || !detail) return;
@@ -281,7 +288,7 @@ export default function ApplicationDetailPage() {
         config: draft,
         note: note.trim() || undefined,
       });
-      message.success(`已保存为 v${created.version}`);
+      message.success(`已保存为 v${created.version}（未上线，不影响正在服务的内容）`);
       await refresh(false, created.id);
     } catch (e) {
       setSaveErr(e instanceof Error ? e.message : "保存失败");
@@ -314,7 +321,7 @@ export default function ApplicationDetailPage() {
   if (loadErr || !detail || !draft) {
     return (
       <div style={{ padding: 24 }}>
-        <Alert type="error" showIcon message={loadErr || "应用不存在"} />
+        <Alert type="error" showIcon title={loadErr || "应用不存在"} />
         <Button style={{ marginTop: 12 }} onClick={() => navigate("/admin/applications")}>
           返回列表
         </Button>
@@ -323,311 +330,395 @@ export default function ApplicationDetailPage() {
   }
 
   const editingVersion = basedOnVersion?.version ?? null;
+  const availableKbs = kbs.filter((k) => !draft.kbIds.includes(k.id));
+  const rt = draft.retrieval;
+  const hybridPct = Math.round(rt.vectorWeight * 100);
 
   return (
-    <div style={{ maxWidth: 900 }}>
-      {/* 头部 */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+    <div>
+      {/* 顶部行 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
         <Button size="small" onClick={() => navigate("/admin/applications")}>
           ← 返回
         </Button>
-        <div style={{ fontSize: 18, fontWeight: 600 }}>{detail.name}</div>
+        <span style={{ fontSize: 13, color: "rgba(0,0,0,.4)" }}>应用管理 /</span>
+        <span style={{ fontSize: 17, fontWeight: 600 }}>{detail.name}</span>
         {detail.productionVersion != null ? (
-          <Tag color="green">● 服务中 · v{detail.productionVersion}</Tag>
+          <Tag color="green" style={mono}>
+            ● 服务中 · v{detail.productionVersion}
+          </Tag>
         ) : (
           <Tag>还没上线</Tag>
         )}
         <div style={{ flex: 1 }} />
-        <Button onClick={() => setHistoryOpen(true)}>🕑 版本历史 {detail.versions.length}</Button>
+        <Button size="small" onClick={resetToProduction}>
+          ↺ 以线上版本重置草稿
+        </Button>
+        <Button size="small" onClick={() => setHistoryOpen(true)}>
+          🕑 版本历史 {detail.versions.length}
+        </Button>
+      </div>
+      <div
+        style={{ fontSize: 12.5, color: "rgba(0,0,0,.42)", marginBottom: 16, lineHeight: 1.6 }}
+      >
+        正在编辑基于 <b style={{ ...mono, color: "rgba(0,0,0,.6)" }}>v{editingVersion}</b> 的草稿 ·{" "}
+        <span style={{ color: dirty ? "#fa8c16" : "#389e0d" }}>
+          {dirty ? "有未保存修改" : "与该版本一致"}
+        </span>
+        。改完点「保存为新版本」；「上线这个版本」会先自动核对四个节点和知识库都没问题才对外服务。
       </div>
 
-      {editingVersion != null && (
-        <div style={{ fontSize: 13, color: "rgba(0,0,0,.55)", marginBottom: 12 }}>
-          正在编辑 <span style={mono}>v{editingVersion}</span>
-          {dirty && <span style={{ color: "#fa8c16" }}> · 有未保存修改</span>}
-        </div>
-      )}
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {/* 左栏 */}
+        <div style={{ flex: "1.3 1 460px", minWidth: 0, display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Prompt 配置 */}
+          <div style={cardStyle}>
+            <div style={cardHeadStyle}>Prompt 配置</div>
+            <div style={{ ...cardBodyStyle, display: "flex", flexDirection: "column", gap: 16 }}>
+              {PROMPT_NODES.map((node) => {
+                const n = draft.nodes[node];
+                const locked = n.freedom !== "custom";
+                return (
+                  <div key={node} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span
+                        style={{ fontSize: 13, fontWeight: 600, color: "rgba(0,0,0,.8)", width: 76, flex: "none" }}
+                      >
+                        {NODE_LABELS[node]}
+                      </span>
+                      <span style={{ fontSize: 11.5, color: "rgba(0,0,0,.42)", flex: 1 }}>
+                        {NODE_DESC[node]}
+                      </span>
+                    </div>
+                    <Select
+                      value={n.promptVersionId}
+                      onChange={(v) => patchNode(node, { promptVersionId: v })}
+                      style={{ width: "100%" }}
+                      options={promptOptions(candidatesByNode[node], n.promptVersionId)}
+                    />
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 14,
+                        flexWrap: "wrap",
+                        paddingLeft: 2,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>模型</span>
+                        <Select
+                          size="small"
+                          value={n.modelId}
+                          onChange={(v) => patchNode(node, { modelId: v })}
+                          style={{ width: 150 }}
+                          options={
+                            llmOptions.some((o) => o.value === n.modelId)
+                              ? llmOptions
+                              : [{ value: n.modelId, label: n.modelId }, ...llmOptions]
+                          }
+                        />
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>自由度</span>
+                        <Select
+                          size="small"
+                          value={n.freedom}
+                          onChange={(v) => setFreedom(node, v as Freedom)}
+                          style={{ width: 92 }}
+                          options={FREEDOM_OPTIONS}
+                        />
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 150 }}>
+                        <span style={{ fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>温度</span>
+                        <Slider
+                          min={0}
+                          max={2}
+                          step={0.01}
+                          disabled={locked}
+                          value={n.temperature}
+                          onChange={(v) => patchNode(node, { temperature: v })}
+                          style={{ flex: 1, margin: 0 }}
+                        />
+                        <span style={{ ...mono, fontSize: 11.5, color: "rgba(0,0,0,.6)", width: 30 }}>
+                          {n.temperature}
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 150 }}>
+                        <span style={{ fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>Top P</span>
+                        <Slider
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          disabled={locked}
+                          value={n.topP}
+                          onChange={(v) => patchNode(node, { topP: v })}
+                          style={{ flex: 1, margin: 0 }}
+                        />
+                        <span style={{ ...mono, fontSize: 11.5, color: "rgba(0,0,0,.6)", width: 30 }}>
+                          {n.topP}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
-      {/* 知识库 */}
-      <Card>
-        <SectionTitle>知识库</SectionTitle>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {kbs.map((k) => {
-            const on = draft.kbIds.includes(k.id);
-            return (
-              <div
-                key={k.id}
-                onClick={() => toggleKb(k.id)}
-                style={{
-                  fontSize: 13,
-                  lineHeight: "30px",
-                  height: 30,
-                  padding: "0 12px",
-                  borderRadius: 6,
-                  border: `1px solid ${on ? "#1677ff" : "#d9d9d9"}`,
-                  background: on ? "#e6f4ff" : "#fff",
-                  color: on ? "#1677ff" : "rgba(0,0,0,.65)",
-                  cursor: "pointer",
-                  userSelect: "none",
-                }}
-              >
-                {k.name}
-              </div>
-            );
-          })}
-          {/* 候选未加载出的已选 kb 兜底展示 */}
-          {draft.kbIds
-            .filter((id) => !kbs.some((k) => k.id === id))
-            .map((id) => (
-              <Tag key={id} color="blue" style={mono}>
-                {id}
-              </Tag>
-            ))}
-          {kbs.length === 0 && draft.kbIds.length === 0 && (
-            <span style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>暂无知识库</span>
-          )}
-        </div>
-      </Card>
-
-      {/* 四节点卡 */}
-      {PROMPT_NODES.map((node) => {
-        const nodeCfg = draft.nodes[node];
-        return (
-          <Card key={node}>
-            <SectionTitle>{NODE_LABELS[node]}</SectionTitle>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div>
-                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)", marginBottom: 4 }}>
-                  Prompt 版本
+          {/* 检索设置 */}
+          <div style={cardStyle}>
+            <div style={cardHeadStyle}>检索设置</div>
+            <div style={{ ...cardBodyStyle, display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12.5, color: "rgba(0,0,0,.55)" }}>召回数量</span>
+                  <InputNumber
+                    min={1}
+                    max={200}
+                    value={rt.topK}
+                    onChange={(v) =>
+                      typeof v === "number" &&
+                      patchRetrieval({ topK: v, topN: Math.min(rt.topN, v) })
+                    }
+                    style={{ width: 72 }}
+                  />
                 </div>
-                <Select
-                  value={nodeCfg.promptVersionId}
-                  onChange={(v) => patchNode(node, { promptVersionId: v })}
-                  style={{ width: "100%" }}
-                  options={promptOptions(candidatesByNode[node], nodeCfg.promptVersionId)}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12.5, color: "rgba(0,0,0,.55)" }}>精排后保留</span>
+                  <InputNumber
+                    min={1}
+                    max={Math.min(50, rt.topK)}
+                    value={rt.topN}
+                    onChange={(v) => typeof v === "number" && patchRetrieval({ topN: v })}
+                    style={{ width: 72 }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 12.5, color: "rgba(0,0,0,.7)" }}>
+                    同时用关键词 + 语义两种方式召回
+                  </div>
+                  <div style={{ fontSize: 11, color: "rgba(0,0,0,.4)", marginTop: 1 }}>
+                    关闭则只用语义（向量）召回
+                  </div>
+                </div>
+                <Switch
+                  checked={rt.hybridEnabled}
+                  onChange={(v) => patchRetrieval({ hybridEnabled: v })}
                 />
               </div>
-              <div>
-                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)", marginBottom: 4 }}>模型</div>
-                <Select
-                  value={nodeCfg.modelId}
-                  onChange={(v) => patchNode(node, { modelId: v })}
-                  style={{ width: "100%" }}
-                  options={
-                    llmOptions.some((o) => o.value === nodeCfg.modelId)
-                      ? llmOptions
-                      : [{ value: nodeCfg.modelId, label: nodeCfg.modelId }, ...llmOptions]
+              {rt.hybridEnabled && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 12.5, color: "rgba(0,0,0,.55)" }}>
+                      更偏向语义还是关键词
+                    </span>
+                    <span style={{ ...mono, fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>
+                      语义 {hybridPct}% · 关键词 {100 - hybridPct}%
+                    </span>
+                  </div>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={rt.vectorWeight}
+                    onChange={(v) => patchRetrieval({ vectorWeight: v })}
+                    style={{ margin: 0 }}
+                  />
+                </div>
+              )}
+
+              <div style={{ height: 1, background: "#f0f0f0" }} />
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ fontSize: 12.5, color: "rgba(0,0,0,.7)" }}>召回后再用模型精排一次</div>
+                <Switch
+                  checked={rt.rerankEnabled}
+                  onChange={(v) =>
+                    patchRetrieval(
+                      v
+                        ? { rerankEnabled: true, rerankThreshold: rt.rerankThreshold ?? 0.5 }
+                        : { rerankEnabled: false, rerankModelId: undefined, rerankThreshold: undefined },
+                    )
                   }
                 />
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>自由度</span>
-                <Radio.Group
-                  value={nodeCfg.freedom}
-                  onChange={(e) => setFreedom(node, e.target.value as Freedom)}
-                  optionType="button"
-                  options={(Object.keys(FREEDOM_LABEL) as Freedom[]).map((f) => ({
-                    value: f,
-                    label: FREEDOM_LABEL[f],
-                  }))}
-                />
-                {nodeCfg.freedom !== "custom" && (
-                  <span style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>
-                    温度 {nodeCfg.temperature} · Top P {nodeCfg.topP}
-                  </span>
-                )}
-              </div>
-              {nodeCfg.freedom === "custom" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingLeft: 4 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ fontSize: 12, color: "rgba(0,0,0,.55)", width: 48 }}>温度</span>
-                    <Slider
-                      min={0}
-                      max={2}
-                      step={0.01}
-                      value={nodeCfg.temperature}
-                      onChange={(v) => patchNode(node, { temperature: v })}
-                      style={{ flex: 1, margin: "0 8px" }}
+              {rt.rerankEnabled && (
+                <>
+                  <FieldRow label={<span style={{ fontSize: 12.5, color: "rgba(0,0,0,.55)" }}>精排模型</span>}>
+                    <Select
+                      value={rt.rerankModelId}
+                      onChange={(v) => patchRetrieval({ rerankModelId: v })}
+                      placeholder="选择 rerank 模型"
+                      style={{ flex: 1 }}
+                      options={rerankOptions}
                     />
-                    <span style={{ fontSize: 12, width: 36, textAlign: "right" }}>
-                      {nodeCfg.temperature}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ fontSize: 12, color: "rgba(0,0,0,.55)", width: 48 }}>Top P</span>
+                  </FieldRow>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 12.5, color: "rgba(0,0,0,.55)" }}>
+                        精排分数低于多少就不要了
+                      </span>
+                      <span style={{ ...mono, fontSize: 11.5, color: "rgba(0,0,0,.6)" }}>
+                        {rt.rerankThreshold ?? 0}
+                      </span>
+                    </div>
                     <Slider
                       min={0}
                       max={1}
                       step={0.01}
-                      value={nodeCfg.topP}
-                      onChange={(v) => patchNode(node, { topP: v })}
-                      style={{ flex: 1, margin: "0 8px" }}
+                      value={rt.rerankThreshold ?? 0}
+                      onChange={(v) => patchRetrieval({ rerankThreshold: v })}
+                      style={{ margin: 0 }}
                     />
-                    <span style={{ fontSize: 12, width: 36, textAlign: "right" }}>
-                      {nodeCfg.topP}
-                    </span>
+                  </div>
+                </>
+              )}
+
+              <div style={{ height: 1, background: "#f0f0f0" }} />
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 12.5, color: "rgba(0,0,0,.7)" }}>查不到答案时转人工</div>
+                  <div style={{ fontSize: 11, color: "rgba(0,0,0,.4)", marginTop: 1 }}>
+                    关闭则走「兜底」节点的话术回答
                   </div>
                 </div>
+                <Switch
+                  checked={draft.fallback.toHuman}
+                  onChange={(v) =>
+                    setDraft((prev) => (prev ? { ...prev, fallback: { toHuman: v } } : prev))
+                  }
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* 知识库 */}
+          <div style={cardStyle}>
+            <div style={cardHeadStyle}>知识库</div>
+            <div style={{ ...cardBodyStyle, display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <span
+                style={{ fontSize: 12.5, color: "rgba(0,0,0,.55)", width: 76, flex: "none", paddingTop: 4 }}
+              >
+                范围
+              </span>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                  {draft.kbIds.map((id) => {
+                    const k = kbs.find((x) => x.id === id);
+                    return (
+                      <Tag key={id} closable onClose={() => removeKb(id)} style={{ marginInlineEnd: 0 }}>
+                        {k?.name ?? id}
+                      </Tag>
+                    );
+                  })}
+                  <Tooltip title={availableKbs.length === 0 ? "已经全部添加了" : undefined}>
+                    <Button
+                      size="small"
+                      type="dashed"
+                      disabled={availableKbs.length === 0}
+                      onClick={() => setKbPickerOpen((o) => !o)}
+                    >
+                      + 添加知识库
+                    </Button>
+                  </Tooltip>
+                </div>
+                {kbPickerOpen && availableKbs.length > 0 && (
+                  <div
+                    style={{
+                      border: "1px solid #91caff",
+                      borderRadius: 8,
+                      background: "#fff",
+                      boxShadow: "0 8px 24px rgba(0,0,0,.1)",
+                      padding: 6,
+                      maxWidth: 280,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 2,
+                    }}
+                  >
+                    {availableKbs.map((k) => (
+                      <div
+                        key={k.id}
+                        onClick={() => addKb(k.id)}
+                        style={{
+                          padding: "7px 10px",
+                          borderRadius: 6,
+                          fontSize: 12.5,
+                          color: "rgba(0,0,0,.75)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {k.name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 右栏 */}
+        <div style={{ width: 280, flex: "none", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ ...cardStyle, padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(0,0,0,.8)" }}>上线</div>
+            <div style={{ fontSize: 12, color: "rgba(0,0,0,.5)", lineHeight: 1.7 }}>
+              {detail.productionVersion != null ? (
+                <>
+                  当前对外服务的是 <b style={{ ...mono, color: "rgba(0,0,0,.7)" }}>v{detail.productionVersion}</b>
+                  。上线这个版本后，用户马上会用到新的配置。
+                </>
+              ) : (
+                <>这个应用还没有版本上线。上线这个版本后即可对外服务。</>
               )}
             </div>
-          </Card>
-        );
-      })}
+            {saveErr && <Alert type="error" showIcon title={saveErr} />}
+            <Input
+              placeholder="版本说明（可选）"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+            />
+            <Button block disabled={!dirty} loading={saving} onClick={() => void save()}>
+              保存为新版本
+            </Button>
+            <Tooltip title="上线核对（ReleaseCheck）将在 M7b 开放">
+              <Button block type="primary" disabled>
+                上线这个版本
+              </Button>
+            </Tooltip>
+          </div>
 
-      {/* 检索设置 */}
-      <Card>
-        <SectionTitle>检索设置</SectionTitle>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)", width: 96 }}>召回数量 topK</span>
-            <Slider
-              min={1}
-              max={200}
-              value={draft.retrieval.topK}
-              onChange={(v) =>
-                patchRetrieval({ topK: v, topN: Math.min(draft.retrieval.topN, v) })
-              }
-              style={{ flex: 1, margin: "0 8px" }}
-            />
-            <span style={{ fontSize: 12, width: 36, textAlign: "right" }}>
-              {draft.retrieval.topK}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)", width: 96 }}>精排保留 topN</span>
-            <Slider
-              min={1}
-              max={Math.min(50, draft.retrieval.topK)}
-              value={draft.retrieval.topN}
-              onChange={(v) => patchRetrieval({ topN: v })}
-              style={{ flex: 1, margin: "0 8px" }}
-            />
-            <span style={{ fontSize: 12, width: 36, textAlign: "right" }}>
-              {draft.retrieval.topN}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Switch
-              checked={draft.retrieval.hybridEnabled}
-              onChange={(v) => patchRetrieval({ hybridEnabled: v })}
-            />
-            <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>混合召回</span>
-          </div>
-          {draft.retrieval.hybridEnabled && (
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)", width: 96 }}>语义权重</span>
-              <Slider
-                min={0}
-                max={1}
-                step={0.01}
-                value={draft.retrieval.vectorWeight}
-                onChange={(v) => patchRetrieval({ vectorWeight: v })}
-                style={{ flex: 1, margin: "0 8px" }}
-              />
-              <span style={{ fontSize: 12, width: 36, textAlign: "right" }}>
-                {draft.retrieval.vectorWeight}
-              </span>
+          <div style={{ ...cardStyle, padding: "14px 16px", display: "flex", gap: 9, alignItems: "flex-start" }}>
+            <span style={{ flex: "none", fontSize: 12, color: "rgba(0,0,0,.35)", marginTop: 1 }}>ⓘ</span>
+            <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.5)", lineHeight: 1.7 }}>
+              上线前会自动核对一遍：确认四个节点和知识库都配好了、能正常工作，有问题会直接告诉你（M7b 开放）。
             </div>
-          )}
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Switch
-              checked={draft.retrieval.rerankEnabled}
-              onChange={(v) =>
-                patchRetrieval(
-                  v
-                    ? { rerankEnabled: true }
-                    : { rerankEnabled: false, rerankModelId: undefined, rerankThreshold: undefined },
-                )
-              }
-            />
-            <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>精排（rerank）</span>
           </div>
-          {draft.retrieval.rerankEnabled && (
-            <>
-              <div>
-                <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)", marginBottom: 4 }}>
-                  精排模型
-                </div>
-                <Select
-                  value={draft.retrieval.rerankModelId}
-                  onChange={(v) => patchRetrieval({ rerankModelId: v })}
-                  placeholder="选择 rerank 模型"
-                  style={{ width: "100%" }}
-                  options={rerankOptions}
-                />
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)", width: 96 }}>相似度阈值</span>
-                <Slider
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={draft.retrieval.rerankThreshold ?? 0}
-                  onChange={(v) => patchRetrieval({ rerankThreshold: v })}
-                  style={{ flex: 1, margin: "0 8px" }}
-                />
-                <span style={{ fontSize: 12, width: 36, textAlign: "right" }}>
-                  {draft.retrieval.rerankThreshold ?? 0}
-                </span>
-              </div>
-            </>
-          )}
+
+          {/* 对话测试骨架 */}
+          <div style={{ ...cardStyle, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(0,0,0,.8)" }}>对话测试</div>
+            <Button block loading={chatBusy} onClick={() => void runChatTest()}>
+              运行对话测试
+            </Button>
+            {chatUnavailable && (
+              <Alert type="info" showIcon title="真实按版本对话测试将随 M8 编排上线" />
+            )}
+          </div>
         </div>
-      </Card>
-
-      {/* 兜底 */}
-      <Card>
-        <SectionTitle>兜底策略</SectionTitle>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Switch
-            checked={draft.fallback.toHuman}
-            onChange={(v) => setDraft((prev) => (prev ? { ...prev, fallback: { toHuman: v } } : prev))}
-          />
-          <span style={{ fontSize: 13, color: "rgba(0,0,0,.65)" }}>查不到答案时转人工</span>
-        </div>
-      </Card>
-
-      {/* 对话测试骨架 */}
-      <Card>
-        <SectionTitle>对话测试</SectionTitle>
-        <Button onClick={() => void runChatTest()} loading={chatBusy}>
-          运行对话测试
-        </Button>
-        {chatUnavailable && (
-          <Alert
-            style={{ marginTop: 10 }}
-            type="info"
-            showIcon
-            message="真实按版本对话测试将随 M8 编排上线"
-          />
-        )}
-      </Card>
-
-      {/* 底部操作 */}
-      {saveErr && <Alert type="error" showIcon message={saveErr} style={{ marginBottom: 12 }} />}
-      <Space>
-        <Input
-          placeholder="版本说明（可选）"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          style={{ width: 280 }}
-        />
-        <Button type="primary" disabled={!dirty} loading={saving} onClick={() => void save()}>
-          保存为新版本
-        </Button>
-        <Tooltip title="上线核对（ReleaseCheck）将在 M7b 开放">
-          <Button disabled>上线这个版本</Button>
-        </Tooltip>
-      </Space>
+      </div>
 
       {/* 版本历史抽屉 */}
-      <Drawer
-        title="版本历史"
-        open={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        width={420}
-      >
-        <Space direction="vertical" style={{ width: "100%" }}>
+      <Drawer title="版本历史" open={historyOpen} onClose={() => setHistoryOpen(false)} size={440}>
+        <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.4)", marginBottom: 12, lineHeight: 1.6 }}>
+          点「载入编辑」把这个版本的内容载入草稿；绿色 = 当前对外服务的版本。保存只会追加新版本，不改历史。
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {detail.versions.map((v) => {
             const serving = detail.productionConfigVersionId === v.id;
             const editing = basedOnVersionId === v.id;
@@ -635,37 +726,55 @@ export default function ApplicationDetailPage() {
               <div
                 key={v.id}
                 data-testid={`history-version-${v.version}`}
-                onClick={() => {
-                  loadVersionIntoEditor(v);
-                  setHistoryOpen(false);
-                }}
                 style={{
-                  border: `1px solid ${editing ? "#1677ff" : "#f0f0f0"}`,
-                  borderRadius: 8,
-                  padding: 12,
-                  cursor: "pointer",
+                  border: `1px solid ${editing ? "#91caff" : serving ? "#b7eb8f" : "#f0f0f0"}`,
+                  borderRadius: 9,
+                  padding: "11px 13px",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ ...mono, fontWeight: 600 }}>v{v.version}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+                  <span style={{ ...mono, fontSize: 13.5, fontWeight: 700 }}>v{v.version}</span>
                   {serving && <Tag color="green">服务中</Tag>}
                   {editing && <Tag color="blue">编辑中</Tag>}
+                  <div style={{ flex: 1 }} />
+                  <span style={{ fontSize: 12, color: "rgba(0,0,0,.4)" }}>
+                    {v.createdBy} · {formatDateTime(v.createdAt)}
+                  </span>
                 </div>
                 {v.note && (
-                  <div style={{ fontSize: 13, color: "rgba(0,0,0,.65)", marginTop: 4 }}>
+                  <div style={{ fontSize: 12.5, color: "rgba(0,0,0,.6)", lineHeight: 1.5, marginBottom: 6 }}>
                     {v.note}
                   </div>
                 )}
-                <div style={{ fontSize: 12, color: "rgba(0,0,0,.4)", marginTop: 4 }}>
-                  {v.createdBy} · {formatDateTime(v.createdAt)}
+                <div style={{ fontSize: 11, color: "rgba(0,0,0,.4)", marginBottom: 8 }}>
+                  知识库 {v.kbIds.length} · {v.nodes.reply.modelId ? "已配模型" : ""}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Button
+                    size="small"
+                    type={editing ? "default" : "primary"}
+                    ghost={!editing}
+                    onClick={() => {
+                      loadVersionIntoEditor(v);
+                      setHistoryOpen(false);
+                    }}
+                  >
+                    载入编辑
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      loadVersionIntoEditor(v);
+                      setHistoryOpen(false);
+                      void runChatTest();
+                    }}
+                  >
+                    对话测试
+                  </Button>
                 </div>
               </div>
             );
           })}
-        </Space>
-        <Divider />
-        <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>
-          点任一版本载入编辑；保存只会追加新版本，不会修改历史版本。
         </div>
       </Drawer>
     </div>
