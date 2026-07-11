@@ -127,14 +127,15 @@ function checkBraceSyntax(text: string): CompileIssue[] {
 
 // 字段归属检查：占位符定义与 extractVars 完全一致（\w+），非法内容视为普通文本。
 // 每个字段只报一次，顺序按正文首次出现。
+// 保留字段是全局「永不可引用」类：无论出现在哪个节点都报 RESERVED_FIELD（012 §5），
+// 不会被「别的节点的字段」分类抢走。
 function checkFields(text: string, node: PromptNode): CompileIssue[] {
   const contract = NODE_CONTRACTS[node];
   const legal = new Set(contract.templateFields);
-  const reserved = new Set(contract.reservedFields);
   const out: CompileIssue[] = [];
   for (const field of extractVars(text)) {
     if (legal.has(field)) continue;
-    if (reserved.has(field)) {
+    if (isReservedField(field)) {
       out.push({
         code: "RESERVED_FIELD",
         severity: "error",
@@ -167,12 +168,16 @@ function checkFields(text: string, node: PromptNode): CompileIssue[] {
   return out;
 }
 
-/** 字段归属其他节点时返回节点 key（templateFields 或 reservedFields 命中皆算） */
+/** 任一节点的保留字段命中即视为保留（全局不可引用类） */
+function isReservedField(field: string): boolean {
+  return PromptNodeSchema.options.some((key) => NODE_CONTRACTS[key].reservedFields.includes(field));
+}
+
+/** 字段是其他节点的可引用字段时返回节点 key（保留字段已在前一分支收口） */
 function findOwnerNode(field: string, exclude: PromptNode): PromptNode | undefined {
   for (const key of PromptNodeSchema.options) {
     if (key === exclude) continue;
-    const c = NODE_CONTRACTS[key];
-    if (c.templateFields.includes(field) || c.reservedFields.includes(field)) return key;
+    if (NODE_CONTRACTS[key].templateFields.includes(field)) return key;
   }
   return undefined;
 }

@@ -88,6 +88,13 @@ describe("compilePromptBody · 字段归属错误", () => {
     expect(r.issues.find((i) => i.code === "RESERVED_FIELD")?.field).toBe("citations");
   });
 
+  it("保留字段跨节点引用同样报 RESERVED_FIELD（全局不可引用类，非 FIELD_NOT_AVAILABLE）", () => {
+    const r1 = compilePromptBody("{availableRoutes}", "rewrite");
+    expect(r1.issues.find((i) => i.field === "availableRoutes")?.code).toBe("RESERVED_FIELD");
+    const r2 = compilePromptBody("{citations}", "fallback");
+    expect(r2.issues.find((i) => i.field === "citations")?.code).toBe("RESERVED_FIELD");
+  });
+
   it("引用其他节点字段报 FIELD_NOT_AVAILABLE_FOR_NODE，message 指明归属节点", () => {
     // retrievalContext 只属于 reply；在 rewrite 里引用应报错并说明
     const r = compilePromptBody("{query} {retrievalContext}", "rewrite");
@@ -176,24 +183,32 @@ describe("compilePromptBody · 顺序稳定性与 extractVars 兼容", () => {
 });
 
 describe("compilePromptBody · 跨节点表驱动", () => {
-  // 每个节点引用其余所有节点独有字段都必须报错——防字段表漂移
-  const others: Record<PromptNode, string[]> = {
+  // 每个节点引用其余节点的可引用字段 → FIELD_NOT_AVAILABLE_FOR_NODE（防字段表漂移）
+  const foreignTemplate: Record<PromptNode, string[]> = {
     rewrite: ["retrievalContext", "reason"],
     intent: ["retrievalContext", "reason"],
     reply: ["reason"],
     fallback: ["history", "retrievalContext"],
   };
-  it.each(Object.entries(others) as [PromptNode, string[]][])(
-    "%s 节点引用外部字段全部报错",
+  it.each(Object.entries(foreignTemplate) as [PromptNode, string[]][])(
+    "%s 节点引用外部可引用字段报 FIELD_NOT_AVAILABLE_FOR_NODE",
     (node, foreign) => {
       for (const f of foreign) {
         const r = compilePromptBody(`{${f}}`, node);
         expect(r.status).toBe("has_errors");
-        expect(
-          r.issues.some(
-            (i) => i.code === "FIELD_NOT_AVAILABLE_FOR_NODE" || i.code === "RESERVED_FIELD",
-          ),
-        ).toBe(true);
+        expect(r.issues.find((i) => i.field === f)?.code).toBe("FIELD_NOT_AVAILABLE_FOR_NODE");
+      }
+    },
+  );
+
+  // 任何节点引用任何保留字段 → 一律 RESERVED_FIELD
+  it.each(PromptNodeSchema.options.map((n) => [n] as const))(
+    "%s 节点引用保留字段一律报 RESERVED_FIELD",
+    (node) => {
+      for (const reserved of ["availableRoutes", "citations"]) {
+        const r = compilePromptBody(`{${reserved}}`, node);
+        expect(r.status).toBe("has_errors");
+        expect(r.issues.find((i) => i.field === reserved)?.code).toBe("RESERVED_FIELD");
       }
     },
   );
