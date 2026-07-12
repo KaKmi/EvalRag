@@ -13,8 +13,9 @@ export interface FingerprintInput {
   nodeParams: unknown;
   retrievalParams: unknown;
   fallbackParams: unknown;
-  // 应用固定的 KB 集合 + 各 KB 检查时的 active version
-  kbs: Array<{ kbId: string; activeVersion: number }>;
+  // 应用固定的 KB 集合 + 各 KB 检查时的 active version + 意图绑定
+  // （014 P1-②：绑定决定路由候选集，check→publish 窗口内改绑定必须使 fingerprint 失配）
+  kbs: Array<{ kbId: string; activeVersion: number; intentKey: string | null }>;
 }
 
 /** 规范化（数组按稳定键排序，键顺序固定）→ JSON → sha256 十六进制。 */

@@ -17,8 +17,8 @@ const base: FingerprintInput = {
   retrievalParams: { topK: 20 },
   fallbackParams: { toHuman: true },
   kbs: [
-    { kbId: "kb-b", activeVersion: 2 },
-    { kbId: "kb-a", activeVersion: 1 },
+    { kbId: "kb-b", activeVersion: 2, intentKey: null },
+    { kbId: "kb-a", activeVersion: 1, intentKey: "SUPPORT" },
   ],
 };
 
@@ -36,11 +36,29 @@ describe("computeFingerprint", () => {
     const changed = {
       ...base,
       kbs: [
-        { kbId: "kb-a", activeVersion: 9 },
-        { kbId: "kb-b", activeVersion: 2 },
+        { kbId: "kb-a", activeVersion: 9, intentKey: "SUPPORT" },
+        { kbId: "kb-b", activeVersion: 2, intentKey: null },
       ],
     };
     expect(computeFingerprint(changed)).not.toBe(computeFingerprint(base));
+  });
+  it("a changed KB intent binding changes the hash（014 P1-②：check→publish 窗口改绑定必失配）", () => {
+    const rebindOther = {
+      ...base,
+      kbs: [
+        { kbId: "kb-b", activeVersion: 2, intentKey: null },
+        { kbId: "kb-a", activeVersion: 1, intentKey: "FEEDBACK" },
+      ],
+    };
+    const unbind = {
+      ...base,
+      kbs: [
+        { kbId: "kb-b", activeVersion: 2, intentKey: null },
+        { kbId: "kb-a", activeVersion: 1, intentKey: null },
+      ],
+    };
+    expect(computeFingerprint(rebindOther)).not.toBe(computeFingerprint(base));
+    expect(computeFingerprint(unbind)).not.toBe(computeFingerprint(base));
   });
   it("a changed provider revision changes the hash", () => {
     const changed = {

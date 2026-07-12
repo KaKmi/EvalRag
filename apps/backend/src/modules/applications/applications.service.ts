@@ -486,7 +486,11 @@ export class ApplicationsService {
       nodeParams: version.nodeParams,
       retrievalParams: version.retrievalParams,
       fallbackParams: version.fallbackParams,
-      kbs: ctx.kbRows.map((k) => ({ kbId: k.id, activeVersion: k.activeVersion })),
+      kbs: ctx.kbRows.map((k) => ({
+        kbId: k.id,
+        activeVersion: k.activeVersion,
+        intentKey: k.intentKey ?? null,
+      })),
     };
   }
 
