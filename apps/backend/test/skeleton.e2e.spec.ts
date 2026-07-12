@@ -21,7 +21,6 @@ import {
   ApplicationConfigVersionSchema,
   ApplicationDetailSchema,
   ApplicationSchema,
-  ChatStreamEventSchema,
   ChunkPageResponseSchema,
   ConversationSchema,
   DocumentLifecycleResponseSchema,
@@ -2669,34 +2668,34 @@ describe("M2 domain skeleton", () => {
     });
   });
 
+  // M8 T1：chat 接真实 RAG 编排（OrchestrationService）。e2e 在此层验证 DI 接线 +
+  // 鉴权 + ZodValidationPipe + resolvePublic 异常→404 的真实链路（编排真被调用、异常在写
+  // event-stream 头前冒泡给 Nest 过滤器）。happy-path（token/citation/done 事件序列合成）
+  // 由 orchestration.service.spec.ts（9 例全链路）+ chat.orchestration.spec.ts（5 例真实
+  // SSE 字节 + ChatStreamEventSchema.parse）覆盖——published 应用的全量 seed 依赖链过长
+  // （配置版本→4 节点 Prompt/Model→检索），本 DB-free harness 不重复装配（plan Task 8 最小集）。
   describe("chat SSE (AC 9)", () => {
-    it("POST /api/chat → text/event-stream，事件可被 ChatStreamEventSchema parse", async () => {
+    it("未上线/不存在应用 → 404（编排 resolvePublic 冒泡，未写 event-stream 头）", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/chat")
         .set(auth())
-        .send({ agentId: "aftersale", query: "怎么退货" })
-        .expect(200);
-      expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
-      const text: string = res.text;
-      const dataLines = text
-        .split("\n\n")
-        .map((s) => s.trim())
-        .filter((s) => s.startsWith("data: "))
-        .map((s) => s.slice("data: ".length));
-      expect(dataLines.length).toBeGreaterThanOrEqual(3); // token×N + citation + done
-      const events = dataLines.map((line) => JSON.parse(line));
-      for (const e of events) expect(() => ChatStreamEventSchema.parse(e)).not.toThrow();
-      const types = events.map((e: { type: string }) => e.type);
-      expect(types).toContain("token");
-      expect(types).toContain("citation");
-      expect(types[types.length - 1]).toBe("done");
+        .send({ agentId: "not-published", query: "怎么退货" })
+        .expect(404);
+      // 异常在写响应头之前冒泡：客户端收到干净的 JSON 错误，而非半截 event-stream
+      expect(res.headers["content-type"]).not.toMatch(/text\/event-stream/);
     });
-    it("POST /api/chat 非法 body → 400", async () => {
+    it("POST /api/chat 非法 body → 400（ZodValidationPipe）", async () => {
       await request(app.getHttpServer())
         .post("/api/chat")
         .set(auth())
         .send({ agentId: "" })
         .expect(400);
+    });
+    it("POST /api/chat 无 token → 401", async () => {
+      await request(app.getHttpServer())
+        .post("/api/chat")
+        .send({ agentId: "not-published", query: "q" })
+        .expect(401);
     });
   });
 

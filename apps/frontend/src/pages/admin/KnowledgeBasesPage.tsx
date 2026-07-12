@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { Alert, Button, Empty, Form, Input, Modal, Select, Spin } from "antd";
-import type {
-  KnowledgeBase,
-  ModelProvider,
-  ProcessingProfileDescriptor,
+import {
+  INTENT_TABLE,
+  type IntentKey,
+  type KnowledgeBase,
+  type ModelProvider,
+  type ProcessingProfileDescriptor,
 } from "@codecrush/contracts";
 import {
   createKnowledgeBase,
@@ -48,6 +50,8 @@ interface CreateForm {
   desc: string;
   processingProfileId: string;
   embeddingModelId: string;
+  // 014 D2：绑定业务意图（不绑=通用库，所有意图都会检索）。undefined/null = 未绑定。
+  intentKey?: IntentKey | null;
 }
 
 const emptyForm: CreateForm = {
@@ -55,6 +59,7 @@ const emptyForm: CreateForm = {
   desc: "",
   processingProfileId: "general-v1",
   embeddingModelId: "",
+  intentKey: null,
 };
 
 export default function KnowledgeBasesPage() {
@@ -147,6 +152,7 @@ export default function KnowledgeBasesPage() {
         processingProfileId: profile.id,
         processingProfileVersion: profile.version,
         embeddingModelId: values.embeddingModelId,
+        intentKey: values.intentKey ?? null,
       });
       setCreateOpen(false);
       await load();
@@ -431,6 +437,18 @@ export default function KnowledgeBasesPage() {
               disabled={noModels}
               placeholder="（无可用模型）"
               options={embeddingModels.map((m) => ({ label: m.name, value: m.id }))}
+            />
+          </Form.Item>
+
+          <Form.Item
+            label="绑定意图（可选）"
+            name="intentKey"
+            extra="不绑定 = 通用库，所有意图都会检索它；绑定后，仅命中该意图的问题会检索它。"
+          >
+            <Select
+              allowClear
+              placeholder="不绑定（通用库，所有意图都会检索）"
+              options={INTENT_TABLE.map((c) => ({ label: c.label, value: c.key }))}
             />
           </Form.Item>
 
