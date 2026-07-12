@@ -1,5 +1,5 @@
 import { buildRetrievalRequests, mergeHits } from "../src/modules/chat/retrieval-mapping";
-import type { RetrievalHit } from "@codecrush/contracts";
+import type { ApplicationRetrievalParams, RetrievalHit } from "@codecrush/contracts";
 
 function hit(chunkId: string, finalScore: number): RetrievalHit {
   return {
@@ -26,7 +26,7 @@ describe("buildRetrievalRequests", () => {
         hybridEnabled: true,
         vectorWeight: 0.7,
         rerankEnabled: false,
-      } as any,
+      } satisfies ApplicationRetrievalParams,
     });
     expect(reqs).toHaveLength(1);
     expect(reqs[0]).toMatchObject({
@@ -57,7 +57,7 @@ describe("buildRetrievalRequests", () => {
         rerankEnabled: true,
         rerankModelId: "rr",
         rerankThreshold: 0.5,
-      } as any,
+      } satisfies ApplicationRetrievalParams,
     });
     expect(reqs).toHaveLength(2);
     expect(reqs[0]).toMatchObject({ kbId: "kb_a", rerankModelId: "rr", rerankThreshold: 0.5 });
