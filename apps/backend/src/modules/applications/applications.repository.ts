@@ -1,9 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
   applicationConfigVersionKbs,
+  applicationConfigVersionTags,
   applicationConfigVersions,
   applications,
   type ApplicationConfigVersionRow,
@@ -181,5 +182,92 @@ export class ApplicationsRepository {
       node: string;
       prompt_version_id: string;
     }[];
+  }
+
+  // —— M7b 自定义命名标签（照抄 012 prompt_version_tags 范式，归属 applications 域）——
+
+  /** 批量取多应用的标签名（列表「标识」列，一次查询防 N+1） */
+  async findTagNamesByAppIds(appIds: string[]): Promise<Map<string, string[]>> {
+    if (appIds.length === 0) return new Map();
+    const rows = await this.db
+      .select({
+        applicationId: applicationConfigVersionTags.applicationId,
+        name: applicationConfigVersionTags.name,
+      })
+      .from(applicationConfigVersionTags)
+      .where(inArray(applicationConfigVersionTags.applicationId, appIds))
+      .orderBy(asc(applicationConfigVersionTags.name));
+    const map = new Map<string, string[]>();
+    for (const r of rows) map.set(r.applicationId, [...(map.get(r.applicationId) ?? []), r.name]);
+    return map;
+  }
+
+  /** 标签 + 所指版本号（PUT/GET tags 响应形状、「管理标识」弹窗） */
+  async findTagsWithVersion(
+    appId: string,
+  ): Promise<{ name: string; versionId: string; version: number }[]> {
+    return this.db
+      .select({
+        name: applicationConfigVersionTags.name,
+        versionId: applicationConfigVersionTags.configVersionId,
+        version: applicationConfigVersions.version,
+      })
+      .from(applicationConfigVersionTags)
+      .innerJoin(
+        applicationConfigVersions,
+        eq(applicationConfigVersionTags.configVersionId, applicationConfigVersions.id),
+      )
+      .where(eq(applicationConfigVersionTags.applicationId, appId))
+      .orderBy(asc(applicationConfigVersionTags.name));
+  }
+
+  // 排他移动：一条原子 UPSERT，冲突目标是 (application_id, lower(name)) 表达式唯一索引。
+  // 并发移动在行锁上天然串行；跨应用版本被复合 FK 直接 23503 拒绝（service 转 404）。
+  async upsertTag(appId: string, versionId: string, name: string, actor: string): Promise<void> {
+    await this.db.execute(sql`
+      INSERT INTO ${applicationConfigVersionTags} (application_id, config_version_id, name, created_by)
+      VALUES (${appId}, ${versionId}, ${name}, ${actor})
+      ON CONFLICT (application_id, lower(name))
+      DO UPDATE SET config_version_id = excluded.config_version_id,
+                    created_at = now(),
+                    created_by = excluded.created_by
+    `);
+  }
+
+  /** 摘除标签；返回删除行数（0 = 标签不存在）。name 已在 service 边界归一小写。 */
+  async deleteTag(appId: string, name: string): Promise<number> {
+    const rows = await this.db
+      .delete(applicationConfigVersionTags)
+      .where(
+        and(
+          eq(applicationConfigVersionTags.applicationId, appId),
+          eq(applicationConfigVersionTags.name, name),
+        ),
+      )
+      .returning({ id: applicationConfigVersionTags.id });
+    return rows.length;
+  }
+
+  async countTags(appId: string): Promise<number> {
+    const rows = await this.db
+      .select({ c: count() })
+      .from(applicationConfigVersionTags)
+      .where(eq(applicationConfigVersionTags.applicationId, appId));
+    return rows[0]?.c ?? 0;
+  }
+
+  /** cap 校验只对新名放行：已存在同名（大小写不敏感）= 移动，不占额度 */
+  async tagExists(appId: string, lowerName: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ id: applicationConfigVersionTags.id })
+      .from(applicationConfigVersionTags)
+      .where(
+        and(
+          eq(applicationConfigVersionTags.applicationId, appId),
+          sql`lower(${applicationConfigVersionTags.name}) = ${lowerName}`,
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 }

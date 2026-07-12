@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Req,
 } from "@nestjs/common";
@@ -15,12 +16,14 @@ import { createZodDto } from "nestjs-zod";
 import {
   CreateApplicationConfigVersionRequestSchema,
   CreateApplicationRequestSchema,
+  MoveApplicationTagRequestSchema,
   PromptUsageQuerySchema,
   UpdateApplicationRequestSchema,
   type Application,
   type ApplicationChatResult,
   type ApplicationConfigVersion,
   type ApplicationDetail,
+  type ApplicationTag,
   type PromptUsageEntry,
 } from "@codecrush/contracts";
 import type { AuthenticatedUser } from "../../platform/security/authenticated-user";
@@ -28,6 +31,7 @@ import { ApplicationsService } from "./applications.service";
 class CreateApplicationDto extends createZodDto(CreateApplicationRequestSchema) {}
 class CreateVersionDto extends createZodDto(CreateApplicationConfigVersionRequestSchema) {}
 class UpdateApplicationDto extends createZodDto(UpdateApplicationRequestSchema) {}
+class MoveApplicationTagDto extends createZodDto(MoveApplicationTagRequestSchema) {}
 type AuthedRequest = { user: AuthenticatedUser };
 @Controller("applications")
 export class ApplicationsController {
@@ -82,5 +86,23 @@ export class ApplicationsController {
     @Param("versionId") versionId: string,
   ): Promise<ApplicationChatResult> {
     return this.service.tryVersionChat(id, versionId);
+  }
+
+  // —— M7b 自定义命名标签（production 走 PUT /production 受门禁流程，不经这里）——
+  @Get(":id/config-version-tags") listTags(@Param("id") id: string): Promise<ApplicationTag[]> {
+    return this.service.listTags(id);
+  }
+  @Put(":id/config-version-tags") @HttpCode(200) moveTag(
+    @Param("id") id: string,
+    @Body() body: MoveApplicationTagDto,
+    @Req() req: AuthedRequest,
+  ): Promise<ApplicationTag[]> {
+    return this.service.moveTag(id, body.name, body.versionId, req.user.email);
+  }
+  @Delete(":id/config-version-tags/:name") @HttpCode(204) removeTag(
+    @Param("id") id: string,
+    @Param("name") name: string,
+  ): Promise<void> {
+    return this.service.removeTag(id, name);
   }
 }

@@ -129,6 +129,7 @@ describe("application contracts", () => {
       productionConfigVersionId: null,
       latestVersion: 1,
       versionCount: 1,
+      tags: [],
       createdAt: "2026-07-11T00:00:00.000Z",
       updatedAt: "2026-07-11T00:00:00.000Z",
       updatedBy: "admin",

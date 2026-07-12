@@ -646,6 +646,13 @@ const insertAppVersion = (
   return version;
 };
 
+const inMemoryAppTags: {
+  applicationId: string;
+  configVersionId: string;
+  name: string;
+  createdBy: string;
+}[] = [];
+
 const inMemoryApplicationsRepo: Partial<ApplicationsRepository> = {
   findApplications: async () => inMemoryApplications.map(toAppListRow),
   findApplicationById: async (id: string) => {
@@ -752,6 +759,44 @@ const inMemoryApplicationsRepo: Partial<ApplicationsRepository> = {
     }
     return rows;
   },
+  // M7b S2 自定义标签（in-memory）
+  findTagNamesByAppIds: async (appIds: string[]) => {
+    const map = new Map<string, string[]>();
+    for (const t of inMemoryAppTags)
+      if (appIds.includes(t.applicationId))
+        map.set(t.applicationId, [...(map.get(t.applicationId) ?? []), t.name]);
+    return map;
+  },
+  findTagsWithVersion: async (appId: string) =>
+    inMemoryAppTags
+      .filter((t) => t.applicationId === appId)
+      .map((t) => ({
+        name: t.name,
+        versionId: t.configVersionId,
+        version: inMemoryAppVersions.find((v) => v.id === t.configVersionId)?.version ?? 0,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  upsertTag: async (appId: string, versionId: string, name: string, actor: string) => {
+    // 复合 FK 归属：拒绝指向别应用版本（对齐 DB 23503）
+    const v = inMemoryAppVersions.find((x) => x.id === versionId);
+    if (!v || v.applicationId !== appId) throw pgError("23503");
+    const existing = inMemoryAppTags.find(
+      (t) => t.applicationId === appId && t.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (existing) existing.configVersionId = versionId;
+    else inMemoryAppTags.push({ applicationId: appId, configVersionId: versionId, name, createdBy: actor });
+  },
+  deleteTag: async (appId: string, name: string) => {
+    const before = inMemoryAppTags.length;
+    for (let i = inMemoryAppTags.length - 1; i >= 0; i--)
+      if (inMemoryAppTags[i].applicationId === appId && inMemoryAppTags[i].name === name)
+        inMemoryAppTags.splice(i, 1);
+    return before - inMemoryAppTags.length;
+  },
+  countTags: async (appId: string) =>
+    inMemoryAppTags.filter((t) => t.applicationId === appId).length,
+  tagExists: async (appId: string, lowerName: string) =>
+    inMemoryAppTags.some((t) => t.applicationId === appId && t.name.toLowerCase() === lowerName),
 };
 
 const inMemoryBlobs = new Map<string, Buffer>();
@@ -1716,6 +1761,83 @@ describe("M2 domain skeleton", () => {
         .set(auth())
         .send({ ...validCreate(), name: body.name })
         .expect(409);
+    });
+
+    it("config-version-tags（M7b）：排他移动 / 标识列 / 保留字拒绝 / 摘除 / 跨应用 404", async () => {
+      const created = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(validCreate())
+          .expect(201)
+      ).body;
+      const appId = created.id as string;
+      const v1 = created.versions[0].id as string;
+      const v2 = (
+        await request(app.getHttpServer())
+          .post(`/api/applications/${appId}/config-versions`)
+          .set(auth())
+          .send({ config: validConfig() })
+          .expect(201)
+      ).body.id as string;
+
+      // 打 qa1 → v1
+      let tags = (
+        await request(app.getHttpServer())
+          .put(`/api/applications/${appId}/config-version-tags`)
+          .set(auth())
+          .send({ name: "qa1", versionId: v1 })
+          .expect(200)
+      ).body;
+      expect(tags).toContainEqual({ name: "qa1", versionId: v1, version: 1 });
+
+      // 排他移动 qa1 → v2（同名唯一，从 v1 移到 v2）
+      tags = (
+        await request(app.getHttpServer())
+          .put(`/api/applications/${appId}/config-version-tags`)
+          .set(auth())
+          .send({ name: "QA1", versionId: v2 })
+          .expect(200)
+      ).body;
+      expect(tags).toHaveLength(1);
+      expect(tags[0]).toMatchObject({ name: "qa1", versionId: v2 });
+
+      // 列表「标识」列含 qa1
+      const listed = (
+        await request(app.getHttpServer()).get("/api/applications").set(auth()).expect(200)
+      ).body.find((a: { id: string }) => a.id === appId);
+      expect(listed.tags).toContain("qa1");
+
+      // 保留字 production/v → 契约 refine 拒绝（400）；不走标签路径
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/config-version-tags`)
+        .set(auth())
+        .send({ name: "production", versionId: v2 })
+        .expect(400);
+
+      // 摘除（大小写不敏感）→ 204；再摘不存在 → 404
+      await request(app.getHttpServer())
+        .delete(`/api/applications/${appId}/config-version-tags/qa1`)
+        .set(auth())
+        .expect(204);
+      await request(app.getHttpServer())
+        .delete(`/api/applications/${appId}/config-version-tags/qa1`)
+        .set(auth())
+        .expect(404);
+
+      // 跨应用版本 → 404（复合 FK 归属）
+      const other = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(validCreate())
+          .expect(201)
+      ).body;
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/config-version-tags`)
+        .set(auth())
+        .send({ name: "qa2", versionId: other.versions[0].id })
+        .expect(404);
     });
 
     it("POST / kbIds 空 → 400；引用不存在 prompt version → 404；node 不匹配 → 400", async () => {

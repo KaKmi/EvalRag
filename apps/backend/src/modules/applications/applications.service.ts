@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from "@nestjs/common";
 import type {
   Application,
@@ -10,11 +11,15 @@ import type {
   ApplicationConfigFields,
   ApplicationConfigVersion,
   ApplicationDetail,
+  ApplicationTag,
   CreateApplicationConfigVersionRequest,
   CreateApplicationRequest,
   PromptUsageEntry,
   UpdateApplicationRequest,
 } from "@codecrush/contracts";
+
+const APPLICATION_TAG_CAP = 20;
+const APPLICATION_TAG_RESERVED = ["production", "v"];
 import { KnowledgeBasesService } from "../knowledge-bases/knowledge-bases.service";
 import { ModelsService } from "../models/models.service";
 import { PromptsService } from "../prompts/prompts.service";
@@ -32,14 +37,19 @@ export class ApplicationsService {
     private readonly prompts: PromptsService,
   ) {}
   async list(): Promise<Application[]> {
-    return Promise.all((await this.repo.findApplications()).map((r) => this.toApplication(r)));
+    const rows = await this.repo.findApplications();
+    const tagsByApp = await this.repo.findTagNamesByAppIds(rows.map((r) => r.id));
+    return rows.map((r) => this.toApplication(r, tagsByApp.get(r.id) ?? []));
   }
   async getDetail(id: string): Promise<ApplicationDetail> {
     const app = await this.mustFind(id);
-    const versions = await this.repo.findVersions(id);
+    const [versions, tagsByApp] = await Promise.all([
+      this.repo.findVersions(id),
+      this.repo.findTagNamesByAppIds([id]),
+    ]);
     const kbIds = await this.repo.findKbIdsByVersionIds(versions.map((v) => v.id));
     return {
-      ...(await this.toApplication(app)),
+      ...this.toApplication(app, tagsByApp.get(id) ?? []),
       versions: await Promise.all(versions.map((v) => this.toVersion(v, kbIds.get(v.id) ?? []))),
     };
   }
@@ -94,7 +104,51 @@ export class ApplicationsService {
       throw e;
     }
     if (!updated) throw new NotFoundException(`application ${id} not found`);
-    return this.toApplication(await this.mustFind(id));
+    const row = await this.mustFind(id);
+    const tagsByApp = await this.repo.findTagNamesByAppIds([id]);
+    return this.toApplication(row, tagsByApp.get(id) ?? []);
+  }
+
+  // —— M7b 自定义命名标签（production 走 §S5 受门禁 CAS，不经此路径）——
+  async moveTag(
+    id: string,
+    name: string,
+    versionId: string,
+    actor: string,
+  ): Promise<ApplicationTag[]> {
+    await this.mustFind(id);
+    // 契约 refine 已前置拒绝；service 二次防（直接调用方）
+    if (APPLICATION_TAG_RESERVED.includes(name))
+      throw new BadRequestException(`${name} 是保留字，不能作自定义标签`);
+    const v = await this.repo.findVersionById(versionId);
+    if (!v || v.applicationId !== id)
+      throw new NotFoundException(`version ${versionId} 不存在或不属于该应用`);
+    // 20 上限只对新名；移动已存在标签（upsert 到别版本）不占额度
+    if (
+      !(await this.repo.tagExists(id, name)) &&
+      (await this.repo.countTags(id)) >= APPLICATION_TAG_CAP
+    )
+      throw new UnprocessableEntityException(`自定义标签数已达上限 ${APPLICATION_TAG_CAP}`);
+    try {
+      await this.repo.upsertTag(id, versionId, name, actor);
+    } catch (e) {
+      // 复合 FK 兜底并发窗口（预检后版本被删/换主）→ 23503 转 404
+      if (pgCode(e) === "23503")
+        throw new NotFoundException(`version ${versionId} 不存在或不属于该应用`);
+      throw e;
+    }
+    return this.repo.findTagsWithVersion(id);
+  }
+
+  async removeTag(id: string, rawName: string): Promise<void> {
+    await this.mustFind(id);
+    if ((await this.repo.deleteTag(id, rawName.toLowerCase())) === 0)
+      throw new NotFoundException(`标签 ${rawName} 不存在`);
+  }
+
+  async listTags(id: string): Promise<ApplicationTag[]> {
+    await this.mustFind(id);
+    return this.repo.findTagsWithVersion(id);
   }
   async delete(id: string): Promise<void> {
     if ((await this.repo.deleteApplication(id)) === 0)
@@ -213,7 +267,7 @@ export class ApplicationsService {
       throw new NotFoundException(`version ${id} not found`);
     return row;
   }
-  private async toApplication(row: ApplicationListRow): Promise<Application> {
+  private toApplication(row: ApplicationListRow, tags: string[]): Application {
     return {
       id: row.id,
       slug: row.slug,
@@ -224,6 +278,7 @@ export class ApplicationsService {
       productionConfigVersionId: row.productionConfigVersionId,
       latestVersion: row.latestVersion,
       versionCount: row.versionCount,
+      tags,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
       updatedBy: row.updatedBy,

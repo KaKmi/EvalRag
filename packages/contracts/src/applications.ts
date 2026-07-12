@@ -72,6 +72,8 @@ export const ApplicationSchema = z.strictObject({
   productionConfigVersionId: z.string().min(1).nullable(),
   latestVersion: z.number().int().positive(),
   versionCount: z.number().int().positive(),
+  // M7b：该应用携带的自定义命名锚点标签（列表「标识」列；不含 production 保留字）
+  tags: z.array(z.string()),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1),

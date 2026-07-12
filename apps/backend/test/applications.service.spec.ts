@@ -1,4 +1,9 @@
-import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+  UnprocessableEntityException,
+} from "@nestjs/common";
 import { ApplicationsService } from "../src/modules/applications/applications.service";
 
 const now = new Date("2026-07-11T00:00:00.000Z");
@@ -78,6 +83,12 @@ function service(overrides: Record<string, unknown> = {}) {
     createApplicationWithV1: jest.fn(async () => ({ application: { id: "a1" }, version })),
     insertVersion: jest.fn(async () => version),
     findPromptUsage: jest.fn(async () => []),
+    findTagNamesByAppIds: jest.fn(async () => new Map<string, string[]>()),
+    findTagsWithVersion: jest.fn(async () => [{ name: "qa1", versionId: "v1", version: 1 }]),
+    upsertTag: jest.fn(async () => undefined),
+    deleteTag: jest.fn(async () => 1),
+    countTags: jest.fn(async () => 0),
+    tagExists: jest.fn(async () => false),
     ...overrides,
   };
   const kbs = { findByIds: jest.fn(async () => [{ id: "kb", embeddingModelId: "embed" }]) };
@@ -168,5 +179,47 @@ describe("ApplicationsService", () => {
     const { app } = service(repo);
     await app.updateBase("a1", { slug: "rogue" } as never, "u");
     expect(repo.updateBase).toHaveBeenCalledWith("a1", { updatedBy: "u" });
+  });
+
+  // —— M7b S2 自定义标签 ——
+  it("moves a custom tag exclusively and returns the tag list", async () => {
+    const { app, repo } = service();
+    const tags = await app.moveTag("a1", "qa1", "v1", "u");
+    expect(repo.upsertTag).toHaveBeenCalledWith("a1", "v1", "qa1", "u");
+    expect(tags).toEqual([{ name: "qa1", versionId: "v1", version: 1 }]);
+  });
+  it("rejects reserved words production/v at the service boundary", async () => {
+    const { app, repo } = service();
+    await expect(app.moveTag("a1", "production", "v1", "u")).rejects.toBeInstanceOf(BadRequestException);
+    await expect(app.moveTag("a1", "v", "v1", "u")).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsertTag).not.toHaveBeenCalled();
+  });
+  it("rejects a 21st NEW tag but allows moving an existing tag past the cap", async () => {
+    const capped = service({ countTags: jest.fn(async () => 20), tagExists: jest.fn(async () => false) });
+    await expect(capped.app.moveTag("a1", "qa21", "v1", "u")).rejects.toBeInstanceOf(
+      UnprocessableEntityException,
+    );
+    expect(capped.repo.upsertTag).not.toHaveBeenCalled();
+    const moving = service({ countTags: jest.fn(async () => 20), tagExists: jest.fn(async () => true) });
+    await expect(moving.app.moveTag("a1", "qa1", "v2", "u")).resolves.toBeDefined();
+    expect(moving.repo.upsertTag).toHaveBeenCalled();
+  });
+  it("404s when tagging a version owned by another application", async () => {
+    const { app } = service({
+      findVersionById: jest.fn(async () => ({ ...version, applicationId: "other" })),
+    });
+    await expect(app.moveTag("a1", "qa1", "v1", "u")).rejects.toBeInstanceOf(NotFoundException);
+  });
+  it("maps a concurrent composite-FK violation (23503) to 404", async () => {
+    const fkErr = Object.assign(new Error("fk"), { code: "23503" });
+    const { app } = service({ upsertTag: jest.fn(async () => { throw fkErr; }) });
+    await expect(app.moveTag("a1", "qa1", "v1", "u")).rejects.toBeInstanceOf(NotFoundException);
+  });
+  it("removes a tag case-insensitively and 404s when absent", async () => {
+    const { app, repo } = service();
+    await app.removeTag("a1", "QA1");
+    expect(repo.deleteTag).toHaveBeenCalledWith("a1", "qa1");
+    const absent = service({ deleteTag: jest.fn(async () => 0) });
+    await expect(absent.app.removeTag("a1", "nope")).rejects.toBeInstanceOf(NotFoundException);
   });
 });
