@@ -113,6 +113,13 @@
       "when": 1783861195337,
       "tag": "0015_steady_arclight",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1783862407209,
+      "tag": "0016_early_jackpot",
+      "breakpoints": true
     }
   ]
 }

@@ -7,17 +7,17 @@ export class ConversationsController {
   constructor(private readonly conversationsService: ConversationsService) {}
 
   @Get()
-  list(): Conversation[] {
+  async list(): Promise<Conversation[]> {
     return this.conversationsService.list();
   }
 
   @Get(":id")
-  get(@Param("id") id: string): Conversation {
+  async get(@Param("id") id: string): Promise<Conversation> {
     return this.conversationsService.get(id);
   }
 
   @Get(":id/messages")
-  listMessages(@Param("id") id: string): Message[] {
+  async listMessages(@Param("id") id: string): Promise<Message[]> {
     return this.conversationsService.listMessages(id);
   }
 }
