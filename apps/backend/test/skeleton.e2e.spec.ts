@@ -654,11 +654,13 @@ const inMemoryAppTags: {
 }[] = [];
 
 const inMemoryApplicationsRepo: Partial<ApplicationsRepository> = {
-  findApplications: async () => inMemoryApplications.map(toAppListRow),
+  findApplications: async () =>
+    inMemoryApplications.filter((a) => !a.deletedAt).map(toAppListRow),
   findApplicationById: async (id: string) => {
-    const a = inMemoryApplications.find((x) => x.id === id);
+    const a = inMemoryApplications.find((x) => x.id === id && !x.deletedAt);
     return a ? toAppListRow(a) : undefined;
   },
+  // D8：撞名预检不过滤软删（DB unique 非 partial，软删 slug/name 不可复用）
   findBySlug: async (slug: string) => inMemoryApplications.find((x) => x.slug === slug),
   findByName: async (name: string) => inMemoryApplications.find((x) => x.name === name),
   findVersions: async (applicationId: string) =>
@@ -710,19 +712,11 @@ const inMemoryApplicationsRepo: Partial<ApplicationsRepository> = {
     Object.assign(a, stripUndefined(patch as Record<string, unknown>), { updatedAt: new Date() });
     return a;
   },
+  // M7b：软删——置 deletedAt（幂等：仅未删的行），配置/kbs/标签快照保留供历史解释
   deleteApplication: async (id: string) => {
-    const idx = inMemoryApplications.findIndex((x) => x.id === id);
-    if (idx < 0) return 0;
-    inMemoryApplications.splice(idx, 1);
-    // cascade 版本与 kbs 快照
-    const versionIds = new Set(
-      inMemoryAppVersions.filter((v) => v.applicationId === id).map((v) => v.id),
-    );
-    for (let i = inMemoryAppVersions.length - 1; i >= 0; i--)
-      if (inMemoryAppVersions[i].applicationId === id) inMemoryAppVersions.splice(i, 1);
-    for (let i = inMemoryAppVersionKbs.length - 1; i >= 0; i--)
-      if (versionIds.has(inMemoryAppVersionKbs[i].configVersionId))
-        inMemoryAppVersionKbs.splice(i, 1);
+    const a = inMemoryApplications.find((x) => x.id === id && !x.deletedAt);
+    if (!a) return 0;
+    a.deletedAt = new Date();
     return 1;
   },
   findPromptUsage: async (promptVersionIds: string[]) => {
@@ -2044,11 +2038,12 @@ describe("M2 domain skeleton", () => {
         .expect(404);
     });
 
-    it("DELETE → 204，再 GET 404，版本级联消失", async () => {
+    it("DELETE 软删（M7b）→ 204；GET/列表/版本隐藏；slug 不可复用；再删 404", async () => {
+      const body = validCreate();
       const created = await request(app.getHttpServer())
         .post("/api/applications")
         .set(auth())
-        .send(validCreate())
+        .send(body)
         .expect(201);
       const appId = created.body.id;
 
@@ -2056,13 +2051,30 @@ describe("M2 domain skeleton", () => {
         .delete(`/api/applications/${appId}`)
         .set(auth())
         .expect(204);
+      // detail 404（mustFind 过滤 deleted_at）
       await request(app.getHttpServer())
         .get(`/api/applications/${appId}`)
         .set(auth())
         .expect(404);
-      // 版本级联消失：列表端点因应用不存在 → 404
+      // 列表排除软删应用
+      const listed = (
+        await request(app.getHttpServer()).get("/api/applications").set(auth()).expect(200)
+      ).body;
+      expect(listed.some((a: { id: string }) => a.id === appId)).toBe(false);
+      // 版本端点因应用不可见 → 404（软删保留版本行，仅读路径隐藏）
       await request(app.getHttpServer())
         .get(`/api/applications/${appId}/config-versions`)
+        .set(auth())
+        .expect(404);
+      // D8：软删行仍占 slug/name（DB unique 非 partial）→ 同 slug 再建 409
+      await request(app.getHttpServer())
+        .post("/api/applications")
+        .set(auth())
+        .send({ ...validCreate(), slug: body.slug })
+        .expect(409);
+      // 幂等：再删软删应用 → 404（deleteApplication 返回 0）
+      await request(app.getHttpServer())
+        .delete(`/api/applications/${appId}`)
         .set(auth())
         .expect(404);
     });

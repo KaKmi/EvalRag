@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, asc, count, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
@@ -50,14 +50,25 @@ const APP_SELECT = {
 export class ApplicationsRepository {
   constructor(@Inject(DRIZZLE) private readonly db: DB) {}
 
+  // M7b 软删：list/detail 读路径过滤 deleted_at IS NULL
   async findApplications(): Promise<ApplicationListRow[]> {
-    return this.db.select(APP_SELECT).from(applications).orderBy(desc(applications.updatedAt));
+    return this.db
+      .select(APP_SELECT)
+      .from(applications)
+      .where(isNull(applications.deletedAt))
+      .orderBy(desc(applications.updatedAt));
   }
   async findApplicationById(id: string): Promise<ApplicationListRow | undefined> {
     return (
-      await this.db.select(APP_SELECT).from(applications).where(eq(applications.id, id)).limit(1)
+      await this.db
+        .select(APP_SELECT)
+        .from(applications)
+        .where(and(eq(applications.id, id), isNull(applications.deletedAt)))
+        .limit(1)
     )[0];
   }
+  // D8：撞名预检**不过滤** deleted_at——DB unique 非 partial，软删行仍占 slug/name，
+  // 预检须与之一致（否则放行→INSERT 撞 23505，且软删 slug/name 不可复用）。
   async findBySlug(slug: string): Promise<ApplicationRow | undefined> {
     return (
       await this.db.select().from(applications).where(eq(applications.slug, slug)).limit(1)
@@ -148,11 +159,14 @@ export class ApplicationsRepository {
         .returning()
     )[0];
   }
+  // M7b：软删——置 deleted_at（幂等：仅未删的行），保留配置/检查/标签行供历史解释；
+  // 读路径靠 deleted_at IS NULL 隐藏。返回受影响行数供 service 区分 404/已删。
   async deleteApplication(id: string): Promise<number> {
     return (
       await this.db
-        .delete(applications)
-        .where(eq(applications.id, id))
+        .update(applications)
+        .set({ deletedAt: new Date() })
+        .where(and(eq(applications.id, id), isNull(applications.deletedAt)))
         .returning({ id: applications.id })
     ).length;
   }
@@ -173,7 +187,7 @@ export class ApplicationsRepository {
              WHEN v.prompt_reply_version_id = ANY(${ids}) THEN v.prompt_reply_version_id
              ELSE v.prompt_fallback_version_id END prompt_version_id
       FROM applications a JOIN application_config_versions v ON v.id = a.production_config_version_id
-      WHERE v.prompt_rewrite_version_id = ANY(${ids}) OR v.prompt_intent_version_id = ANY(${ids}) OR v.prompt_reply_version_id = ANY(${ids}) OR v.prompt_fallback_version_id = ANY(${ids})
+      WHERE a.deleted_at IS NULL AND (v.prompt_rewrite_version_id = ANY(${ids}) OR v.prompt_intent_version_id = ANY(${ids}) OR v.prompt_reply_version_id = ANY(${ids}) OR v.prompt_fallback_version_id = ANY(${ids}))
     `);
     return result.rows as {
       application_id: string;
