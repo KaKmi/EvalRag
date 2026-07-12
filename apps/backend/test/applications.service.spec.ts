@@ -284,7 +284,7 @@ describe("ApplicationsService", () => {
     expect(releaseQueue.publish).toHaveBeenCalledWith(
       "application.release_check",
       { checkId: "rc1" },
-      { singletonKey: "rc1", retryLimit: 0 },
+      { singletonKey: "rc1", retryLimit: 1 }, // review P2-2：崩溃恢复需重投一次，终态守卫防重复计费
     );
   });
   it("startReleaseCheck：无知识库 → 422 且不入队", async () => {

@@ -201,11 +201,12 @@ export class ApplicationsService {
       configFingerprint: fingerprint,
       createdBy: actor,
     });
-    // 幂等：singletonKey=checkId；retryLimit=0（预演调真实模型，失败不自动重试，避免重复计费）
+    // 幂等：singletonKey=checkId；retryLimit=1（review P2-2：worker 崩溃需重投一次才能恢复，
+    // 终态跳过守卫保证重投已完成的 check 是 no-op，不会重复计费）
     await this.releaseQueue.publish(
       RELEASE_CHECK_JOB,
       { checkId: row.id },
-      { singletonKey: row.id, retryLimit: 0 },
+      { singletonKey: row.id, retryLimit: 1 },
     );
     return this.toReleaseCheck(row);
   }
@@ -243,9 +244,10 @@ export class ApplicationsService {
       throw new BadRequestException(`version ${req.versionId} 不属于该应用`);
     if (cas === "cas_conflict")
       throw new ConflictException("production 指针已被并发修改，请刷新后重新确认");
-    // 审计（控制面事件，009 Observability；当前无独立审计存储，结构化日志承载）
+    // 审计（控制面事件，009 Observability；当前无独立审计存储，结构化日志承载）。
+    // review P3：带上 prev 指针——回滚场景最关键的审计字段。
     this.logger.log(
-      `application.production.changed app=${id} version=${req.versionId} check=${req.releaseCheckId} by=${actor}`,
+      `application.production.changed app=${id} version=${req.versionId} prev=${req.expectedProductionVersionId ?? "null"} check=${req.releaseCheckId} by=${actor}`,
     );
     const row = await this.mustFind(id);
     const tagsByApp = await this.repo.findTagNamesByAppIds([id]);
@@ -467,6 +469,10 @@ export class ApplicationsService {
   private modelRevision(m: ModelMeta): string {
     if (!m) return "missing";
     return JSON.stringify({
+      // review P2-1：上游真实模型身份是 deploymentId ?? name（protocols/types.ts:28）——
+      // deploymentId 为空时改 name 即换模型，必须翻转 fingerprint；哈希 coalesced 值
+      // 同时避免"仅展示改名"（deploymentId 已设）造成的假 409。
+      identity: m.deploymentId ?? m.name,
       params: m.params,
       baseUrl: m.baseUrl,
       deploymentId: m.deploymentId,

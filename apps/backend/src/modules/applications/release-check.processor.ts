@@ -56,7 +56,24 @@ export class ReleaseCheckProcessor implements OnModuleInit {
       return;
 
     await this.repo.markReleaseCheckRunning(checkId);
-    const version = await this.repo.findVersionById(check.configVersionId);
+    try {
+      await this.run(checkId, check.configVersionId);
+    } catch (err) {
+      // review P2-2：基础设施异常（DB 抖动/未知错误）不能让 check 永久卡 running——
+      // 标 failed 让轮询方拿到终态；mark 自身失败则异常上抛，靠 retryLimit=1 重投 + 僵尸窗口兜底。
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`release check ${checkId} 执行异常：${msg}`);
+      await this.repo.markReleaseCheckResult(checkId, {
+        status: "failed",
+        issues: [{ code: "INTERNAL_ERROR", message: msg }],
+        sampleSummary: {},
+        expiresAt: null,
+      });
+    }
+  }
+
+  private async run(checkId: string, configVersionId: string): Promise<void> {
+    const version = await this.repo.findVersionById(configVersionId);
     if (!version) {
       await this.repo.markReleaseCheckResult(checkId, {
         status: "failed",

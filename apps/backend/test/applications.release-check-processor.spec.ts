@@ -111,4 +111,17 @@ describe("ReleaseCheckProcessor", () => {
     expect(nodeRuntime.compileAndSample).not.toHaveBeenCalled();
     expect(repo.markReleaseCheckResult.mock.calls[0][1].issues[0].code).toBe("VERSION_MISSING");
   });
+
+  it("review P2-2：基础设施异常（如 DB 抖动）→ 标 failed INTERNAL_ERROR 而非永久卡 running", async () => {
+    const { proc, repo } = make({
+      findVersionKbIds: jest.fn(async () => {
+        throw new Error("db connection reset");
+      }),
+    });
+    await proc.process("rc1");
+    const result = repo.markReleaseCheckResult.mock.calls[0][1];
+    expect(result.status).toBe("failed");
+    expect(result.issues[0]).toMatchObject({ code: "INTERNAL_ERROR", message: "db connection reset" });
+    expect(result.expiresAt).toBeNull();
+  });
 });
