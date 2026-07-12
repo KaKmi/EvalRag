@@ -82,7 +82,7 @@ import { MODEL_PROVIDER_PORT } from "../src/modules/models/model-provider.consta
 import type { ModelProviderRow, NewModelProvider } from "../src/modules/models/schema";
 import { AppConfigModule } from "../src/platform/config/config.module";
 import { BLOB_STORE } from "../src/platform/storage/blob-store.constants";
-import { INGESTION_QUEUE } from "../src/platform/queue/queue.constants";
+import { INGESTION_QUEUE, RELEASE_CHECK_QUEUE } from "../src/platform/queue/queue.constants";
 import { KnowledgeBasesRepository } from "../src/modules/knowledge-bases/knowledge-bases.repository";
 import type { KnowledgeBaseRow } from "../src/modules/knowledge-bases/schema";
 import { DocumentsRepository } from "../src/modules/documents/documents.repository";
@@ -646,12 +646,24 @@ const insertAppVersion = (
   return version;
 };
 
+const inMemoryAppTags: {
+  applicationId: string;
+  configVersionId: string;
+  name: string;
+  createdBy: string;
+}[] = [];
+
+let appReleaseCheckSeq = 0;
+const inMemoryReleaseChecks: Record<string, unknown>[] = [];
+
 const inMemoryApplicationsRepo: Partial<ApplicationsRepository> = {
-  findApplications: async () => inMemoryApplications.map(toAppListRow),
+  findApplications: async () =>
+    inMemoryApplications.filter((a) => !a.deletedAt).map(toAppListRow),
   findApplicationById: async (id: string) => {
-    const a = inMemoryApplications.find((x) => x.id === id);
+    const a = inMemoryApplications.find((x) => x.id === id && !x.deletedAt);
     return a ? toAppListRow(a) : undefined;
   },
+  // D8：撞名预检不过滤软删（DB unique 非 partial，软删 slug/name 不可复用）
   findBySlug: async (slug: string) => inMemoryApplications.find((x) => x.slug === slug),
   findByName: async (name: string) => inMemoryApplications.find((x) => x.name === name),
   findVersions: async (applicationId: string) =>
@@ -703,19 +715,11 @@ const inMemoryApplicationsRepo: Partial<ApplicationsRepository> = {
     Object.assign(a, stripUndefined(patch as Record<string, unknown>), { updatedAt: new Date() });
     return a;
   },
+  // M7b：软删——置 deletedAt（幂等：仅未删的行），配置/kbs/标签快照保留供历史解释
   deleteApplication: async (id: string) => {
-    const idx = inMemoryApplications.findIndex((x) => x.id === id);
-    if (idx < 0) return 0;
-    inMemoryApplications.splice(idx, 1);
-    // cascade 版本与 kbs 快照
-    const versionIds = new Set(
-      inMemoryAppVersions.filter((v) => v.applicationId === id).map((v) => v.id),
-    );
-    for (let i = inMemoryAppVersions.length - 1; i >= 0; i--)
-      if (inMemoryAppVersions[i].applicationId === id) inMemoryAppVersions.splice(i, 1);
-    for (let i = inMemoryAppVersionKbs.length - 1; i >= 0; i--)
-      if (versionIds.has(inMemoryAppVersionKbs[i].configVersionId))
-        inMemoryAppVersionKbs.splice(i, 1);
+    const a = inMemoryApplications.find((x) => x.id === id && !x.deletedAt);
+    if (!a) return 0;
+    a.deletedAt = new Date();
     return 1;
   },
   findPromptUsage: async (promptVersionIds: string[]) => {
@@ -752,6 +756,88 @@ const inMemoryApplicationsRepo: Partial<ApplicationsRepository> = {
     }
     return rows;
   },
+  // M7b S2 自定义标签（in-memory）
+  findTagNamesByAppIds: async (appIds: string[]) => {
+    const map = new Map<string, string[]>();
+    for (const t of inMemoryAppTags)
+      if (appIds.includes(t.applicationId))
+        map.set(t.applicationId, [...(map.get(t.applicationId) ?? []), t.name]);
+    return map;
+  },
+  findTagsWithVersion: async (appId: string) =>
+    inMemoryAppTags
+      .filter((t) => t.applicationId === appId)
+      .map((t) => ({
+        name: t.name,
+        versionId: t.configVersionId,
+        version: inMemoryAppVersions.find((v) => v.id === t.configVersionId)?.version ?? 0,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  upsertTag: async (appId: string, versionId: string, name: string, actor: string) => {
+    // 复合 FK 归属：拒绝指向别应用版本（对齐 DB 23503）
+    const v = inMemoryAppVersions.find((x) => x.id === versionId);
+    if (!v || v.applicationId !== appId) throw pgError("23503");
+    const existing = inMemoryAppTags.find(
+      (t) => t.applicationId === appId && t.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (existing) existing.configVersionId = versionId;
+    else inMemoryAppTags.push({ applicationId: appId, configVersionId: versionId, name, createdBy: actor });
+  },
+  deleteTag: async (appId: string, name: string) => {
+    const before = inMemoryAppTags.length;
+    for (let i = inMemoryAppTags.length - 1; i >= 0; i--)
+      if (inMemoryAppTags[i].applicationId === appId && inMemoryAppTags[i].name === name)
+        inMemoryAppTags.splice(i, 1);
+    return before - inMemoryAppTags.length;
+  },
+  countTags: async (appId: string) =>
+    inMemoryAppTags.filter((t) => t.applicationId === appId).length,
+  tagExists: async (appId: string, lowerName: string) =>
+    inMemoryAppTags.some((t) => t.applicationId === appId && t.name.toLowerCase() === lowerName),
+  // M7b S5 production CAS（对齐真实 SQL 语义：三重守卫，0 行按归属二次判定）
+  casProduction: async (appId: string, versionId: string, expected: string | null, actor: string) => {
+    const a = inMemoryApplications.find((x) => x.id === appId && !x.deletedAt);
+    const owns = inMemoryAppVersions.some((v) => v.id === versionId && v.applicationId === appId);
+    if (a && owns && (a.productionConfigVersionId ?? null) === expected) {
+      a.productionConfigVersionId = versionId;
+      a.updatedBy = actor;
+      a.updatedAt = new Date();
+      return "ok";
+    }
+    return owns ? "cas_conflict" : "ownership_fail";
+  },
+  clearProduction: async (appId: string, expected: string | null, actor: string) => {
+    const a = inMemoryApplications.find((x) => x.id === appId && !x.deletedAt);
+    if (a && (a.productionConfigVersionId ?? null) === expected) {
+      a.productionConfigVersionId = null;
+      a.updatedBy = actor;
+      a.updatedAt = new Date();
+      return "ok";
+    }
+    return "cas_conflict";
+  },
+  // M7b S4 ReleaseCheck（worker 在 e2e 不跑——fakeQueue.subscribe 是 no-op，故只留 queued 态）
+  insertReleaseCheck: async (row: {
+    applicationId: string;
+    configVersionId: string;
+    configFingerprint: string;
+    createdBy: string;
+  }) => {
+    const check = {
+      id: `rc${++appReleaseCheckSeq}`,
+      ...row,
+      status: "queued",
+      issues: [],
+      sampleSummary: {},
+      startedAt: null,
+      finishedAt: null,
+      expiresAt: null,
+      createdAt: new Date(),
+    };
+    inMemoryReleaseChecks.push(check);
+    return check;
+  },
+  findReleaseCheckById: async (id: string) => inMemoryReleaseChecks.find((c) => c.id === id),
 };
 
 const inMemoryBlobs = new Map<string, Buffer>();
@@ -818,6 +904,8 @@ describe("M2 domain skeleton", () => {
       .overrideProvider(BLOB_STORE)
       .useValue(fakeBlobStore)
       .overrideProvider(INGESTION_QUEUE)
+      .useValue(fakeQueue)
+      .overrideProvider(RELEASE_CHECK_QUEUE)
       .useValue(fakeQueue)
       .compile();
     app = ref.createNestApplication();
@@ -1718,6 +1806,253 @@ describe("M2 domain skeleton", () => {
         .expect(409);
     });
 
+    it("config-version-tags（M7b）：排他移动 / 标识列 / 保留字拒绝 / 摘除 / 跨应用 404", async () => {
+      const created = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(validCreate())
+          .expect(201)
+      ).body;
+      const appId = created.id as string;
+      const v1 = created.versions[0].id as string;
+      const v2 = (
+        await request(app.getHttpServer())
+          .post(`/api/applications/${appId}/config-versions`)
+          .set(auth())
+          .send({ config: validConfig() })
+          .expect(201)
+      ).body.id as string;
+
+      // 打 qa1 → v1
+      let tags = (
+        await request(app.getHttpServer())
+          .put(`/api/applications/${appId}/config-version-tags`)
+          .set(auth())
+          .send({ name: "qa1", versionId: v1 })
+          .expect(200)
+      ).body;
+      expect(tags).toContainEqual({ name: "qa1", versionId: v1, version: 1 });
+
+      // 排他移动 qa1 → v2（同名唯一，从 v1 移到 v2）
+      tags = (
+        await request(app.getHttpServer())
+          .put(`/api/applications/${appId}/config-version-tags`)
+          .set(auth())
+          .send({ name: "QA1", versionId: v2 })
+          .expect(200)
+      ).body;
+      expect(tags).toHaveLength(1);
+      expect(tags[0]).toMatchObject({ name: "qa1", versionId: v2 });
+
+      // 列表「标识」列含 qa1
+      const listed = (
+        await request(app.getHttpServer()).get("/api/applications").set(auth()).expect(200)
+      ).body.find((a: { id: string }) => a.id === appId);
+      expect(listed.tags).toContain("qa1");
+
+      // 保留字 production/v → 契约 refine 拒绝（400）；不走标签路径
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/config-version-tags`)
+        .set(auth())
+        .send({ name: "production", versionId: v2 })
+        .expect(400);
+
+      // 摘除（大小写不敏感）→ 204；再摘不存在 → 404
+      await request(app.getHttpServer())
+        .delete(`/api/applications/${appId}/config-version-tags/qa1`)
+        .set(auth())
+        .expect(204);
+      await request(app.getHttpServer())
+        .delete(`/api/applications/${appId}/config-version-tags/qa1`)
+        .set(auth())
+        .expect(404);
+
+      // 跨应用版本 → 404（复合 FK 归属）
+      const other = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(validCreate())
+          .expect(201)
+      ).body;
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/config-version-tags`)
+        .set(auth())
+        .send({ name: "qa2", versionId: other.versions[0].id })
+        .expect(404);
+    });
+
+    it("release-checks（M7b）：静态门禁通过 → 201 queued + fingerprint + 轮询；坏版本 404", async () => {
+      const created = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(validCreate())
+          .expect(201)
+      ).body;
+      const appId = created.id as string;
+      const v1 = created.versions[0].id as string;
+
+      const check = (
+        await request(app.getHttpServer())
+          .post(`/api/applications/${appId}/config-versions/${v1}/release-checks`)
+          .set(auth())
+          .expect(201)
+      ).body;
+      expect(check.status).toBe("queued");
+      expect(check.configFingerprint).toEqual(expect.any(String));
+      expect(check.configVersionId).toBe(v1);
+
+      // 轮询检查状态
+      const polled = (
+        await request(app.getHttpServer())
+          .get(`/api/applications/${appId}/release-checks/${check.id}`)
+          .set(auth())
+          .expect(200)
+      ).body;
+      expect(polled.id).toBe(check.id);
+
+      // 不存在的版本 → 404
+      await request(app.getHttpServer())
+        .post(`/api/applications/${appId}/config-versions/does-not-exist/release-checks`)
+        .set(auth())
+        .expect(404);
+    });
+
+    it("production 上线闭环（M7b）：passed check + CAS 上线 → 并发 409 → 下线", async () => {
+      const created = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(validCreate())
+          .expect(201)
+      ).body;
+      const appId = created.id as string;
+      const v1 = created.versions[0].id as string;
+
+      // 开始检查（静态过 → queued）
+      const check = (
+        await request(app.getHttpServer())
+          .post(`/api/applications/${appId}/config-versions/${v1}/release-checks`)
+          .set(auth())
+          .expect(201)
+      ).body;
+
+      // queued check 直接上线 → 422（需要 passed）
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/production`)
+        .set(auth())
+        .send({ versionId: v1, releaseCheckId: check.id, expectedProductionVersionId: null })
+        .expect(422);
+
+      // 模拟 worker 完成：翻 passed + 未过期（e2e 的 fakeQueue 不真消费）
+      const row = inMemoryReleaseChecks.find((c) => c.id === check.id)!;
+      row.status = "passed";
+      row.expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+      // 上线成功：指针移动，「是否上线」= v1
+      const published = (
+        await request(app.getHttpServer())
+          .put(`/api/applications/${appId}/production`)
+          .set(auth())
+          .send({ versionId: v1, releaseCheckId: check.id, expectedProductionVersionId: null })
+          .expect(200)
+      ).body;
+      expect(published.productionConfigVersionId).toBe(v1);
+      expect(published.productionVersion).toBe(1);
+
+      // 并发语义：stale expected（null）再上线 → 409
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/production`)
+        .set(auth())
+        .send({ versionId: v1, releaseCheckId: check.id, expectedProductionVersionId: null })
+        .expect(409);
+
+      // 跨应用 versionId → 400（归属守卫）
+      const other = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(validCreate())
+          .expect(201)
+      ).body;
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/production`)
+        .set(auth())
+        .send({
+          versionId: other.versions[0].id,
+          releaseCheckId: check.id,
+          expectedProductionVersionId: v1,
+        })
+        .expect(404); // check 归属校验先拦（configVersionId 不匹配）
+
+      // 下线：CAS 清指针
+      const unpublished = (
+        await request(app.getHttpServer())
+          .delete(`/api/applications/${appId}/production`)
+          .set(auth())
+          .send({ expectedProductionVersionId: v1 })
+          .expect(200)
+      ).body;
+      expect(unpublished.productionConfigVersionId).toBeNull();
+    });
+
+    it("resolve（M7b）：管理员带标签解析 / production 指针 / slug 直达 / 未上线 404", async () => {
+      const body = validCreate();
+      const created = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(body)
+          .expect(201)
+      ).body;
+      const appId = created.id as string;
+      const v1 = created.versions[0].id as string;
+
+      // 未上线且无 tag → 404
+      await request(app.getHttpServer())
+        .get(`/api/applications/${appId}/resolve`)
+        .set(auth())
+        .expect(404);
+
+      // 打自定义标签 qa1 → 带 tag 解析命中该版本，preview=true，带 promptBody
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/config-version-tags`)
+        .set(auth())
+        .send({ name: "qa1", versionId: v1 })
+        .expect(200);
+      const byTag = (
+        await request(app.getHttpServer())
+          .get(`/api/applications/${appId}/resolve?tag=qa1`)
+          .set(auth())
+          .expect(200)
+      ).body;
+      expect(byTag.configVersionId).toBe(v1);
+      expect(byTag.preview).toBe(true);
+      expect(byTag.nodes.reply.promptBody).toEqual(expect.any(String));
+
+      // slug 直达（等价 /chat/:slug/:tag 的解析层）
+      const bySlug = (
+        await request(app.getHttpServer())
+          .get(`/api/applications/${body.slug}/resolve?tag=qa1`)
+          .set(auth())
+          .expect(200)
+      ).body;
+      expect(bySlug.applicationId).toBe(appId);
+
+      // 标签不存在 → 404（不泄漏）
+      await request(app.getHttpServer())
+        .get(`/api/applications/${appId}/resolve?tag=ghost`)
+        .set(auth())
+        .expect(404);
+
+      // 无 JWT → 401（非 production 标签仅管理员，Q1）
+      await request(app.getHttpServer())
+        .get(`/api/applications/${appId}/resolve?tag=qa1`)
+        .expect(401);
+    });
+
     it("POST / kbIds 空 → 400；引用不存在 prompt version → 404；node 不匹配 → 400", async () => {
       await request(app.getHttpServer())
         .post("/api/applications")
@@ -1922,11 +2257,12 @@ describe("M2 domain skeleton", () => {
         .expect(404);
     });
 
-    it("DELETE → 204，再 GET 404，版本级联消失", async () => {
+    it("DELETE 软删（M7b）→ 204；GET/列表/版本隐藏；slug 不可复用；再删 404", async () => {
+      const body = validCreate();
       const created = await request(app.getHttpServer())
         .post("/api/applications")
         .set(auth())
-        .send(validCreate())
+        .send(body)
         .expect(201);
       const appId = created.body.id;
 
@@ -1934,13 +2270,30 @@ describe("M2 domain skeleton", () => {
         .delete(`/api/applications/${appId}`)
         .set(auth())
         .expect(204);
+      // detail 404（mustFind 过滤 deleted_at）
       await request(app.getHttpServer())
         .get(`/api/applications/${appId}`)
         .set(auth())
         .expect(404);
-      // 版本级联消失：列表端点因应用不存在 → 404
+      // 列表排除软删应用
+      const listed = (
+        await request(app.getHttpServer()).get("/api/applications").set(auth()).expect(200)
+      ).body;
+      expect(listed.some((a: { id: string }) => a.id === appId)).toBe(false);
+      // 版本端点因应用不可见 → 404（软删保留版本行，仅读路径隐藏）
       await request(app.getHttpServer())
         .get(`/api/applications/${appId}/config-versions`)
+        .set(auth())
+        .expect(404);
+      // D8：软删行仍占 slug/name（DB unique 非 partial）→ 同 slug 再建 409
+      await request(app.getHttpServer())
+        .post("/api/applications")
+        .set(auth())
+        .send({ ...validCreate(), slug: body.slug })
+        .expect(409);
+      // 幂等：再删软删应用 → 404（deleteApplication 返回 0）
+      await request(app.getHttpServer())
+        .delete(`/api/applications/${appId}`)
         .set(auth())
         .expect(404);
     });
@@ -2340,14 +2693,18 @@ describe("M2 domain skeleton", () => {
       expect(paths).not.toContain("/api/prompts/{id}/versions/{versionId}/rollback");
       expect(paths).toContain("/api/chat");
       expect(paths).toContain("/api/conversations/{id}/messages");
-      // M7a applications：静态 prompt-usage + 版本 chat 骨架；M7b production 端点不存在
+      // M7a applications 骨架 + M7b 发布闭环端点（标签/检查/production）
       expect(paths).toContain("/api/applications");
       expect(paths).toContain("/api/applications/{id}");
       expect(paths).toContain("/api/applications/prompt-usage");
       expect(paths).toContain("/api/applications/{id}/config-versions");
       expect(paths).toContain("/api/applications/{id}/config-versions/{versionId}");
       expect(paths).toContain("/api/applications/{id}/config-versions/{versionId}/chat");
-      expect(paths).not.toContain("/api/applications/{id}/production");
+      expect(paths).toContain("/api/applications/{id}/config-version-tags");
+      expect(paths).toContain("/api/applications/{id}/config-version-tags/{name}");
+      expect(paths).toContain("/api/applications/{id}/config-versions/{versionId}/release-checks");
+      expect(paths).toContain("/api/applications/{id}/release-checks/{checkId}");
+      expect(paths).toContain("/api/applications/{id}/production");
     });
   });
 });

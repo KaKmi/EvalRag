@@ -384,6 +384,42 @@ describe("NodeRuntimeService.compileAndSample", () => {
     expect(res.results[1].ok).toBe(false);
   });
 
+  it("M7b S0：结构化样例回填 span traceId（供 ReleaseCheck OPEN_PROMPT_TRY_RUN 深链）", async () => {
+    const chat = jest.fn(async () => ({ content: '{"rewrittenQuery":"x","keywords":[]}' }));
+    const svc = makeService(chat);
+    const res = await svc.compileAndSample({
+      node: "rewrite",
+      contractVersion: 1,
+      promptVersionId: "pv1",
+      promptBody: "{query}",
+      modelId: "m1",
+      modelParams: { temperature: 0.2, topP: 1 },
+      samples: [{ input: { query: "hi", history: "" }, runtimeContext: {} }],
+    });
+    // span.spanContext().traceId 是 W3C 32-hex（无 SDK 时为全零，仍证明字段已从 span 接通而非 undefined）
+    expect(res.results[0].traceId).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("M7b S0：流式（reply）样例同样回填 traceId", async () => {
+    async function* gen() {
+      yield { delta: "答案" };
+      yield { done: true };
+    }
+    const svc = makeService(jest.fn(), jest.fn(() => gen()));
+    const res = await svc.compileAndSample({
+      node: "reply",
+      contractVersion: 1,
+      promptVersionId: "pv1",
+      promptBody: "{query}",
+      modelId: "m1",
+      modelParams: { temperature: 0.5, topP: 1 },
+      samples: [
+        { input: { query: "q1", history: "", retrievalContext: "" }, runtimeContext: { citations: [] } },
+      ],
+    });
+    expect(res.results[0].traceId).toMatch(/^[0-9a-f]{32}$/);
+  });
+
   it("null 样例 input（越过 TS 类型的运行时调用方）不应抛未捕获异常中断整批（review P2）", async () => {
     const chat = jest.fn(async () => ({ content: '{"rewrittenQuery":"x","keywords":[]}' }));
     const svc = makeService(chat);
