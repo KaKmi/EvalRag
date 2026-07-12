@@ -21,11 +21,16 @@ export interface ExecuteStructuredResult<TOutput> {
   output: TOutput;
   fallbackUsed: boolean;
   validateSteps: ValidateStep[];
+  /** M7b S0：模型调用路径的 span traceId（供 ReleaseCheck OPEN_PROMPT_TRY_RUN 深链）。
+   *  校验失败提前返回（无 span）路径为 undefined。 */
+  traceId?: string;
 }
 
 export interface StreamTextResult {
   text: string;
   fallbackUsed: boolean;
+  /** M7b S0：见 ExecuteStructuredResult.traceId */
+  traceId?: string;
 }
 
 export interface NodeExecuteOptions {
@@ -195,7 +200,12 @@ export class NodeRuntimeService {
           steps.push({ step: "output_schema", ok: true });
           span.setAttribute(RAG.FALLBACK_USED, false);
           span.setAttribute(RAG.REPAIR_RETRY_COUNT, 0);
-          return { output: first.output, fallbackUsed: false, validateSteps: steps };
+          return {
+            output: first.output,
+            fallbackUsed: false,
+            validateSteps: steps,
+            traceId: span.spanContext().traceId,
+          };
         }
         steps.push({ step: first.step, ok: false, issues: first.issues });
         span.setAttribute(RAG.VALIDATION_ERROR_CODE, first.issues[0] ?? "unknown");
@@ -212,7 +222,12 @@ export class NodeRuntimeService {
         if (second.ok) {
           steps.push({ step: "repair", ok: true });
           span.setAttribute(RAG.FALLBACK_USED, false);
-          return { output: second.output, fallbackUsed: false, validateSteps: steps };
+          return {
+            output: second.output,
+            fallbackUsed: false,
+            validateSteps: steps,
+            traceId: span.spanContext().traceId,
+          };
         }
         steps.push({ step: "repair", ok: false, issues: second.issues });
 
@@ -222,6 +237,7 @@ export class NodeRuntimeService {
           output: contract.fallback(validInput, validReserved),
           fallbackUsed: true,
           validateSteps: steps,
+          traceId: span.spanContext().traceId,
         };
       },
     );
@@ -291,10 +307,14 @@ export class NodeRuntimeService {
         }
         if (text.length === 0) {
           span.setAttribute(RAG.FALLBACK_USED, true);
-          return { text: contract.fallback(validInput, validReserved).text, fallbackUsed: true };
+          return {
+            text: contract.fallback(validInput, validReserved).text,
+            fallbackUsed: true,
+            traceId: span.spanContext().traceId,
+          };
         }
         span.setAttribute(RAG.FALLBACK_USED, false);
-        return { text, fallbackUsed: false };
+        return { text, fallbackUsed: false, traceId: span.spanContext().traceId };
       },
     );
   }
@@ -315,7 +335,13 @@ export class NodeRuntimeService {
             sample.runtimeContext,
             opts,
           );
-          results.push({ sampleIndex: i, ok: !r.fallbackUsed, fallbackUsed: r.fallbackUsed, issues: [] });
+          results.push({
+            sampleIndex: i,
+            ok: !r.fallbackUsed,
+            fallbackUsed: r.fallbackUsed,
+            issues: [],
+            traceId: r.traceId,
+          });
         } else {
           const r = await this.executeStructured(
             request.node,
@@ -329,7 +355,13 @@ export class NodeRuntimeService {
           const issues = r.validateSteps.flatMap((s) =>
             (s.issues ?? []).map((message) => ({ code: s.step.toUpperCase(), message })),
           );
-          results.push({ sampleIndex: i, ok: !r.fallbackUsed, fallbackUsed: r.fallbackUsed, issues });
+          results.push({
+            sampleIndex: i,
+            ok: !r.fallbackUsed,
+            fallbackUsed: r.fallbackUsed,
+            issues,
+            traceId: r.traceId,
+          });
         }
       } catch (err) {
         // review P2：单样例的基础设施失败（模型不存在/网络异常等，非业务校验失败）此前
