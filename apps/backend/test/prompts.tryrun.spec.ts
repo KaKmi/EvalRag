@@ -4,6 +4,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from "@nestjs/common";
+import { INTENT_TABLE } from "@codecrush/contracts";
 import { PromptsService } from "../src/modules/prompts/prompts.service";
 import type { PromptsRepository, PromptListRow } from "../src/modules/prompts/prompts.repository";
 import {
@@ -121,15 +122,15 @@ describe("PromptsService.tryRun · rewrite/intent 走 NodeRuntime.executeStructu
     expect(executeStructured.mock.calls[0][6]).toEqual({ temperature: 1.2 });
   });
 
-  it("intent 节点：调用 executeStructured 时 reserved 传入空 availableRoutes（试运行无真实应用上下文）", async () => {
+  it("intent 节点：调用 executeStructured 时 reserved 注入静态全表 availableIntents（014 D5 试运行保真）", async () => {
     const executeStructured = jest.fn(async () => ({
-      output: { intent: "unknown", routeIds: [], confidence: 0 },
+      output: { intent: "UNKNOWN", confidence: 0 },
       fallbackUsed: true,
       validateSteps: [],
     }));
     const { service } = makeService({ prompt: { node: "intent" }, executeStructured });
     await service.tryRun("p1", "pv1", baseReq);
-    expect(executeStructured.mock.calls[0][5]).toEqual({ availableRoutes: [] });
+    expect(executeStructured.mock.calls[0][5]).toEqual({ availableIntents: INTENT_TABLE });
   });
 });
 

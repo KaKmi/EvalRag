@@ -9,6 +9,7 @@ import {
 import {
   compilePromptBody,
   extractVars,
+  INTENT_TABLE,
   NODE_CONTRACT_VERSION,
   type CreatePromptRequest,
   type CreatePromptVersionRequest,
@@ -234,11 +235,11 @@ export class PromptsService {
             history: req.testVars.history ?? "",
             retrievalContext: req.testVars.retrievalContext ?? "",
           };
-    // 试运行场景无真实应用上下文：intent 候选路由给空数组（越权校验天然全拒，
-    // 符合"试运行不代表真实上线路由"语义）；reply 引用来源同样给空数组。
+    // intent 候选意图注入静态全表（014 D5：与运行时/ReleaseCheck 一致，试运行保真）；
+    // reply 引用来源无真实应用上下文，给空数组。
     const reserved =
       node === "intent"
-        ? { availableRoutes: [] as string[] }
+        ? { availableIntents: INTENT_TABLE }
         : node === "reply"
           ? { citations: [] as unknown[] }
           : {};

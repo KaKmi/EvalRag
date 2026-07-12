@@ -1,3 +1,4 @@
+import { INTENT_TABLE } from "@codecrush/contracts";
 import {
   NodeRuntimeService,
   UnsupportedChatProtocolError,
@@ -125,12 +126,11 @@ describe("NodeRuntimeService.executeStructured · rewrite", () => {
 });
 
 describe("NodeRuntimeService.executeStructured · reservedDataSchema 校验（review round 1）", () => {
-  it("intent 节点 reserved 缺 availableRoutes（optional 字段，TS 层不拦截）→ 优雅降级 fallback，不抛未捕获异常，不调用 chat", async () => {
+  it("intent 节点 reserved 缺 availableIntents（optional 字段，TS 层不拦截）→ 优雅降级 fallback，不抛未捕获异常，不调用 chat", async () => {
     const chat = jest.fn();
     const svc = makeService(chat);
-    // reservedDataSchema 要求 availableRoutes: string[]（非 optional），传入 {} 应该
-    // 在 extraValidate 访问 reserved.availableRoutes.includes(...) 抛 TypeError 之前
-    // 就被 reservedDataSchema.safeParse 拦下来。
+    // reservedDataSchema 要求 availableIntents: 对象数组（非 optional），传入 {} 应该
+    // 在进入模型调用之前就被 reservedDataSchema.safeParse 拦下来。
     const res = await svc.executeStructured(
       "intent",
       1,
@@ -140,7 +140,7 @@ describe("NodeRuntimeService.executeStructured · reservedDataSchema 校验（re
       {} as never,
     );
     expect(res.fallbackUsed).toBe(true);
-    expect(res.output).toEqual({ intent: "unknown", routeIds: [], confidence: 0 });
+    expect(res.output).toEqual({ intent: "UNKNOWN", confidence: 0 });
     expect(chat).not.toHaveBeenCalled();
   });
 
@@ -200,27 +200,12 @@ describe("NodeRuntimeService.executeStructured · validateSteps 区分失败阶�
     expect(res.validateSteps.find((s) => s.ok === false)?.step).toBe("output_schema");
   });
 
-  it("模型输出结构合法但 extraValidate 越权 → 首次失败步骤标记为 extra_validate（而非笼统的 output_schema）", async () => {
-    const chat = jest.fn(async () => ({
-      content: '{"intent":"售后","routeIds":["kb_illegal"],"confidence":0.9}',
-    }));
-    const svc = makeService(chat);
-    const res = await svc.executeStructured(
-      "intent",
-      1,
-      "{query}",
-      "m1",
-      { query: "q", history: "" },
-      { availableRoutes: ["kb_a"] },
-    );
-    expect(res.validateSteps.find((s) => s.step === "extra_validate")).toBeDefined();
-  });
 });
 
-describe("NodeRuntimeService.executeStructured · intent extraValidate", () => {
-  it("routeIds 越权 → 修复重试；仍越权 → fallback unknown", async () => {
+describe("NodeRuntimeService.executeStructured · intent enum 闭集（014 D3）", () => {
+  it("intent 非闭集成员 → schema 解析层拒绝、修复重试；仍非法 → fallback UNKNOWN", async () => {
     const chat = jest.fn(async () => ({
-      content: '{"intent":"售后","routeIds":["kb_illegal"],"confidence":0.9}',
+      content: '{"intent":"售后","confidence":0.9}',
     }));
     const svc = makeService(chat);
     const res = await svc.executeStructured(
@@ -229,16 +214,17 @@ describe("NodeRuntimeService.executeStructured · intent extraValidate", () => {
       "{query}",
       "m1",
       { query: "q", history: "" },
-      { availableRoutes: ["kb_a"] },
+      { availableIntents: INTENT_TABLE },
     );
     expect(res.fallbackUsed).toBe(true);
-    expect(res.output).toEqual({ intent: "unknown", routeIds: [], confidence: 0 });
+    expect(res.output).toEqual({ intent: "UNKNOWN", confidence: 0 });
     expect(chat).toHaveBeenCalledTimes(2);
+    expect(res.validateSteps.find((s) => s.ok === false)?.step).toBe("output_schema");
   });
 
-  it("routeIds 合法 → 直接通过，不触发修复", async () => {
+  it("intent 为闭集成员 → 直接通过，不触发修复", async () => {
     const chat = jest.fn(async () => ({
-      content: '{"intent":"售后","routeIds":["kb_a"],"confidence":0.9}',
+      content: '{"intent":"SUPPORT","confidence":0.9}',
     }));
     const svc = makeService(chat);
     const res = await svc.executeStructured(
@@ -247,9 +233,10 @@ describe("NodeRuntimeService.executeStructured · intent extraValidate", () => {
       "{query}",
       "m1",
       { query: "q", history: "" },
-      { availableRoutes: ["kb_a"] },
+      { availableIntents: INTENT_TABLE },
     );
     expect(res.fallbackUsed).toBe(false);
+    expect(res.output).toEqual({ intent: "SUPPORT", confidence: 0.9 });
     expect(chat).toHaveBeenCalledTimes(1);
   });
 });
@@ -383,17 +370,13 @@ describe("NodeRuntimeService.streamText · reply/fallback", () => {
 });
 
 describe("NodeRuntimeService.compileAndSample", () => {
-  it("多样例聚合：2 合法 + 1 intent 越权 → results 长度一致，越权样例 ok:false", async () => {
+  it("多样例聚合：2 合法 + 1 intent 非闭集 → results 长度一致，非法样例 ok:false", async () => {
     const chat = jest
       .fn()
-      .mockResolvedValueOnce({ content: '{"intent":"售后","routeIds":["kb_a"],"confidence":0.9}' })
-      .mockResolvedValueOnce({
-        content: '{"intent":"售后","routeIds":["kb_illegal"],"confidence":0.9}',
-      })
-      .mockResolvedValueOnce({
-        content: '{"intent":"售后","routeIds":["kb_illegal"],"confidence":0.9}',
-      })
-      .mockResolvedValueOnce({ content: '{"intent":"售前","routeIds":["kb_b"],"confidence":0.8}' });
+      .mockResolvedValueOnce({ content: '{"intent":"SUPPORT","confidence":0.9}' })
+      .mockResolvedValueOnce({ content: '{"intent":"售后","confidence":0.9}' })
+      .mockResolvedValueOnce({ content: '{"intent":"售后","confidence":0.9}' })
+      .mockResolvedValueOnce({ content: '{"intent":"FEEDBACK","confidence":0.8}' });
     const svc = makeService(chat);
     const res = await svc.compileAndSample({
       node: "intent",
@@ -403,9 +386,9 @@ describe("NodeRuntimeService.compileAndSample", () => {
       modelId: "m1",
       modelParams: { temperature: 0.7, topP: 1 },
       samples: [
-        { input: { query: "q1", history: "" }, runtimeContext: { availableRoutes: ["kb_a"] } },
-        { input: { query: "q2", history: "" }, runtimeContext: { availableRoutes: ["kb_a"] } },
-        { input: { query: "q3", history: "" }, runtimeContext: { availableRoutes: ["kb_b"] } },
+        { input: { query: "q1", history: "" }, runtimeContext: { availableIntents: INTENT_TABLE } },
+        { input: { query: "q2", history: "" }, runtimeContext: { availableIntents: INTENT_TABLE } },
+        { input: { query: "q3", history: "" }, runtimeContext: { availableIntents: INTENT_TABLE } },
       ],
     });
     expect(res.results).toHaveLength(3);

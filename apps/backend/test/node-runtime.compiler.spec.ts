@@ -15,7 +15,7 @@ describe("renderTemplateStrict", () => {
     expect(() => renderTemplateStrict("{notAField}", {}, "rewrite")).toThrow();
   });
   it("保留字段：抛错", () => {
-    expect(() => renderTemplateStrict("{availableRoutes}", {}, "intent")).toThrow();
+    expect(() => renderTemplateStrict("{availableIntents}", {}, "intent")).toThrow();
   });
   it("多个合法变量：全部替换，未提供的变量用空串", () => {
     expect(renderTemplateStrict("{query} / {history}", { query: "q" }, "rewrite")).toBe("q / ");
@@ -45,28 +45,33 @@ describe("assembleMessages", () => {
   });
 
   it("user envelope 包含 input 与 reserved 的合并（reserved 字段一并透传给模型，用真实带 reservedDataSchema 的 INTENT_CONTRACT 而非 rewrite 的空 schema，review round 1）", () => {
+    const availableIntents = [
+      { key: "SUPPORT", label: "产品咨询", criteria: ["产品价格", "使用方法/操作步骤"] },
+      { key: "FEEDBACK", label: "问题反馈", criteria: ["功能异常/报错/打不开/卡顿"] },
+    ];
     const messages = assembleMessages({
       contract: INTENT_CONTRACT,
       promptBody: "{query}",
       input: { query: "q", history: "h" },
-      reserved: { availableRoutes: ["kb_a", "kb_b"] },
+      reserved: { availableIntents },
     });
     expect(JSON.parse(messages[1].content)).toEqual({
       query: "q",
       history: "h",
-      availableRoutes: ["kb_a", "kb_b"],
+      availableIntents,
     });
   });
 
   it("input 与 reserved 同名字段冲突时 reserved 胜出（平台注入优先于用户输入，review round 1）", () => {
+    const trusted = [{ key: "SUPPORT", label: "产品咨询", criteria: ["产品价格"] }];
     const messages = assembleMessages({
       contract: INTENT_CONTRACT,
       promptBody: "{query}",
       // 人为构造同名字段冲突（真实 Contract 目前不产生这种冲突，此处专测 spread 优先级本身）
-      input: { query: "q", history: "h", availableRoutes: ["untrusted-from-input"] } as never,
-      reserved: { availableRoutes: ["kb_trusted"] },
+      input: { query: "q", history: "h", availableIntents: ["untrusted-from-input"] } as never,
+      reserved: { availableIntents: trusted },
     });
-    expect(JSON.parse(messages[1].content).availableRoutes).toEqual(["kb_trusted"]);
+    expect(JSON.parse(messages[1].content).availableIntents).toEqual(trusted);
   });
 
   it("恰好两条消息，顺序固定", () => {

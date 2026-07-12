@@ -1,10 +1,12 @@
-import type { PromptNode } from "@codecrush/contracts";
+import { INTENT_TABLE, type PromptNode } from "@codecrush/contracts";
 import type { RuntimeContext } from "../node-runtime/compiler/runtime-context";
 
 // M7b ReleaseCheck 内置固定冒烟样例（D2）：M7b 无评测集（M11），Postgres 不存真实用户问题，
 // 故用一组代表性问题做「真实节点结果」冒烟。rewrite/intent 各跑全部 10 条，reply/fallback 各 1 条。
 // input/reserved 形状取自各 NodeContract（rewrite/intent {query,history}；reply +retrievalContext；
-// fallback 为无字段纯文本；intent reserved.availableRoutes 由 kbIds 派生，reply reserved.citations=[]）。
+// fallback 为无字段纯文本；intent reserved.availableIntents = 静态全表（014 D5：与运行时一致，
+// 不按 kbIds 派生子集——子集会让全未绑 KB 的应用只能合法输出 CHAT/UNKNOWN，门禁误杀），
+// reply reserved.citations=[]）。
 const SMOKE_QUERIES = [
   "怎么退货",
   "订单多久发货",
@@ -24,12 +26,11 @@ export interface NodeSample {
 }
 
 /**
- * @param node    四固定节点之一
- * @param availableRoutes intent 越权校验用的候选路由（由应用 kbIds 派生，每 KB 一个 routeId）
+ * @param node 四固定节点之一
  */
-export function buildSamples(node: PromptNode, availableRoutes: string[]): NodeSample[] {
+export function buildSamples(node: PromptNode): NodeSample[] {
   const reserved = (): RuntimeContext =>
-    node === "intent" ? { availableRoutes } : node === "reply" ? { citations: [] } : {};
+    node === "intent" ? { availableIntents: INTENT_TABLE } : node === "reply" ? { citations: [] } : {};
   const queries =
     node === "rewrite" || node === "intent" ? SMOKE_QUERIES : SMOKE_QUERIES.slice(0, 1);
   return queries.map((query) => ({

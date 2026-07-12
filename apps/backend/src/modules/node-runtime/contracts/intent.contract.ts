@@ -1,17 +1,25 @@
 import { z } from "zod";
-import { NODE_CONTRACTS } from "@codecrush/contracts";
-import type { NodeContract, ValidationIssue } from "./types";
+import { INTENT_OUTPUT_KEYS, NODE_CONTRACTS, UNKNOWN_INTENT_KEY } from "@codecrush/contracts";
+import type { NodeContract } from "./types";
 
 const InputSchema = z.object({
   query: z.string().min(1),
   history: z.string().optional(),
 });
+// 014 D3：候选意图恒注入静态全表（非可达子集）——输出合法性（enum）与路由可达性（编排层）解耦。
 const ReservedSchema = z.object({
-  availableRoutes: z.array(z.string()),
+  availableIntents: z.array(
+    z.object({
+      key: z.string(),
+      label: z.string(),
+      criteria: z.array(z.string()),
+    }),
+  ),
 });
+// 014 D3：enum 静态闭集（全表 ∪ CHAT ∪ UNKNOWN）——三协议都把 outputSchema 作硬约束下发，
+// 非法值在解码层即被拒绝；不再输出 routeIds（路由映射归编排层）。
 const OutputSchema = z.object({
-  intent: z.enum(["售前", "售后", "学习", "unknown"]),
-  routeIds: z.array(z.string()),
+  intent: z.enum(INTENT_OUTPUT_KEYS as unknown as [string, ...string[]]),
   confidence: z.number().min(0).max(1),
 });
 
@@ -32,18 +40,8 @@ export const INTENT_CONTRACT: NodeContract<
   outputSchema: OutputSchema,
   templateFields: NODE_CONTRACTS.intent.templateFields,
   systemInstructions:
-    "你是 RAG 流程中的「意图识别」节点。从平台在运行时注入的候选路由中，选出与用户问题最匹配的" +
-    "意图与路由，并给出置信度。只做判断，不回答问题。输出必须符合平台提供的 JSON Schema。",
-  extraValidate: (output, reserved): ValidationIssue[] => {
-    const illegal = output.routeIds.filter((id) => !reserved.availableRoutes.includes(id));
-    if (illegal.length === 0) return [];
-    return [
-      {
-        code: "ROUTE_ID_NOT_AVAILABLE",
-        message: `routeIds 越权：${illegal.join(",")} 不在本次 availableRoutes 内`,
-        field: "routeIds",
-      },
-    ];
-  },
-  fallback: () => ({ intent: "unknown", routeIds: [], confidence: 0 }),
+    "你是 RAG 流程中的「意图识别」节点。从平台在运行时注入的候选意图（含判断标准 criteria）中" +
+    "选择最匹配的大分类：先匹配小分类判断标准，再归拢到所属大分类；闲聊/问候/寒暄归 CHAT；" +
+    "无法归类归 UNKNOWN。只做判断，不回答问题。输出必须符合平台提供的 JSON Schema。",
+  fallback: () => ({ intent: UNKNOWN_INTENT_KEY, confidence: 0 }),
 };
