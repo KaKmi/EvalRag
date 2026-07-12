@@ -14,4 +14,8 @@ describe("otel conventions", () => {
     expect(CODECRUSH_SPAN_KIND.LLM).toBe("llm");
     expect(CODECRUSH_SPAN_KIND.CUSTOM).toBe("custom");
   });
+
+  it("CODECRUSH_SPAN_KIND 含 CHAIN（编排根 span）", () => {
+    expect(CODECRUSH_SPAN_KIND.CHAIN).toBe("chain");
+  });
 });

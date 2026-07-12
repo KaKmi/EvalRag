@@ -284,7 +284,14 @@ describe("ChatStreamEventSchema (discriminated union)", () => {
     expect(e.type).toBe("citation");
   });
   it("accepts a done event", () => {
-    expect(ChatStreamEventSchema.parse({ type: "done", traceId: "abc" }).type).toBe("done");
+    const e = ChatStreamEventSchema.parse({
+      type: "done",
+      traceId: "abc",
+      coverage: "full",
+      isFallback: false,
+      fallbackReasons: [],
+    });
+    expect(e.type).toBe("done");
   });
   it("accepts an error event", () => {
     expect(ChatStreamEventSchema.parse({ type: "error", message: "boom" }).type).toBe("error");

@@ -15,6 +15,15 @@ export type Conversation = z.infer<typeof ConversationSchema>;
 export const ConversationListResponseSchema = z.array(ConversationSchema);
 export type ConversationListResponse = z.infer<typeof ConversationListResponseSchema>;
 
+// M8 兜底上下文快照（落库供历史回放，013 §7）
+export const FallbackInfoSchema = z.object({
+  reasons: z.array(z.string()),
+  topScore: z.number().optional(),
+  threshold: z.number().optional(),
+  scopeKbNames: z.array(z.string()).optional(),
+});
+export type FallbackInfo = z.infer<typeof FallbackInfoSchema>;
+
 export const MessageSchema = z.object({
   id: z.string().min(1),
   convId: z.string().min(1),
@@ -22,6 +31,9 @@ export const MessageSchema = z.object({
   content: z.string(),
   traceId: z.string().optional(),
   confidence: z.number().min(0).max(1).optional(),
+  coverage: z.enum(["full", "partial"]).optional(),
+  isFallback: z.boolean().optional(),
+  fallbackInfo: FallbackInfoSchema.optional(),
   citations: z.array(z.string().min(1)).optional(),
 });
 export type Message = z.infer<typeof MessageSchema>;

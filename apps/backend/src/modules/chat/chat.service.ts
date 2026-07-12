@@ -24,7 +24,14 @@ export class ChatService {
         score: 0.82,
       },
     });
-    events.push({ type: "done", traceId: MOCK_TRACE_ID, confidence: 0.82 });
+    events.push({
+      type: "done",
+      traceId: MOCK_TRACE_ID,
+      confidence: 0.82,
+      coverage: "full",
+      isFallback: false,
+      fallbackReasons: [],
+    });
     return events;
   }
 }

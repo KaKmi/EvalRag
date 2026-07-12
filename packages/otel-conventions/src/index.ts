@@ -48,6 +48,7 @@ export const OTEL_OPERATIONS = {
 } as const;
 
 export const CODECRUSH_SPAN_KIND = {
+  CHAIN: "chain",
   LLM: "llm",
   EMBEDDINGS: "embeddings",
   RETRIEVAL: "retrieval",
