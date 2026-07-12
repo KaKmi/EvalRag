@@ -59,6 +59,7 @@ import type {
 import { ChatModule } from "../src/modules/chat/chat.module";
 import { ChunksModule } from "../src/modules/chunks/chunks.module";
 import { ConversationsModule } from "../src/modules/conversations/conversations.module";
+import { ConversationsRepository } from "../src/modules/conversations/conversations.repository";
 import { DocumentsModule } from "../src/modules/documents/documents.module";
 import { IngestionModule } from "../src/modules/ingestion/ingestion.module";
 import { KnowledgeBasesModule } from "../src/modules/knowledge-bases/knowledge-bases.module";
@@ -852,6 +853,61 @@ const fakeQueue = {
   subscribe: jest.fn(async () => undefined),
 };
 
+// M8 Task 3：ConversationsRepository 走 DRIZZLE，e2e 用内存假 repo（seed c1 供只读断言；
+// Task 8 将改为「先经写路径造数据再读」）。
+type ConvRec = { id: string; agentId: string; userId?: string; title: string; updatedAt: Date };
+type MsgRec = import("@codecrush/contracts").Message;
+let convSeq = 1;
+const inMemoryConvs: ConvRec[] = [
+  { id: "c1", agentId: "aftersale", userId: "u1", title: "怎么退货", updatedAt: new Date() },
+];
+const inMemoryMsgs: MsgRec[] = [
+  { id: "m1", convId: "c1", role: "user", content: "怎么退货" },
+  {
+    id: "m2",
+    convId: "c1",
+    role: "assistant",
+    content: "见退货政策[1]",
+    traceId: "391dae938234560b16bb63f51501cb6f",
+    confidence: 0.82,
+    coverage: "full",
+    isFallback: false,
+    fallbackInfo: { reasons: [] },
+    citations: ["1"],
+  },
+];
+const toConvDto = (c: ConvRec) => ({
+  id: c.id,
+  agentId: c.agentId,
+  userId: c.userId,
+  title: c.title,
+  updatedAt: c.updatedAt.toISOString(),
+});
+const inMemoryConversationsRepo = {
+  createConversation: async (input: { agentId: string; userId?: string; title: string }) => {
+    const rec: ConvRec = { id: `c${++convSeq}`, ...input, updatedAt: new Date() };
+    inMemoryConvs.push(rec);
+    return toConvDto(rec);
+  },
+  appendMessage: async (input: Omit<MsgRec, "id">) => {
+    const msg: MsgRec = { id: `m${inMemoryMsgs.length + 1}`, ...input } as MsgRec;
+    inMemoryMsgs.push(msg);
+    const conv = inMemoryConvs.find((c) => c.id === input.convId);
+    if (conv) conv.updatedAt = new Date();
+    return msg;
+  },
+  list: async (agentId?: string) =>
+    inMemoryConvs
+      .filter((c) => !agentId || c.agentId === agentId)
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+      .map(toConvDto),
+  getById: async (id: string) => {
+    const rec = inMemoryConvs.find((c) => c.id === id);
+    return rec ? toConvDto(rec) : undefined;
+  },
+  listMessages: async (convId: string) => inMemoryMsgs.filter((m) => m.convId === convId),
+};
+
 describe("M2 domain skeleton", () => {
   let app: INestApplication;
   let token: string;
@@ -907,6 +963,8 @@ describe("M2 domain skeleton", () => {
       .useValue(fakeQueue)
       .overrideProvider(RELEASE_CHECK_QUEUE)
       .useValue(fakeQueue)
+      .overrideProvider(ConversationsRepository)
+      .useValue(inMemoryConversationsRepo)
       .compile();
     app = ref.createNestApplication();
     applyGlobalConfig(app);
