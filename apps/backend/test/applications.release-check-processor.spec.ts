@@ -1,3 +1,4 @@
+import { INTENT_TABLE } from "@codecrush/contracts";
 import { ReleaseCheckProcessor } from "../src/modules/applications/release-check.processor";
 
 const versionRow = {
@@ -23,7 +24,6 @@ function make(overrides: Record<string, unknown> = {}) {
   const repo = {
     findReleaseCheckById: jest.fn(async () => ({ id: "rc1", status: "queued", startedAt: null, configVersionId: "v1" })),
     findVersionById: jest.fn(async () => versionRow),
-    findVersionKbIds: jest.fn(async () => ["kb1"]),
     markReleaseCheckRunning: jest.fn(async () => undefined),
     markReleaseCheckResult: jest.fn(async () => undefined),
     ...overrides,
@@ -73,6 +73,13 @@ describe("ReleaseCheckProcessor", () => {
     const result = repo.markReleaseCheckResult.mock.calls[0][1];
     expect(result.status).toBe("passed");
     expect(result.expiresAt).toBeInstanceOf(Date);
+    // 014 D5：intent 冒烟样例注入静态全表 availableIntents（不再按 kbIds 派生子集）
+    const intentCall = nodeRuntime.compileAndSample.mock.calls.find(
+      (c: unknown[]) => (c[0] as { node: string }).node === "intent",
+    );
+    expect((intentCall![0] as { samples: { runtimeContext: unknown }[] }).samples[0].runtimeContext).toEqual({
+      availableIntents: INTENT_TABLE,
+    });
   });
 
   it("a failing sample → failed, issue carries node + traceId + OPEN_PROMPT_TRY_RUN", async () => {
@@ -91,7 +98,6 @@ describe("ReleaseCheckProcessor", () => {
       {
         findReleaseCheckById: jest.fn(async () => ({ id: "rc1", status: "queued", startedAt: null, configVersionId: "v1" })),
         findVersionById: jest.fn(async () => versionRow),
-        findVersionKbIds: jest.fn(async () => ["kb1"]),
         markReleaseCheckRunning: jest.fn(async () => undefined),
         markReleaseCheckResult: repo.markReleaseCheckResult,
       } as never,
@@ -114,7 +120,7 @@ describe("ReleaseCheckProcessor", () => {
 
   it("review P2-2：基础设施异常（如 DB 抖动）→ 标 failed INTERNAL_ERROR 而非永久卡 running", async () => {
     const { proc, repo } = make({
-      findVersionKbIds: jest.fn(async () => {
+      findVersionById: jest.fn(async () => {
         throw new Error("db connection reset");
       }),
     });

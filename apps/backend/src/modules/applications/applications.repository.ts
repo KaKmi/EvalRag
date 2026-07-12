@@ -22,6 +22,15 @@ export type ApplicationListRow = ApplicationRow & {
   versionCount: number;
 };
 
+// QA fix：applications.id 是 Postgres uuid 类型列——findVisibleAppByIdOrSlug（M7b）先无条件
+// 按 id 查，非 UUID 输入（如 slug）会让驱动层直接抛 22P02 类型转换错误，从未走到 findBySlug
+// 兜底分支，冒泡成裸 500（真实 Postgres 上验证；内存假 repo 的 e2e 从未真正触发过这条路径）。
+// 查询前先做格式判断，非 UUID 直接短路返回 undefined，交给调用方的 slug 兜底分支处理。
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
 const APP_SELECT = {
   id: applications.id,
   slug: applications.slug,
@@ -62,6 +71,7 @@ export class ApplicationsRepository {
       .orderBy(desc(applications.updatedAt));
   }
   async findApplicationById(id: string): Promise<ApplicationListRow | undefined> {
+    if (!isUuid(id)) return undefined;
     return (
       await this.db
         .select(APP_SELECT)

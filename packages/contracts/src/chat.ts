@@ -26,10 +26,23 @@ export const ChatCitationEventSchema = z.object({
   citation: ChatCitationSchema,
 });
 
+// M8 兜底原因（013 §6 四原因 + 014 CHAT 闲聊）
+export const FallbackReasonSchema = z.enum([
+  "out_of_scope",
+  "low_similarity",
+  "empty_retrieval",
+  "chitchat",
+  "handled_by_fallback",
+]);
+export type FallbackReason = z.infer<typeof FallbackReasonSchema>;
+
 export const ChatDoneEventSchema = z.object({
   type: z.literal("done"),
   traceId: z.string().min(1),
   confidence: z.number().min(0).max(1).optional(),
+  coverage: z.enum(["full", "partial"]),
+  isFallback: z.boolean(),
+  fallbackReasons: z.array(FallbackReasonSchema),
 });
 
 export const ChatErrorEventSchema = z.object({

@@ -5,8 +5,8 @@ category: "design"
 number: "011"
 status: draft
 services: [backend, contracts]
-related: ["design/001", "design/002", "design/003", "design/009", "design/012"]
-last_modified: "2026-07-11"
+related: ["design/001", "design/002", "design/003", "design/009", "design/012", "design/014"]
+last_modified: "2026-07-12"
 ---
 
 # 011 — Prompt 组装与 LLM 节点契约（NodeContract 执行引擎）
@@ -141,6 +141,8 @@ last_modified: "2026-07-11"
 | outSchema     | `confidence`      | `number`·0–1，示例 `0.92`                                                                                            |
 | extraValidate | —                 | `routeIds` 的每个值必须属于本次 `availableRoutes`；模型即使返回合法 JSON，也不能路由到应用未绑定的知识库，越权即拒绝 |
 | fallback      | —                 | `intent=unknown`、`routeIds` 置空，走默认库或直接进兜底                                                              |
+
+> **2026-07-12 修订（[014-intent-routing](014-intent-routing.md) 就地改 v1）**：上表 intent 契约内容已被 014 §D3 取代——reserved 改 `availableIntents: [{key,label,criteria[]}]`（恒注入意图表全表）；outSchema 去 `routeIds`，`intent` 改静态闭集 enum（`INTENT_TABLE keys ∪ CHAT ∪ UNKNOWN`）；extraValidate 删除（enum 已收口）；fallback 改 `{intent:"UNKNOWN", confidence:0}`；System 外壳文案改为「先匹小分类再归拢大分类，闲聊归 CHAT，无法归类归 UNKNOWN」。路由由编排层按 KB 外挂绑定映射完成，模型不接触 KB id。
 
 #### 回复生成 `reply`
 

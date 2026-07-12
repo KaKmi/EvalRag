@@ -98,10 +98,9 @@ export class NodeRuntimeService {
     >;
     const steps: ValidateStep[] = [];
 
-    // review round 1：reservedDataSchema 此前从未校验——intent 的 extraValidate 直接
-    // 索引 reserved.availableRoutes，caller 传入缺字段的 reserved（RuntimeContext 里
-    // availableRoutes 是 optional）会在 extraValidate 内部抛未捕获 TypeError，而不是
-    // 像 input 校验失败那样优雅降级。两个前置校验都过了才进入真正的模型调用。
+    // review round 1：input/reserved 两步前置校验——校验失败即优雅降级为 fallback，
+    // 不把缺字段的 reserved 带进下游（否则消费 reserved 的逻辑会抛未捕获 TypeError，
+    // 而非像 input 校验失败那样降级）。两个前置校验都过了才进入真正的模型调用。
     const inputCheck = contract.inputSchema.safeParse(input);
     steps.push({
       step: "input",

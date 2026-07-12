@@ -30,7 +30,7 @@ export interface NodeFieldContract {
 // 012 §5 权威字段表——011 的 NodeContract.templateFields 复用此表，不得另行定义。
 export const NODE_CONTRACTS: Record<PromptNode, NodeFieldContract> = {
   rewrite: { templateFields: ["query", "history"], reservedFields: [] },
-  intent: { templateFields: ["query", "history"], reservedFields: ["availableRoutes"] },
+  intent: { templateFields: ["query", "history"], reservedFields: ["availableIntents"] },
   reply: {
     templateFields: ["query", "history", "retrievalContext"],
     reservedFields: ["citations"],

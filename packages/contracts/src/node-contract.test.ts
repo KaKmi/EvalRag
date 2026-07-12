@@ -17,7 +17,7 @@ describe("NODE_CONTRACTS 静态字段表", () => {
   // 012 §5 权威字段表逐节点断言
   it.each([
     ["rewrite", ["query", "history"], []],
-    ["intent", ["query", "history"], ["availableRoutes"]],
+    ["intent", ["query", "history"], ["availableIntents"]],
     ["reply", ["query", "history", "retrievalContext"], ["citations"]],
     ["fallback", [], []],
   ] as const)("%s 节点字段表对齐 012", (node, templateFields, reservedFields) => {
@@ -75,12 +75,18 @@ describe("compilePromptBody · 模板语法错误", () => {
 });
 
 describe("compilePromptBody · 字段归属错误", () => {
-  it("引用保留字段报 RESERVED_FIELD（intent 的 availableRoutes）", () => {
-    const r = compilePromptBody("路由表：{availableRoutes}", "intent");
+  it("引用保留字段报 RESERVED_FIELD（intent 的 availableIntents）", () => {
+    const r = compilePromptBody("候选意图：{availableIntents}", "intent");
     expect(r.status).toBe("has_errors");
     const issue = r.issues.find((i) => i.code === "RESERVED_FIELD");
     expect(issue?.severity).toBe("error");
-    expect(issue?.field).toBe("availableRoutes");
+    expect(issue?.field).toBe("availableIntents");
+  });
+
+  it("旧保留字段 {availableRoutes} 改名后按 UNKNOWN_VARIABLE 报错（014 D3：无静默放行窗口）", () => {
+    const r = compilePromptBody("{availableRoutes}", "intent");
+    expect(r.status).toBe("has_errors");
+    expect(r.issues.find((i) => i.field === "availableRoutes")?.code).toBe("UNKNOWN_VARIABLE");
   });
 
   it("引用保留字段报 RESERVED_FIELD（reply 的 citations）", () => {
@@ -89,8 +95,8 @@ describe("compilePromptBody · 字段归属错误", () => {
   });
 
   it("保留字段跨节点引用同样报 RESERVED_FIELD（全局不可引用类，非 FIELD_NOT_AVAILABLE）", () => {
-    const r1 = compilePromptBody("{availableRoutes}", "rewrite");
-    expect(r1.issues.find((i) => i.field === "availableRoutes")?.code).toBe("RESERVED_FIELD");
+    const r1 = compilePromptBody("{availableIntents}", "rewrite");
+    expect(r1.issues.find((i) => i.field === "availableIntents")?.code).toBe("RESERVED_FIELD");
     const r2 = compilePromptBody("{citations}", "fallback");
     expect(r2.issues.find((i) => i.field === "citations")?.code).toBe("RESERVED_FIELD");
   });
@@ -164,14 +170,14 @@ describe("compilePromptBody · 重复警告", () => {
 
 describe("compilePromptBody · 顺序稳定性与 extractVars 兼容", () => {
   it("issues 顺序稳定：语法错误在前，字段错误按正文出现顺序，警告最后", () => {
-    const body = "{unknown_b} {availableRoutes} {unknown_a} 残缺 {";
+    const body = "{unknown_b} {availableIntents} {unknown_a} 残缺 {";
     const r1 = compilePromptBody(body, "intent");
     const r2 = compilePromptBody(body, "intent");
     expect(r1).toEqual(r2);
     const codes = r1.issues.map((i: CompileIssue) => i.code);
     expect(codes[0]).toBe("INVALID_TEMPLATE_SYNTAX");
     const fieldOrder = r1.issues.filter((i) => i.field).map((i) => i.field);
-    expect(fieldOrder).toEqual(["unknown_b", "availableRoutes", "unknown_a"]);
+    expect(fieldOrder).toEqual(["unknown_b", "availableIntents", "unknown_a"]);
   });
 
   it("字段发现与 extractVars 一致（同一正则语义，非 \\w 内容不算占位符）", () => {
@@ -211,7 +217,7 @@ describe("compilePromptBody · 跨节点表驱动", () => {
   it.each(PromptNodeSchema.options.map((n) => [n] as const))(
     "%s 节点引用保留字段一律报 RESERVED_FIELD",
     (node) => {
-      for (const reserved of ["availableRoutes", "citations"]) {
+      for (const reserved of ["availableIntents", "citations"]) {
         const r = compilePromptBody(`{${reserved}}`, node);
         expect(r.status).toBe("has_errors");
         expect(r.issues.find((i) => i.field === reserved)?.code).toBe("RESERVED_FIELD");

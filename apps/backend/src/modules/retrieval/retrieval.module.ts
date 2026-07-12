@@ -14,5 +14,6 @@ import { KnowledgeBasesModule } from "../knowledge-bases/knowledge-bases.module"
   imports: [ChunksModule, ModelsModule, KnowledgeBasesModule],
   controllers: [RetrievalController],
   providers: [RetrievalService, { provide: RETRIEVER_PORT, useClass: PgHybridRetriever }],
+  exports: [RetrievalService],
 })
 export class RetrievalModule {}

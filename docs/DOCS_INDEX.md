@@ -14,5 +14,7 @@
 | design | 008 | draft | M5 检索 | M5 设计：RetrieverPort 真实实现（pgvector 向量召回 + tsvector 关键词召回 + 加权融合 + 可选 rerank）与检索测试台。 | 2026-07-09 | [008](docs/design/008-m5-retrieval.md) |
 | design | 009 | not-implemented | M7 应用管理与配置发布 | 应用发布：production 单指针（受门禁 CAS）+ 版本命名标签访问锚点 + 异步真实 NodeRuntime ReleaseCheck。 | 2026-07-12 | [009](docs/design/009-m7-application-management.md) |
 | design | 010 | draft | 文档处理 Profile 与结构化入库管线 | 用版本化 Profile 编排解析、清洗与分块，统一输出可溯源 Markdown，并支持 PDF 版面解析与 OCR。 | 2026-07-10 | [010](docs/design/010-document-processing-profiles.md) |
-| design | 011 | draft | Prompt 组装与 LLM 节点契约（NodeContract 执行引擎） | 四个固定节点的完整 NodeContract 数据、三层 Prompt 组装与 NodeRuntimeService 执行/校验/Fallback 设计，本轮写死代码。 | 2026-07-11 | [011](docs/design/011-prompt-assembly-node-contracts.md) |
+| design | 011 | draft | Prompt 组装与 LLM 节点契约（NodeContract 执行引擎） | 四个固定节点的完整 NodeContract 数据、三层 Prompt 组装与 NodeRuntimeService 执行/校验/Fallback 设计，本轮写死代码。 | 2026-07-12 | [011](docs/design/011-prompt-assembly-node-contracts.md) |
 | design | 012 | current | Prompt 管理模块重构 | Prompt 版本从三态状态机改为可排他移动的标识（标签）模型，详情页新增试运行，谁在用改为应用域只读派生视图。 | 2026-07-11 | [012](docs/design/012-prompt-management-redesign.md) |
+| design | 013 | draft | 问答 / RAG 编排内核（M8 OrchestrationService 与 SSE 流式） | 七节点编排流水线、SSE 逐 token 流式、会话/消息持久化与完整 OTLP trace 写侧的架构设计。 | 2026-07-12 | [013](docs/design/013-m8-rag-orchestration.md) |
+| design | 014 | draft | 两级意图表与知识库外挂意图路由 | 意图节点只做静态闭集大分类，路由靠 KB↔意图绑定映射；替换 013 的 KB-UUID 路由方案。 | 2026-07-12 | [014](docs/design/014-intent-routing.md) |

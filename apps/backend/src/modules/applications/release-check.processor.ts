@@ -83,9 +83,6 @@ export class ReleaseCheckProcessor implements OnModuleInit {
       });
       return;
     }
-    // 冒烟预演的候选路由 = 应用固定的 kbIds（intent 越权校验用）
-    const availableRoutes = await this.repo.findVersionKbIds(version.id);
-
     const issues: ReleaseCheckIssue[] = [];
     const summary: Record<string, { ok: number; total: number }> = {};
     let allOk = true;
@@ -101,7 +98,8 @@ export class ReleaseCheckProcessor implements OnModuleInit {
         continue;
       }
       const params = version.nodeParams[node];
-      const samples = buildSamples(node, availableRoutes);
+      // 014 D5：intent 样例内部注入静态全表 availableIntents，不再按 kbIds 派生候选路由
+      const samples = buildSamples(node);
       const result = await this.nodeRuntime.compileAndSample({
         node,
         contractVersion: exec.contractVersion,
