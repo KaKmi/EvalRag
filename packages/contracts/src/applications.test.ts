@@ -5,8 +5,12 @@ import {
   ApplicationConfigVersionSchema,
   ApplicationDetailSchema,
   ApplicationSchema,
+  ApplicationTagNameSchema,
   CreateApplicationRequestSchema,
+  MoveApplicationTagRequestSchema,
+  PublishProductionRequestSchema,
   PromptUsageEntrySchema,
+  ReleaseCheckSchema,
   UpdateApplicationRequestSchema,
 } from "./applications";
 
@@ -173,5 +177,64 @@ describe("application contracts", () => {
     ).toEqual({ mode: "unavailable", reason: "pending_orchestration" });
     expect(() => ApplicationChatResultSchema.parse({ mode: "text", text: "premature" })).toThrow();
     expect(() => ApplicationChatResultSchema.parse({ mode: "unknown" })).toThrow();
+  });
+});
+
+describe("application version naming tags (M7b)", () => {
+  it("normalizes tag name to lowercase", () => {
+    expect(ApplicationTagNameSchema.parse("QA2026")).toBe("qa2026");
+  });
+  it("rejects reserved word production (case-insensitive)", () => {
+    expect(() => ApplicationTagNameSchema.parse("production")).toThrow();
+    expect(() => ApplicationTagNameSchema.parse("Production")).toThrow();
+  });
+  it("rejects reserved word v (version-prefix collision)", () => {
+    expect(() => ApplicationTagNameSchema.parse("v")).toThrow();
+    expect(() => ApplicationTagNameSchema.parse("V")).toThrow();
+  });
+  it("rejects illegal characters", () => {
+    expect(() => ApplicationTagNameSchema.parse("a b")).toThrow();
+    expect(() => ApplicationTagNameSchema.parse("标签")).toThrow();
+    expect(() => ApplicationTagNameSchema.parse("")).toThrow();
+  });
+  it("accepts custom anchors including beta", () => {
+    expect(ApplicationTagNameSchema.parse("qa20260707")).toBe("qa20260707");
+    expect(ApplicationTagNameSchema.parse("beta")).toBe("beta");
+    expect(ApplicationTagNameSchema.parse("v2.1_rc-3")).toBe("v2.1_rc-3");
+  });
+  it("MoveApplicationTagRequest requires name + versionId", () => {
+    expect(MoveApplicationTagRequestSchema.parse({ name: "QA", versionId: "v1" })).toEqual({
+      name: "qa",
+      versionId: "v1",
+    });
+    expect(() => MoveApplicationTagRequestSchema.parse({ name: "production", versionId: "v1" })).toThrow();
+    expect(() => MoveApplicationTagRequestSchema.parse({ name: "qa" })).toThrow();
+  });
+  it("PublishProductionRequest allows null expected pointer (first publish)", () => {
+    expect(
+      PublishProductionRequestSchema.parse({
+        versionId: "v2",
+        releaseCheckId: "rc1",
+        expectedProductionVersionId: null,
+      }),
+    ).toMatchObject({ expectedProductionVersionId: null });
+  });
+  it("ReleaseCheck accepts a passed check with issues and expiry", () => {
+    const check = {
+      id: "rc1",
+      applicationId: "app1",
+      configVersionId: "v2",
+      configFingerprint: "abc",
+      status: "passed" as const,
+      issues: [],
+      sampleSummary: {},
+      startedAt: "2026-07-12T00:00:00.000Z",
+      finishedAt: "2026-07-12T00:00:12.000Z",
+      expiresAt: "2026-07-12T00:15:12.000Z",
+      createdBy: "admin",
+      createdAt: "2026-07-12T00:00:00.000Z",
+    };
+    expect(ReleaseCheckSchema.parse(check)).toEqual(check);
+    expect(() => ReleaseCheckSchema.parse({ ...check, status: "bogus" })).toThrow();
   });
 });

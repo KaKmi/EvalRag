@@ -19,7 +19,7 @@ function journalTags(): string[] {
   return journal.entries.map((entry) => entry.tag);
 }
 
-async function resetAndMigrate(pool: Pool): Promise<void> {
+async function resetAndMigrate(pool: Pool, stopTag: string = ADDITIVE_TAG): Promise<void> {
   await pool.query("DROP SCHEMA public CASCADE");
   await pool.query("CREATE SCHEMA public");
   await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
@@ -28,9 +28,9 @@ async function resetAndMigrate(pool: Pool): Promise<void> {
     for (const raw of text.split("--> statement-breakpoint")) {
       if (raw.trim()) await pool.query(raw.trim());
     }
-    if (tag === ADDITIVE_TAG) return;
+    if (tag === stopTag) return;
   }
-  throw new Error(`journal 中不存在 ${ADDITIVE_TAG}`);
+  throw new Error(`journal 中不存在 ${stopTag}`);
 }
 
 describeDb("applications migration + backfill", () => {
@@ -247,5 +247,140 @@ describeDb("applications migration + backfill", () => {
         )
       ).rowCount,
     ).toBe(0);
+  });
+});
+
+// M7b S1：0014 加法迁移——命名标签表（复合 FK 归属）+ release_checks 表 + 复合唯一。
+describeDb("M7b 0014 release-tags migration", () => {
+  let pool: Pool;
+  const ids: Record<string, string> = {};
+
+  const NODE_PARAMS = JSON.stringify({
+    rewrite: { freedom: "balance", temperature: 0.7, topP: 0.9 },
+    intent: { freedom: "balance", temperature: 0.7, topP: 0.9 },
+    reply: { freedom: "balance", temperature: 0.7, topP: 0.9 },
+    fallback: { freedom: "balance", temperature: 0.7, topP: 0.9 },
+  });
+  const RETRIEVAL = JSON.stringify({
+    schemaVersion: 1,
+    topK: 20,
+    topN: 5,
+    hybridEnabled: true,
+    vectorWeight: 0.7,
+    rerankEnabled: false,
+  });
+
+  async function insertConfigVersion(appId: string, version: number): Promise<string> {
+    return (
+      await pool.query(
+        `INSERT INTO application_config_versions
+          (application_id,version,config_schema_version,
+           prompt_rewrite_version_id,prompt_intent_version_id,prompt_reply_version_id,prompt_fallback_version_id,
+           rewrite_model_id,intent_model_id,reply_model_id,fallback_model_id,
+           node_params,retrieval_params,fallback_params,created_by)
+         VALUES ($1,$2,1,$3,$3,$3,$3,$4,$4,$4,$4,$5,$6,'{"toHuman":true}','t')
+         RETURNING id`,
+        [appId, version, ids.promptVersion, ids.model, NODE_PARAMS, RETRIEVAL],
+      )
+    ).rows[0].id;
+  }
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: process.env.MIGRATION_TEST_DATABASE_URL });
+    await resetAndMigrate(pool, "0014_m7b_release_tags");
+    ids.model = (
+      await pool.query(`INSERT INTO model_providers
+        (type,protocol,name,base_url,api_key_enc,params,enabled)
+        VALUES ('llm','openai_compat','m','http://x','enc','{}',true) RETURNING id`)
+    ).rows[0].id;
+    ids.prompt = (
+      await pool.query(
+        `INSERT INTO prompts (name,node,updated_by) VALUES ('p','reply','t') RETURNING id`,
+      )
+    ).rows[0].id;
+    ids.promptVersion = (
+      await pool.query(
+        `INSERT INTO prompt_versions
+          (prompt_id,version,body,variables,author,contract_version,compile_status,compile_errors)
+         VALUES ($1,1,'{query}','["query"]','t',1,'ok','[]') RETURNING id`,
+        [ids.prompt],
+      )
+    ).rows[0].id;
+    ids.appA = (
+      await pool.query(
+        `INSERT INTO applications (slug,name,description,enabled,created_by,updated_by)
+         VALUES ('app-a','App A','',true,'t','t') RETURNING id`,
+      )
+    ).rows[0].id;
+    ids.appB = (
+      await pool.query(
+        `INSERT INTO applications (slug,name,description,enabled,created_by,updated_by)
+         VALUES ('app-b','App B','',true,'t','t') RETURNING id`,
+      )
+    ).rows[0].id;
+    ids.versionA = await insertConfigVersion(ids.appA, 1);
+    ids.versionB = await insertConfigVersion(ids.appB, 1);
+  });
+
+  afterAll(async () => pool?.end());
+
+  it("creates the tag + release-check tables and the composite-owner unique index", async () => {
+    const tables = (
+      await pool.query(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema='public' AND table_name LIKE 'application%' ORDER BY table_name`,
+      )
+    ).rows.map((r) => r.table_name);
+    expect(tables).toContain("application_config_version_tags");
+    expect(tables).toContain("application_release_checks");
+    expect(
+      (
+        await pool.query(
+          `SELECT 1 FROM pg_indexes WHERE indexname='application_config_versions_id_application_id_uniq'`,
+        )
+      ).rowCount,
+    ).toBe(1);
+  });
+
+  it("accepts a same-application tag and rejects a cross-application tag (composite FK)", async () => {
+    await expect(
+      pool.query(
+        `INSERT INTO application_config_version_tags (application_id,config_version_id,name,created_by)
+         VALUES ($1,$2,'qa20260707','t')`,
+        [ids.appA, ids.versionA],
+      ),
+    ).resolves.toBeDefined();
+    // 归属违规：给 App A 打的标签指向 App B 的版本 → 复合 FK 直接拒绝
+    await expect(
+      pool.query(
+        `INSERT INTO application_config_version_tags (application_id,config_version_id,name,created_by)
+         VALUES ($1,$2,'qa2','t')`,
+        [ids.appA, ids.versionB],
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("enforces case-insensitive per-application tag exclusivity", async () => {
+    await pool.query(
+      `INSERT INTO application_config_version_tags (application_id,config_version_id,name,created_by)
+       VALUES ($1,$2,'beta','t')`,
+      [ids.appA, ids.versionA],
+    );
+    // 同应用同名（大小写不敏感）第二行 → lower(name) 唯一索引拒绝
+    await expect(
+      pool.query(
+        `INSERT INTO application_config_version_tags (application_id,config_version_id,name,created_by)
+         VALUES ($1,$2,'BETA','t')`,
+        [ids.appA, ids.versionA],
+      ),
+    ).rejects.toMatchObject({ code: "23505" });
+    // 不同应用同名允许（排他是每应用内的）
+    await expect(
+      pool.query(
+        `INSERT INTO application_config_version_tags (application_id,config_version_id,name,created_by)
+         VALUES ($1,$2,'beta','t')`,
+        [ids.appB, ids.versionB],
+      ),
+    ).resolves.toBeDefined();
   });
 });

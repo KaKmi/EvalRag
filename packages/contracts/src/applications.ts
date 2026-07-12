@@ -135,3 +135,83 @@ export const ApplicationChatResultSchema = z.discriminatedUnion("mode", [
   }),
 ]);
 export type ApplicationChatResult = z.infer<typeof ApplicationChatResultSchema>;
+
+// —— M7b 版本命名标签（自定义访问锚点，混合模型 B+：production 不入此表）——
+// 复制 PromptTagNameSchema（prompts.ts）正则 + lowercase 归一，但**关键分叉**：应用侧
+// 后端强制拒绝保留字 production（走受门禁 PUT /production）与 v（版本号前缀混淆）。
+export const APPLICATION_TAG_RESERVED = ["production", "v"] as const;
+export const ApplicationTagNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9._-]+$/, "标签名仅允许字母、数字、.、_、-")
+  .transform((s) => s.toLowerCase())
+  .refine(
+    (n) => !(APPLICATION_TAG_RESERVED as readonly string[]).includes(n),
+    "production/v 是保留字，不能作自定义标签",
+  );
+
+export const MoveApplicationTagRequestSchema = z.strictObject({
+  name: ApplicationTagNameSchema,
+  versionId: z.string().min(1),
+});
+export type MoveApplicationTagRequest = z.infer<typeof MoveApplicationTagRequestSchema>;
+
+export const ApplicationTagSchema = z.strictObject({
+  name: z.string().min(1),
+  versionId: z.string().min(1),
+  version: z.number().int().positive(),
+});
+export type ApplicationTag = z.infer<typeof ApplicationTagSchema>;
+export const ApplicationTagListResponseSchema = z.array(ApplicationTagSchema);
+export type ApplicationTagListResponse = z.infer<typeof ApplicationTagListResponseSchema>;
+
+// —— M7b ReleaseCheck（异步真实 NodeRuntime 预演结果）——
+export const ReleaseCheckIssueSchema = z.strictObject({
+  code: z.string(),
+  node: PromptNodeSchema.optional(),
+  promptVersionId: z.string().optional(),
+  sampleIndex: z.number().int().optional(),
+  traceId: z.string().optional(),
+  action: z.literal("OPEN_PROMPT_TRY_RUN").optional(),
+  message: z.string(),
+});
+export type ReleaseCheckIssue = z.infer<typeof ReleaseCheckIssueSchema>;
+
+export const ReleaseCheckStatusSchema = z.enum([
+  "queued",
+  "running",
+  "passed",
+  "failed",
+  "expired",
+]);
+export type ReleaseCheckStatus = z.infer<typeof ReleaseCheckStatusSchema>;
+
+export const ReleaseCheckSchema = z.strictObject({
+  id: z.string().min(1),
+  applicationId: z.string().min(1),
+  configVersionId: z.string().min(1),
+  configFingerprint: z.string(),
+  status: ReleaseCheckStatusSchema,
+  issues: z.array(ReleaseCheckIssueSchema),
+  sampleSummary: z.record(z.string(), z.unknown()),
+  startedAt: z.string().datetime().nullable(),
+  finishedAt: z.string().datetime().nullable(),
+  expiresAt: z.string().datetime().nullable(),
+  createdBy: z.string().min(1),
+  createdAt: z.string().datetime(),
+});
+export type ReleaseCheck = z.infer<typeof ReleaseCheckSchema>;
+
+// —— M7b production 受门禁 CAS 上线/下线 ——
+export const PublishProductionRequestSchema = z.strictObject({
+  versionId: z.string().min(1),
+  releaseCheckId: z.string().min(1),
+  expectedProductionVersionId: z.string().min(1).nullable(),
+});
+export type PublishProductionRequest = z.infer<typeof PublishProductionRequestSchema>;
+
+export const UnpublishProductionRequestSchema = z.strictObject({
+  expectedProductionVersionId: z.string().min(1).nullable(),
+});
+export type UnpublishProductionRequest = z.infer<typeof UnpublishProductionRequestSchema>;
