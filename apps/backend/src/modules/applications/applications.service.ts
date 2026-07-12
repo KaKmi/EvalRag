@@ -454,7 +454,8 @@ export class ApplicationsService {
       models: nodes.map((node) => ({
         node,
         modelId: version[NODE_COLUMNS[node].model] as string,
-        providerRevision: this.modelRevision(ctx.modelMetas.get(node)),
+        // buildReleaseContext 对四节点必填，但 Map.get 类型为 ModelMeta|undefined——coalesce 满足类型
+        providerRevision: this.modelRevision(ctx.modelMetas.get(node) ?? null),
       })),
       rerankModelId: version.rerankModelId ?? null,
       rerankProviderRevision: version.rerankModelId ? this.modelRevision(ctx.rerank) : null,
