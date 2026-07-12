@@ -1,57 +1,42 @@
 ---
 title: "M7 应用管理与配置发布"
-description: "应用以不可变配置版本和单一生产指针发布，上线前异步执行真实 NodeRuntime 预演。"
+description: "应用发布：production 单指针（受门禁 CAS）+ 版本命名标签访问锚点 + 异步真实 NodeRuntime ReleaseCheck。"
 category: "design"
 number: "009"
 status: not-implemented
 services: [backend, frontend, contracts, chat, node-runtime]
 related: ["design/001", "design/002", "design/003", "design/008", "design/011", "design/012"]
-last_modified: "2026-07-11"
+last_modified: "2026-07-12"
 ---
 
 # 009 — M7 应用管理与配置发布
 
 ## Status
 
-`not-implemented`。2026-07-11 根据最新版 `RAG知识库问答系统设计/CodeCrushBot.dc.html`、聚焦原型 `RAG知识库问答系统设计/应用详情·Playground.dc.html`、011 NodeContract 执行引擎和 012 Prompt 管理重构重新完成架构设计。
+`not-implemented`。2026-07-11 根据最新版 `RAG知识库问答系统设计/CodeCrushBot.dc.html`、聚焦原型 `RAG知识库问答系统设计/应用详情·Playground.dc.html`、011 NodeContract 执行引擎和 012 Prompt 管理重构完成架构设计；2026-07-12 M7b arch-design 定稿**应用版本命名标签 + 发布闭环**并回改本正文，消除此前"正文=单指针 / 附节=标签模型"的自相矛盾。
 
-本版取代本文同日早先的“应用配置版本也使用排他标签、production 门禁只做静态校验”方案。最新聚焦原型只表达一个“服务中版本”，且上线自检要求在真实应用知识库和节点参数下查看四个节点的运行结果。因此最终设计采用 `applications.production_config_version_id` 单指针，并把上线门禁拆成静态检查与异步真实 NodeRuntime 预演。
+**最终采用混合模型 B+**：`applications.production_config_version_id` 单指针**保留**为线上事实的权威列（CAS 目标、ReleaseCheck 落点、公开默认解析、"是否上线"布尔）；**新增** `application_config_version_tags` 表**只存自定义命名锚点**（如 `qa20260707`），作为版本稳定可读的访问引用（等价 git tag）；`production` 是标签命名空间的保留字但**物理上不入表**，只活在指针里。上线门禁仍拆为静态检查 + 异步真实 NodeRuntime 预演。该结论经完整对抗档（host 设计 + peer 独立调查双盲一致 + execution drill）产出，为什么不把 production 也做成标签行见 §Alternatives。
 
-当前代码仍是旧 M7：`apps/backend/src/modules/agents/`、`agents.current_version_id`、`agent_config_versions.status/eval_*`、v1 自动发布和 Eval stub。本文描述的 applications 模块、无状态不可变版本、真实 release check 与新 API 尚未实现，不能标记为 `current`。旧 `008-m7-agent-management.md` 曾记录该实现；因其与 M5 的 008 编号冲突，目标设计规范化为 009，迁移历史保留在本文。
+M7a 已交付应用身份、不可变配置版本与单指针地基（`apps/backend/src/modules/applications/`）。本文 M7b 部分——命名标签表、异步真实 ReleaseCheck、CAS 上线/回滚、`resolveByTag`、停用/恢复/软删——尚未实现，故保持 `not-implemented`。当前发布相关代码仍是旧 M7：`apps/backend/src/modules/agents/`、`agents.current_version_id`、`agent_config_versions.status/eval_*`、v1 自动发布和 Eval stub，作为迁移输入。旧 `008-m7-agent-management.md` 曾记录该实现；因其与 M5 的 008 编号冲突，目标设计规范化为 009，迁移历史保留在本文。
 
-## 决策更新 · 2026-07-11（应用版本命名标签，复议“单指针”）
+## 开放问题决策（2026-07-12 定稿）
 
-> **本节记录一次对下文核心决策的复议，尚未整合进正文；正文其余部分仍描述旧“单指针”方案，冲突处以本节为准，M7b design 时统一回改。M7a 已交付部分不受影响。**
+M7b arch-design 闭合了此前四个待澄清项：
 
-用户（产品）明确新需求：应用配置版本需要**自定义命名标签**（如 `qa20260707`），作为版本的稳定、可读**访问锚点**——
-
-- 打标签后该标签稳定指向打标签时的那个版本；之后新增版本不影响它（等价于 git tag）。
-- 前端可经 `chat/{应用 slug 或 id}/{标签}` 直接解析到该版本对话（QA 验收、分享、留存书签）。
-- `production` 降为一个**保留标签**（决定不带标签访问时的默认版本）；`qa20260707`/`beta` 等为用户自定义锚点。
-
-这**推翻**本文原“单一 `production_config_version_id` 指针 + 明确拒绝应用标签”的决策，涉及冲突处：§Status 第 3 段（“取代早先标签方案”）、§Out-of-scope「应用级自定义标签」、§Context 末段（“不能照搬 Prompt 标签表”）、§Invariants、§编辑保存上线（“不能退回指针+标签双写”）、§Alternatives「生产选择」、§Assumptions「不需要 beta/staging 别名」、§Revisit triggers。原否决理由是“原型只有单一服务中版本，标签是过度设计”；新用例揭示标签价值不在多环境灰度，而在**版本的命名可读引用**，该理由不再成立。
-
-**新方向（M7b 落地，需在 M7b design 细化并回改本文正文）：**
-
-- 新增应用版本命名标签表：应用内标签名唯一；移动语义为“同名标签排他地从旧版本移到新版本”（复用 012 Prompt 标签的排他移动范式，但归属 applications 域，仍不与 Prompt 标签耦合）。
-- `production` 为保留标签，决定公开默认解析；其余为自定义锚点。上线/回滚 = 移动 `production` 标签（与原“移动单指针”语义等价，只是 production 成为标签之一）；ReleaseCheck 仍在移动 production 前执行。
-- 运行时解析扩展为 `resolve(applicationIdOrSlug, tag?)`：带 tag 解析到标签指向版本，不带则用 production；沿用 deleted → disabled → 目标缺失 → resolved 的拒绝顺序。
-- 前端：`/chat/:appIdOrSlug/:tag?` 路由 + 版本历史「管理标识」弹窗（打/移/摘标签，原型 `CodeCrushBot.dc.html` 已画该弹窗）。M7a 详情页暂未做此弹窗（属 M7b）。
-
-**标签写入与列表展示细则（2026-07-11 追加）：**
-
-- 标签在应用内**排他**：一个标签名同一时刻只属于一个版本（复用 012 Prompt 标签的“同名标签唯一”约束）。
-- 给某版本打一个**当前指向别的版本**的标签时，前端须**提示“将从 vX 移动到本版本”**（移动确认，对应原型「管理标识」弹窗“beta 当前指向 v13，勾选将移动到此版本”那条橙色提示）。
-- 打的标签若是保留字 `production`，**不是简单移动标签，而是走上线流程**（先 ReleaseCheck，通过后再原子移动 production 指针）；其余自定义标签的移动即时生效、无上线副作用与 ReleaseCheck。
-- 应用列表：在「标识」列（展示该应用生产版本携带的标签 / 自定义标签）之外，**单加一列「是否上线」**明确上线状态（已上线 vN / 未上线），把“有哪些标签”与“是否对外服务”两件事拆开。M7a 阶段仅有 `production` 概念、两列信息重叠；M7b 引入自定义标签后「标识」列展示 `qa20260707` 等锚点、不再与「是否上线」重复。**（M7a 已按此拆分列表两列。）**
-
-- 待澄清（M7b design 决）：标签是否可被非管理员经 URL 直达（安全/可见性）；自定义标签数量上限；`production` 之外是否还需 `beta` 保留字；移动 `production`（上线）与移动自定义标签是否共用同一「管理标识」入口但分流程。
+| 问题 | 决策 | 理由 |
+|---|---|---|
+| 带标签公开 URL 可见性 | **非 production 标签仅管理员可达**（用户 2026-07-12 拍板） | 自定义标签未过发布门禁，可能指向 ReleaseCheck 失败/从未检查的版本；放匿名直达 = 绕过发布安全门，违反"公众只见受门禁配置"。单管理员模型下 QA/分享=管理员持链接。要公开非 prod 版本属"发布 channel"特性（见 Revisit）。 |
+| 自定义标签数量上限 | **每应用 20 个软上限**，超限 422 | 应用锚点随时间堆积（qa20260707/qa20260814…），不同于 012「1-3 标签/版本」；20 足够 QA/分享，防泛滥与「标识」列 UI 退化 |
+| `production` 之外是否保留 `beta` | **不保留**，唯一保留字是 `production`（+ `v`） | production 特殊仅因其受门禁生命周期；beta 无门禁语义=普通锚点；保留 beta 会暗示不存在的第二特殊通道。多环境路由仍 out-of-scope |
+| 「管理标识」入口 | **共用一个弹窗入口，分两套后端流程 + 两套二次确认** | 对齐原型；production 行走受门禁上线流程，自定义行即时移动/摘除；弹窗按保留字派发，绝不把 production 走自定义端点 |
 
 ## Summary
 
-应用是一份完整 RAG 运行配置：知识库集合、四个固定节点各自引用的 PromptVersion、模型和生成参数，以及检索、重排和兜底策略。编辑态只存在于前端；点击“保存为新版本”追加不可变 ApplicationConfigVersion；点击“上线这个版本”先创建异步 ReleaseCheck，检查通过后再以乐观并发方式原子移动 `production_config_version_id`。
+应用是一份完整 RAG 运行配置：知识库集合、四个固定节点各自引用的 PromptVersion、模型和生成参数，以及检索、重排和兜底策略。编辑态只存在于前端；点击“保存为新版本”追加不可变 ApplicationConfigVersion；点击“上线这个版本”先创建异步 ReleaseCheck，检查通过后再以乐观并发（CAS）方式原子移动 `production_config_version_id`。
 
-Prompt 标签与应用发布完全解耦。Prompt 的 `production/beta` 仅是 Prompt 域内的管理标识，移动它不会改变任何应用。应用版本始终固定引用具体 PromptVersion；PromptVersion 固定 ContractVersion。公开问答只读取应用 production 指针，管理员对话测试可显式选择任意已保存版本。
+发布线上事实由单一 `production_config_version_id` 指针承载，上线/回滚/下线都是对它的受门禁 CAS 操作。在指针之外，应用配置版本可以打**自定义命名标签**（存于独立的 `application_config_version_tags` 表）作为稳定可读的访问锚点——移动自定义标签即时生效、无门禁，仅供管理员经 `resolveByTag` 访问。`production` 是标签命名空间的保留字，不作为标签行存在。
+
+Prompt 标签与应用发布完全解耦。Prompt 的 `production` 仅是 Prompt 域内的高亮管理标识，移动它不会改变任何应用（012）。应用的自定义标签复用 012 的排他移动 + 复合 FK 归属**范式**，但归属 applications 域、与 Prompt 标签零耦合。应用版本始终固定引用具体 PromptVersion；PromptVersion 固定 ContractVersion。匿名公开问答只读取应用 production 指针；管理员对话测试与带标签解析可显式选择任意已保存版本。
 
 ## Boundaries
 
@@ -60,15 +45,18 @@ Prompt 标签与应用发布完全解耦。Prompt 的 `production/beta` 仅是 P
 - 应用列表、详情、新建、基础信息编辑、停用/恢复、下线和删除。
 - 前端临时编辑态、保存不可变应用配置版本、版本历史和载入编辑。
 - 版本级知识库集合、四节点 PromptVersion/模型/生成参数、检索与兜底快照。
-- 单一 `production_config_version_id` 的上线、回滚和下线语义。
+- 单一 `production_config_version_id` 的上线、回滚和下线语义（受门禁 CAS）。
+- 应用版本命名标签：`application_config_version_tags` 表、排他移动、复合 FK 归属、20 个/应用软上限、`resolveByTag` 管理员解析、版本历史「管理标识」弹窗。
 - 上线前静态检查 + 异步真实 NodeRuntime 预演，结果以短期 ReleaseCheck artifact 保存。
 - 应用版本对话测试；Prompt 失败问题跳转到 Prompt 试运行并带入应用上下文。
 - applications 域提供 Prompt 页面“谁在用”的只读派生查询。
-- 从旧 agents 三态/Eval stub 模型迁移。
+- 从旧 agents 三态/Eval stub 模型迁移；`deleteApplication` 由硬删改软删（`deleted_at`）。
 
 ### Out-of-scope
 
-- 应用级 `beta/staging` 自定义标签、灰度权重和多环境路由。
+- 应用级**多环境路由**：`staging` 环境别名、灰度权重、按环境分流——命名访问锚点标签**已移入 in-scope**，但它只是版本引用，不承载环境路由/灰度语义。
+- **匿名公开经 `/chat/:app/:tag` 直达自定义标签版本**：非 production 标签仅管理员可达（见开放问题决策 Q1）；匿名公开只解析 production 指针。
+- **C 端问答页与端到端 chat 编排**：属 M8。M7b 只交付 `resolveByTag` 解析 port + 管理员鉴权下的标签预览；`/chat/:appIdOrSlug/:tag?` 前端路由与流式在 M8 chat 替换 M2 桩后才端到端可用（现状 `chat.service.ts` 仍是 M2 mock，`ChatRequestSchema` 仍带 `agentId`）。
 - M11 的完整评测集管理、质量报表和人工审批流。
 - 任意节点/DAG；首期固定 rewrite/intent/reply/fallback 四节点。
 - 多租户/RBAC；当前沿用单管理员 JWT 边界。
@@ -81,18 +69,21 @@ Prompt 标签与应用发布完全解耦。Prompt 的 `production/beta` 仅是 P
 2. **只有已保存版本可以检查或上线**；前端未保存编辑态不得进入生产流程。
 3. **应用版本固定 PromptVersion，PromptVersion 固定 ContractVersion**；运行时不解析 Prompt 标签。
 4. **Prompt 标签移动永不影响应用**，包括 Prompt 的 `production` 标签。
-5. **应用只有一个 production 指针**；公开问答不能选择任意版本。
-6. **上线确认必须引用 passed、未过期且 fingerprint 匹配的 ReleaseCheck**。
-7. **真实预演与 Prompt 试运行、正式 chat 共用 NodeRuntime**；applications 不自行拼 Prompt 或解析模型输出。
-8. **ReleaseCheck 不在数据库事务内等待模型**；最终 production 更新只使用短事务。
-9. **停用高于 production**；恢复服务不改变 production 指针。
-10. **观测故障不进入问答关键路径**，承接 001 全局不变量。
+5. **应用 production 恒为单一指针 `production_config_version_id`，不作为标签行存在**；匿名公开问答只解析该指针，不能选择任意版本。
+6. **`production` 是应用标签命名空间的保留字**，禁止从自定义标签入口创建；移动 production = 走受门禁上线流程，不是标签 upsert。
+7. **自定义标签仅管理员可解析**（`resolveByTag` 需管理员 JWT）；自定义标签移动即时、无门禁、无 ReleaseCheck。
+8. **标签指向的版本必属同一应用**，由 `application_config_version_tags` 到 `application_config_versions(id, application_id)` 的复合 FK 在 DB 级保证。
+9. **上线确认必须引用 passed、未过期且 fingerprint 匹配的 ReleaseCheck**，并通过 expected 指针 CAS + 归属守卫落库。
+10. **真实预演与 Prompt 试运行、正式 chat 共用 NodeRuntime**；applications 不自行拼 Prompt 或解析模型输出。
+11. **ReleaseCheck 不在数据库事务内等待模型**；最终 production 更新只使用短事务。
+12. **停用高于 production**；恢复服务不改变 production 指针。
+13. **观测故障不进入问答关键路径**，承接 001 全局不变量。
 
 ## Context
 
 旧 M7 把“保存”“验证”“发布”压进两套状态机：版本 `draft/published/archived` 和 Eval `not_run/passed/exempt`。新建 v1 自动上线，Eval 在 M11 缺位时硬编码通过。新版原型改变了这一语义：编辑已有版本产生未保存修改，保存追加新版本，新版本默认未上线；上线时依次核对四节点实际回答，发现未在当前应用真实知识库上下文中验证的问题则阻断并引导去 Prompt 试运行。
 
-012 同时把 Prompt 改成版本平权 + 标签模型，但明确规定 Prompt 标签没有发布语义。应用不能照搬 Prompt 标签表，否则会把两个不同领域再次混为一谈。应用原型只有一个服务中版本，单一生产指针是满足需求的最简单事实源。
+012 同时把 Prompt 改成版本平权 + 标签模型，但明确规定 Prompt 标签没有发布语义。应用发布沿用这一教训但只借**范式不借语义**：`production` 保持为受门禁的单一指针（不是标签行），自定义命名锚点另建 `application_config_version_tags` 表、复用 012 的排他移动 + 复合 FK 归属做法。两者写路径必然分叉——production 需要 `expectedProductionVersionId` 的 compare-and-swap（有条件 WHERE 守卫），而 012 的标签移动是**无条件** `ON CONFLICT DO UPDATE`（靠无条件性拿并发串行）——这正是 production 不该寄居标签表的结构性理由（见 §Alternatives）。
 
 ## Goals / Non-goals
 
@@ -130,10 +121,11 @@ Prompt 标签与应用发布完全解耦。Prompt 的 `production/beta` 仅是 P
 
 ### 领域组件
 
-- `applications`：应用身份、production 指针、停用/删除状态。
+- `applications`：应用身份、production 指针、停用/软删状态。
 - `application-configs`：前端 DTO 校验、不可变版本创建、列表与详情。
+- `config-version-tags`：自定义命名锚点的排他移动/摘除、上限校验、复合 FK 归属（不含 production）。
 - `release-checks`：静态门禁、样例选择、队列任务、fingerprint 和结果摘要。
-- `ApplicationConfigResolver`：公开问答和管理员测试共用的版本解析端口。
+- `ApplicationConfigResolver`：匿名公开（仅 production）、管理员带标签解析（`resolveByTag`）与显式版本测试共用的版本解析端口。
 - `node-runtime`：接收 applications 准备的节点配置与运行上下文，执行真实预演；不依赖 applications。
 - `prompts`：Prompt/PromptVersion/标签/编译与试运行；保持叶子，不依赖 applications。
 - `chat`：只经 applications barrel 获取 ResolvedApplicationConfig。
@@ -176,7 +168,21 @@ application_config_versions
   created_at                  timestamp NOT NULL DEFAULT now()
 
   UNIQUE(application_id, version)
+  UNIQUE(id, application_id)   -- 复合 FK 被引用端：供 tags/指针的归属复合 FK 引用（加法迁移）
   INDEX(application_id, created_at DESC)
+
+application_config_version_tags
+  id                 uuid PK
+  application_id     uuid NOT NULL   -- 冗余列，UNIQUE/复合 FK 的落点（照抄 012 prompt_version_tags.prompt_id）
+  config_version_id  uuid NOT NULL
+  name               text NOT NULL   -- 自定义锚点名，service 边界 lower() 归一；不含保留字 production/v
+  created_by         text NOT NULL
+  created_at         timestamp NOT NULL DEFAULT now()
+
+  UNIQUE(application_id, name)       -- 排他性落点：应用内同名标签跨版本唯一
+  FOREIGN KEY(config_version_id, application_id)
+    REFERENCES application_config_versions(id, application_id) ON DELETE CASCADE   -- 复合 FK 归属保证
+  INDEX(config_version_id)
 
 application_config_version_kbs
   config_version_id  uuid NOT NULL REFERENCES application_config_versions(id) ON DELETE CASCADE
@@ -202,7 +208,7 @@ application_release_checks
   INDEX(status, created_at)
 ```
 
-`production_config_version_id` 必须属于同一 application。若循环 FK 不能方便地声明为 deferred，首期由 service 写入顺序和事务内归属校验保证；不能退回“指针 + 标签”双写。
+`production_config_version_id` 必须属于同一 application。现状该列是裸 uuid、**无 FK 也无运行时归属校验**（仅 backfill 事后 verify）；M7b 补两道保险：(1) 推荐给指针加 `(id, application_id)` 复合 FK（与标签表同款，循环 FK 用 deferred 或写序保证）；(2) CAS 上线语句内置 `AND EXISTS(... application_id=$app)` 归属守卫（见 §上线门禁）。自定义标签的归属由 `application_config_version_tags` 的复合 FK 在 DB 级强制，无需应用层协调。production 不进标签表，因此不存在"指针 + 标签"双写。
 
 ### 节点和检索配置契约
 
@@ -301,7 +307,9 @@ interface NodeRuntimeService {
 }
 ```
 
-applications 逐节点调用该接口；NodeRuntime 不负责选择应用版本、知识库或生产指针。
+applications 逐节点调用该接口（四节点 = 4 次 `compileAndSample`）；NodeRuntime 不负责选择应用版本、知识库或生产指针。
+
+**traceId 缺口（M8.0 协调项）**：`NodeSampleResult.results[].traceId` 在 `node-runtime.service.ts` 声明为 optional，但 `compileAndSample` 当前**从不填充**它（`executeStructured`/`streamText` 的 `withSpan` 未回传 spanContext），因此 §Prompt 试运行协作 的 `OPEN_PROMPT_TRY_RUN` 深链拿不到 traceId。修复需在 node-runtime 的 withSpan 闭包内读 `span.spanContext().traceId` 回传并透传——属 M8.0 模块改动，M7b 依赖此修复才能闭合"跳 Trace"。因字段 optional，缺失时静默降级（TS 不报错），须在实现时显式核验，而非等人工 QA 暴露。
 
 ### ReleaseCheck fingerprint
 
@@ -309,16 +317,33 @@ fingerprint 至少包含：ApplicationConfigVersion ID、四个 PromptVersion/Co
 
 Postgres 只保存错误代码、节点、样例序号、fallback 标记、统计和 Trace ID，不保存完整模型输入/输出。详细过程由受脱敏策略约束的 Trace 承载。
 
+### 版本命名标签与「管理标识」
+
+自定义标签是版本的稳定可读访问锚点（等价 git tag），与 production 指针**并存但分流程**：
+
+- **排他移动**：`INSERT ... ON CONFLICT (application_id, name) DO UPDATE SET config_version_id = excluded...`，一条原子语句即时生效（照抄 012 §1）。无 ReleaseCheck、无门禁、无审计升级。摘除是 `DELETE ... WHERE application_id=$1 AND name=$2`。
+- **命名规则**：仅字母/数字/`.`/`_`/`-`；service 边界 `lower(name)` 归一；保留字仅 `production`（走上线流程，不许从自定义入口创建）与 `v`（版本号前缀混淆，承 012）。`beta` 不保留、为普通锚点。
+- **数量上限**：每应用 20 个自定义标签软上限，写路径 count 校验，超限 422。
+- **前端移动确认**：目标标签当前指向别的版本时提示“将从 vX 移动到本版本”（对应原型「管理标识」弹窗橙色提示）。
+
+**「管理标识」弹窗**共用一个入口列出所有标签，但**两套后端流程 + 两套二次确认**：`production` 行显示上线/回滚 + ReleaseCheck 状态 → 走受门禁上线（§上线门禁 + §上线请求 CAS）；自定义行显示即时移动/摘除 → 走 `PUT/DELETE /config-version-tags`。弹窗按保留字派发，**绝不把 production 走自定义标签端点**。
+
+**应用列表两列**：「是否上线」由 production 指针驱动（已上线 vN / 未上线）；「标识」展示自定义锚点（`qa20260707` 等）。M7a 已按此拆分两列。
+
 ### 运行时解析
 
 ```ts
 interface ApplicationConfigResolver {
-  resolvePublic(applicationIdOrSlug: string): Promise<ResolvedApplicationConfig>;
+  resolvePublic(applicationIdOrSlug: string): Promise<ResolvedApplicationConfig>;                       // 匿名，仅 production
+  resolveByTag(applicationIdOrSlug: string, tag: string, actor: Admin): Promise<ResolvedApplicationConfig>; // 管理员，自定义锚点或 production
   resolveForTest(applicationId: string, configVersionId: string, actor: Admin): Promise<ResolvedApplicationConfig>;
 }
 ```
 
-公开解析顺序：deleted → disabled → production missing → resolved。管理员对话测试可以指定任何已保存版本，Trace 标记 `rag.preview=true`，不能污染正式会话统计。
+- `resolvePublic`：匿名，拒绝顺序 deleted → disabled → production missing → resolved，**只解析 production 指针**。
+- `resolveByTag`：**需管理员 JWT**（开放问题决策 Q1）。tag 省略或 `=production` → 读指针；tag 为自定义名 → 读标签表。匿名命中自定义标签 URL → 404（不泄露标签是否存在）。所有非正式解析标记 `rag.preview=true`，不污染正式会话统计。
+- `resolveForTest`：管理员显式指定任何已保存版本，同样 `rag.preview=true`。
+- **`slug` 创建后不可变**（`UpdateApplicationRequest` 只含 name/description/enabled），作为 `/chat/:slug/:tag` 的稳定解析键。
 
 ### API
 
@@ -330,11 +355,14 @@ interface ApplicationConfigResolver {
 | 删除 | `DELETE /api/applications/:id` | 删除配置/检查，保留历史解释策略 |
 | 版本列表/详情 | `GET /api/applications/:id/config-versions[...]` | 只读不可变快照 |
 | 新建版本 | `POST /api/applications/:id/config-versions` | 追加版本，不上线 |
-| 对话测试 | `POST /api/applications/:id/config-versions/:versionId/chat` | 管理员显式版本测试 |
+| 对话测试 | `POST /api/applications/:id/config-versions/:versionId/chat` | 管理员显式版本测试（M7b 阶段为 per-node 预演，完整对话待 M8） |
+| 移动标签 | `PUT /api/applications/:id/config-version-tags` | body `{ name, versionId }`，自定义锚点排他移动，即时无门禁；`name=production` 拒绝（走上线） |
+| 摘除标签 | `DELETE /api/applications/:id/config-version-tags/:name` | 摘除自定义锚点 |
 | 开始检查 | `POST /api/applications/:id/config-versions/:versionId/release-checks` | 静态失败返回 422，否则创建异步检查 |
 | 检查状态 | `GET /api/applications/:id/release-checks/:checkId` | 轮询或配合 SSE |
-| 上线/回滚 | `PUT /api/applications/:id/production` | 需要 passed check + expected pointer |
-| 下线 | `DELETE /api/applications/:id/production` | 清空指针，应用保留 |
+| 上线/回滚 | `PUT /api/applications/:id/production` | 需要 passed check + expected pointer（CAS + 归属守卫） |
+| 下线 | `DELETE /api/applications/:id/production` | CAS 清空指针，应用保留 |
+| 删除 | `DELETE /api/applications/:id` | 软删（`deleted_at`），读路径过滤 `deleted_at IS NULL` |
 | Prompt usage | `GET /api/applications/prompt-usage?promptId=:id` | applications 域只读派生视图 |
 
 上线请求：
@@ -347,7 +375,19 @@ interface ApplicationConfigResolver {
 }
 ```
 
-短事务内校验 check 归属/status/expiry/fingerprint、expected production 和关键依赖，然后更新指针、updatedBy/updatedAt 并写审计事件。并发发布后提交者收到 409，必须刷新后重新确认。
+短事务内校验 check 归属/status/expiry/fingerprint、关键依赖，然后以 CAS + 归属守卫一步落库：
+
+```sql
+UPDATE applications
+SET production_config_version_id = $versionId, updated_by = $actor, updated_at = now()
+WHERE id = $appId
+  AND production_config_version_id IS NOT DISTINCT FROM $expectedProductionVersionId   -- CAS
+  AND EXISTS (SELECT 1 FROM application_config_versions
+              WHERE id = $versionId AND application_id = $appId)                        -- 归属守卫（现状无 FK 兜底）
+RETURNING production_config_version_id;
+```
+
+0 行需区分：CAS 失败（并发，409 要求刷新重试）vs 归属校验失败（400）。成功后写审计事件。`DELETE /production`（下线）= CAS set null，同样带 expected 守卫。repository 现状**无任何 production 指针更新方法**（`updateBase` 只改 name/description/enabled），此 CAS 方法与两个 controller 端点均需新建。
 
 ### Prompt 试运行协作
 
@@ -371,21 +411,31 @@ applications 域从 `applications.production_config_version_id → application_c
 | Prompt 标签移动 | 应用与 production 完全不变 |
 | PromptVersion 删除被引用 | FK RESTRICT 转 409，不裸露 500 |
 | dirty 编辑态请求上线 | 前端禁用；后端因无真实版本 ID 拒绝 |
-| 摘除 production | 公开地址显示未上线；历史版本保留 |
+| 摘除 production（下线） | 公开地址显示未上线；历史版本与自定义标签保留 |
+| 自定义标签移动/摘除 | 即时生效、无门禁；不触发 ReleaseCheck、不改变 production |
+| 自定义标签指向被删版本 | 复合 FK `ON DELETE CASCADE`：版本随应用删除时标签一并删除，无悬挂标签 |
+| 自定义标签数超 20 | 写路径 422 拒绝；已存在标签不受影响 |
+| 匿名访问 `/chat/:app/:tag`（自定义标签） | 404，不泄露标签是否存在；仅 production 对匿名解析 |
+| 打 `production` 走自定义标签端点 | 端点拒绝（保留字）；上线只能经 `PUT /production` |
+| ReleaseCheck 拿不到 traceId | `OPEN_PROMPT_TRY_RUN` 降级为不带 traceId 的跳转，直到 M8.0 补齐回传 |
 | 应用停用 | 优先拒绝公开解析；恢复沿用原指针 |
+| 应用软删后被访问 | 读路径 `deleted_at IS NULL` 过滤，resolve 走 deleted 分支拒绝 |
 | 观测后端故障 | 保存最小检查摘要；不改变正式问答结果 |
 
 ## Rollout & operations
 
-1. 先落地 012 Prompt 版本平权、compile 字段和 Prompt 标签，保持应用仍固定 PromptVersion。
-2. 落地 011 NodeRuntime 与修订后的 `compileAndSample(request)`。
-3. 为旧 `agents.current_version_id` 迁移到 `applications.production_config_version_id`；旧 published 版本成为普通不可变版本。
-4. 新增 release_checks 与 worker；保留旧 publish/eval API 只读兼容窗口。
-5. 前端切到应用详情 Playground：前端编辑态、保存新版本、异步核对、问题跳转和确认上线。
-6. chat 切到 ApplicationConfigResolver；Prompt usage 查询切到 production 指针。
-7. 验证后删除 `status/eval_*/published_*` 和旧 eval/publish/rollback API，最终把 agents 目录/契约改名为 applications。
+M7a 已完成 applications 模块、不可变版本与单指针地基（`apps/backend/src/modules/applications/`）。M7b 增量：
 
-在删除旧字段前，可从旧 current pointer 回滚读路径；删除旧状态机和公开 API 改名属于 one-way door，必须在所有消费者迁移后执行。
+1. 加法迁移：`application_config_versions` 增 `UNIQUE(id, application_id)`；新增 `application_config_version_tags`（复合 FK 归属）；推荐给 `production_config_version_id` 补 `(id, application_id)` 复合 FK。
+2. M8.0 协调：`compileAndSample` 回传 `traceId`（withSpan 内读 spanContext），供 ReleaseCheck 的 `OPEN_PROMPT_TRY_RUN` 深链。
+3. 新增 `application_release_checks` 表与异步 worker；`POST release-checks` 静态门禁 + 入队 + 逐节点预演。
+4. 新增 production 指针 CAS 方法（repository 现无）+ `PUT/DELETE /production` 端点（含归属守卫）。
+5. 新增自定义标签 `PUT/DELETE /config-version-tags` + `resolveByTag`（管理员）；`resolvePublic` 只解析 production。
+6. `deleteApplication` 由硬删改软删（`SET deleted_at=now()`），list/detail/resolve/promptUsage 读路径全部加 `deleted_at IS NULL` 过滤。
+7. 前端应用详情 Playground：异步核对、问题跳转、确认上线、版本历史「管理标识」弹窗（打/移/摘标签）。
+8. 验证后删除旧 `agents` 的 `status/eval_*/published_*` 和旧 eval/publish/rollback API，最终把 agents 目录/契约改名为 applications。
+
+删除旧字段前可从旧 current pointer 回滚读路径；删除旧状态机与目录改名属 one-way door，必须在所有消费者迁移后执行。**匿名公开 `/chat/:appIdOrSlug/:tag?` 的端到端可用性依赖 M8 用真实编排替换 M2 chat 桩**——M7b 只交付解析 port 与管理员标签预览，不承诺公开 chat 页可用。
 
 ### Observability
 
@@ -410,7 +460,7 @@ rag.fallback.used
 
 ## Security
 
-- 管理、显式版本对话测试和 ReleaseCheck 仅管理员可用；公开用户只访问 production。
+- 管理、显式版本对话测试、ReleaseCheck 与**自定义标签解析（`resolveByTag`）仅管理员可用**；匿名公开用户只访问 production 指针。自定义标签未过发布门禁，放匿名直达等于绕过 ReleaseCheck 安全门，故 `/chat/:app/:tag` 命中自定义标签时对匿名返回 404。
 - ReleaseCheck 输入可能含真实用户问题，Postgres 不保存完整内容，日志和 Trace 遵循脱敏规则。
 - 对话测试、预演和真实发布都要限流并记录成本，不得暴露模型密钥/System 全文。
 - 上线、下线、停用、恢复和删除必须审计。
@@ -420,7 +470,10 @@ rag.fallback.used
 
 | 决策 | 选择 | 拒绝方案 | 决定因素与代价 |
 |---|---|---|---|
-| 生产选择 | 单一 production 指针 | 复制 Prompt 标签模型 | 原型只有单服务版本；放弃预留自定义环境标签 |
+| production 建模 | 混合 B+：指针权威 + 自定义标签独立表，production 不入表 | A：production 也做成标签行，上线=特判移动该行 | A 统一存储但不统一语义：production 需 CAS（有条件 WHERE），012 标签靠**无条件** upsert 拿并发串行，二者写路径必然分叉；且 `findPromptUsage`/`APP_SELECT` 等多处浅层读指针，改纯标签行要全部改写并失去指针语义。代价：两套机制（指针 + 标签表）而非一套 |
+| production 建模 | 混合 B+ | C：纯指针、完全不做应用标签（原 009 方案） | 新用例要"版本命名可读引用"（QA/分享/书签），纯指针无法命名版本。代价：多一张标签表 |
+| 标签归属完整性 | 复合 FK `(config_version_id, application_id)` | 应用层校验归属 | DB 级保证标签指向同应用版本（照抄 012）；代价：config_versions 需加 `UNIQUE(id, application_id)` |
+| 自定义标签可见性 | 仅管理员 `resolveByTag` | 匿名公开可经 URL 直达 | 自定义标签未过门禁，匿名直达=绕过发布安全门；放弃"给非管理员分享 QA 链接"，留作 release channel Revisit |
 | Prompt 绑定 | 固定 PromptVersion ID | 跟随 Prompt production | 防止标签移动导致线上漂移 |
 | 编辑态 | 前端临时 draft | 数据库 draft version | 避免重建版本状态机；刷新前未保存内容会丢失 |
 | 门禁 | 异步真实 NodeRuntime 预演 | 纯静态检查 | 原型要求看真实节点结果；增加耗时与模型成本 |
@@ -431,30 +484,34 @@ rag.fallback.used
 
 ## Assumptions
 
-1. 应用只有一个 production 环境，不需要 beta/staging 应用别名。
-2. Prompt 标签继续存在，但只作为 Prompt 域管理信息。
+1. 应用只有一个 production 环境；需要**版本命名访问锚点**（自定义标签），但不需要多环境路由/灰度——`beta` 是普通锚点而非保留字。
+2. Prompt 标签继续存在，但只作为 Prompt 域管理信息；应用标签与 Prompt 标签零耦合。
 3. ReleaseCheck 可真实调用模型并产生可控费用。
 4. 首期样例数沿用 011：rewrite/intent 各 10，reply/fallback 各 1。
-5. PromptVersion body 与 ApplicationConfigVersion 都不可变。
-6. 知识库内容允许独立更新，不由应用版本冻结。
-7. 只有已保存版本能测试、检查和上线。
-8. 当前单管理员角色可以执行全部发布动作。
+5. `compileAndSample` 的 `modelParams.topP` 当前被接收但不注入模型（011/009 均无协议层落点），故预演不覆盖 topP 影响，与 Prompt 试运行一致。
+6. PromptVersion body 与 ApplicationConfigVersion 都不可变；`applications.slug` 创建后不可变。
+7. 知识库内容允许独立更新，不由应用版本冻结。
+8. 只有已保存版本能测试、检查、打标签和上线。
+9. 当前单管理员角色可以执行全部发布与标签动作；QA/分享在此模型下即管理员持链接。
 
 ## Revisit triggers
 
-1. 需要 staging/beta 环境路由：设计 application release channels，不复用 Prompt 标签表。
-2. 每天 ReleaseCheck 超过 100 次或成本异常：增加配额、样例缓存和分层门禁。
-3. 22 次预演 p95 超过 60 秒：重估并发、样例数和离线评测集。
-4. KB 更新频繁导致大量检查失效：重定义 fingerprint 或冻结 KB active version。
-5. 引入审批流：production 更新升级为 release request + approver。
-6. 应用超过 1,000：为 Prompt usage 和列表增加专用索引/物化视图。
-7. 多租户落地：所有应用、版本、检查和队列任务增加 tenant scope。
+1. 需要 staging/beta 环境路由或**可分享给非管理员的 QA 链接**：设计 application release channels（受门禁），不把 ungated 自定义标签开放给匿名——重估 Q1 鉴权立场。
+2. 自定义标签逼近 20/应用 或出现"谁能打标签"的权限诉求：重估上限与标签权限层。
+3. 每天 ReleaseCheck 超过 100 次或成本异常：增加配额、样例缓存和分层门禁。
+4. 22 次预演 p95 超过 60 秒：重估并发、样例数和离线评测集。
+5. KB 更新频繁导致大量检查失效：重定义 fingerprint 或冻结 KB active version。
+6. 引入审批流：production 更新升级为 release request + approver。
+7. 应用超过 1,000：为 Prompt usage 和列表增加专用索引/物化视图。
+8. 多租户落地：所有应用、版本、检查、标签和队列任务增加 tenant scope。
 
 ## References
 
 - `RAG知识库问答系统设计/CodeCrushBot.dc.html`：完整新版管理台原型。
 - `RAG知识库问答系统设计/应用详情·Playground.dc.html`：应用详情、编辑态、版本历史、真实上线自检与 Prompt 修复跳转。
-- `docs/design/011-prompt-assembly-node-contracts.md`：NodeRuntime 和真实样例执行接口提供方。
-- `docs/design/012-prompt-management-redesign.md`：Prompt 版本/标签、试运行和“谁在用”协作边界。
+- `docs/design/011-prompt-assembly-node-contracts.md`：NodeRuntime 和真实样例执行接口提供方（`compileAndSample`）。
+- `docs/design/012-prompt-management-redesign.md`：Prompt 版本/标签排他移动 + 复合 FK 范式（本文自定义标签借用）、试运行和“谁在用”协作边界。
 - `docs/design/008-m5-retrieval.md`：检索参数和 RetrieverPort。
-- `packages/contracts/src/agents.ts`、`apps/backend/src/modules/agents/`：需要迁移的旧 M7 实现。
+- `apps/backend/src/modules/applications/`：M7a 已交付的 applications 模块（身份、不可变版本、单指针地基）——M7b 增量的落地基线。
+- `apps/backend/src/modules/node-runtime/executor/node-runtime.service.ts`：`compileAndSample` 签名与 traceId 缺口（M8.0 协调项）。
+- `packages/contracts/src/agents.ts`、`apps/backend/src/modules/agents/`：需要迁移下线的旧 M7 实现。

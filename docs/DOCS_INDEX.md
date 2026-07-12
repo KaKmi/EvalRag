@@ -12,7 +12,7 @@
 | design | 006 | draft | M2 前后端页面骨架 | M2 把原型 15 屏 1:1 还原为 React+antd 路由化骨架 + NestJS 各域模块 skeleton + Zod 契约扩展 + OpenAPI 自动生成 + SSE 客户端骨架；mock 前端硬编码，真实逻辑 M3+ 按依赖填入。 | 2026-07-06 | [006](docs/design/006-m2-app-shell-skeleton.md) |
 | design | 007 | draft | M4 入库管线与知识库管理 | M4 设计：四阶段可插拔入库管线(解析→清洗→分块→向量化)、切片版本化蓝绿重建、BlobStore 本地卷、pg-boss 异步、切片删除制。 | 2026-07-10 | [007](docs/design/007-m4-ingestion-pipeline.md) |
 | design | 008 | draft | M5 检索 | M5 设计：RetrieverPort 真实实现（pgvector 向量召回 + tsvector 关键词召回 + 加权融合 + 可选 rerank）与检索测试台。 | 2026-07-09 | [008](docs/design/008-m5-retrieval.md) |
-| design | 009 | not-implemented | M7 应用管理与配置发布 | 应用以不可变配置版本和单一生产指针发布，上线前异步执行真实 NodeRuntime 预演。 | 2026-07-11 | [009](docs/design/009-m7-application-management.md) |
+| design | 009 | not-implemented | M7 应用管理与配置发布 | 应用发布：production 单指针（受门禁 CAS）+ 版本命名标签访问锚点 + 异步真实 NodeRuntime ReleaseCheck。 | 2026-07-12 | [009](docs/design/009-m7-application-management.md) |
 | design | 010 | draft | 文档处理 Profile 与结构化入库管线 | 用版本化 Profile 编排解析、清洗与分块，统一输出可溯源 Markdown，并支持 PDF 版面解析与 OCR。 | 2026-07-10 | [010](docs/design/010-document-processing-profiles.md) |
 | design | 011 | draft | Prompt 组装与 LLM 节点契约（NodeContract 执行引擎） | 四个固定节点的完整 NodeContract 数据、三层 Prompt 组装与 NodeRuntimeService 执行/校验/Fallback 设计，本轮写死代码。 | 2026-07-11 | [011](docs/design/011-prompt-assembly-node-contracts.md) |
 | design | 012 | current | Prompt 管理模块重构 | Prompt 版本从三态状态机改为可排他移动的标识（标签）模型，详情页新增试运行，谁在用改为应用域只读派生视图。 | 2026-07-11 | [012](docs/design/012-prompt-management-redesign.md) |
