@@ -5,9 +5,8 @@ import type {
   StructuredOutputSpec,
 } from "../src/modules/models/ports/model-provider.port";
 
-// M8.0：三协议 chat builder 升级为三层消息（system/developer/user）+ 结构化输出注入
-// （替代 012 Story 7 的 {system,user} 两消息版本；覆盖矩阵、温度/max_tokens 合并、
-// deploymentId 优先级等既有断言原样保留，入参构造方式改为 ChatMessage[]）。
+// M8.0：三协议 chat builder 支持 system/user 两层消息 + 结构化输出注入
+// （覆盖矩阵、温度/max_tokens 合并、deploymentId 优先级等既有断言原样保留）。
 
 const base = (over: Partial<ModelCallConfig> = {}): ModelCallConfig => ({
   type: "llm",
@@ -20,7 +19,6 @@ const base = (over: Partial<ModelCallConfig> = {}): ModelCallConfig => ({
 
 const messages: ChatMessage[] = [
   { role: "system", content: "固定 system" },
-  { role: "developer", content: "管理员 instructions" },
   { role: "user", content: '{"query":"q"}' },
 ];
 
@@ -31,7 +29,7 @@ const structuredOutput: StructuredOutputSpec = {
 };
 
 describe("CHAT_BUILDERS · openai_compat", () => {
-  it("三条消息原样映射为 messages 数组（system/developer/user 角色透传）+ Bearer 认证", () => {
+  it("两条消息原样映射为 messages 数组（system/user 角色透传）+ Bearer 认证", () => {
     const req = CHAT_BUILDERS.openai_compat!(base(), messages, {});
     expect(req.url).toBe("https://api.example.com/v1/chat/completions");
     expect(req.headers.Authorization).toBe("Bearer sk-secret");
@@ -43,7 +41,6 @@ describe("CHAT_BUILDERS · openai_compat", () => {
     expect(body.model).toBe("test-model");
     expect(body.messages).toEqual([
       { role: "system", content: "固定 system" },
-      { role: "developer", content: "管理员 instructions" },
       { role: "user", content: '{"query":"q"}' },
     ]);
     expect(body.temperature).toBeUndefined();
@@ -94,7 +91,7 @@ describe("CHAT_BUILDERS · openai_compat", () => {
 describe("CHAT_BUILDERS · anthropic", () => {
   const anthropicConfig = base({ protocol: "anthropic" });
 
-  it("system 角色消息映射到顶层 system 字段，developer 合并进 user 消息（[developer]/[user] 前缀分隔）", () => {
+  it("system 角色消息映射到顶层 system 字段，user 消息原样映射（无角色可折叠，两层模型下 messages 只有一条 user）", () => {
     const req = CHAT_BUILDERS.anthropic!(anthropicConfig, messages, {});
     expect(req.url).toBe("https://api.example.com/v1/v1/messages");
     expect(req.headers["x-api-key"]).toBe("sk-secret");
@@ -106,9 +103,7 @@ describe("CHAT_BUILDERS · anthropic", () => {
     };
     expect(body.system).toBe("固定 system");
     expect(body.max_tokens).toBe(1024);
-    expect(body.messages).toEqual([
-      { role: "user", content: "[developer]\n管理员 instructions\n\n[user]\n" + '{"query":"q"}' },
-    ]);
+    expect(body.messages).toEqual([{ role: "user", content: '{"query":"q"}' }]);
   });
 
   it("存量 max_tokens 沿用；temperature 覆盖优先", () => {
@@ -152,7 +147,7 @@ describe("CHAT_BUILDERS · anthropic", () => {
 describe("CHAT_BUILDERS · gemini", () => {
   const geminiConfig = base({ protocol: "gemini" });
 
-  it("system 角色映射 system_instruction，developer 合并进 user parts（x-goog-api-key 头，key 不进 URL）", () => {
+  it("system 角色映射 system_instruction，user parts 原样映射（x-goog-api-key 头，key 不进 URL）", () => {
     const req = CHAT_BUILDERS.gemini!(geminiConfig, messages, { temperature: 0.5 });
     expect(req.url).toBe("https://api.example.com/v1/models/test-model:generateContent");
     expect(req.url).not.toContain("sk-secret");
@@ -163,9 +158,7 @@ describe("CHAT_BUILDERS · gemini", () => {
       generationConfig: { temperature: number };
     };
     expect(body.system_instruction.parts[0].text).toBe("固定 system");
-    expect(body.contents[0].parts[0].text).toBe(
-      "[developer]\n管理员 instructions\n\n[user]\n" + '{"query":"q"}',
-    );
+    expect(body.contents[0].parts[0].text).toBe('{"query":"q"}');
     expect(body.generationConfig.temperature).toBe(0.5);
   });
 

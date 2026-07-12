@@ -32,8 +32,8 @@ export type ChatBuilder = (
 const ANTHROPIC_DEFAULT_MAX_TOKENS = 1024;
 
 // 四个 helper 均 export：Story 2 的 chat-stream-builders.ts 需要 import 复用，
-// 避免 request-body 构造逻辑（temperature/maxTokens 合并、system/developer/user
-// 消息合并规则）在两个文件里各写一份而漂移。
+// 避免 request-body 构造逻辑（temperature/maxTokens 合并、system/user 消息
+// 读取规则）在两个文件里各写一份而漂移。
 export function mergedTemperature(c: ModelCallConfig, opts: ChatOptions): number | undefined {
   if (opts.temperature !== undefined) return opts.temperature;
   const stored = c.params?.temperature;
@@ -49,17 +49,15 @@ export function storedMaxTokens(c: ModelCallConfig): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-// developer 角色无原生支持的协议（anthropic/gemini）按 011 Design §3 合并进
-// user 消息，用 [developer]/[user] 前缀分隔——不与自由文本拼接，保留结构边界。
-export function mergeNonSystemMessages(messages: ChatMessage[]): string {
-  return messages
-    .filter((m) => m.role !== "system")
-    .map((m) => `[${m.role === "developer" ? "developer" : "user"}]\n${m.content}`)
-    .join("\n\n");
-}
-
+// assembleMessages() 恒定产出两条消息（system/user）。anthropic/gemini 协议
+// 没有独立的第二个非 user 角色可言，两个 helper 用 .find 而不是硬编码下标读取，
+// 不依赖调用方保证数组顺序。
 export function systemContent(messages: ChatMessage[]): string {
   return messages.find((m) => m.role === "system")?.content ?? "";
+}
+
+export function userContent(messages: ChatMessage[]): string {
+  return messages.find((m) => m.role === "user")?.content ?? "";
 }
 
 export const CHAT_BUILDERS: Partial<Record<ModelProtocol, ChatBuilder>> = {
@@ -100,7 +98,7 @@ export const CHAT_BUILDERS: Partial<Record<ModelProtocol, ChatBuilder>> = {
         // anthropic 必填 max_tokens：沿用模型配置，缺省 1024
         max_tokens: storedMaxTokens(c) ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
         system: systemContent(messages),
-        messages: [{ role: "user", content: mergeNonSystemMessages(messages) }],
+        messages: [{ role: "user", content: userContent(messages) }],
         ...(temperature !== undefined ? { temperature } : {}),
         ...(so
           ? {
@@ -139,7 +137,7 @@ export const CHAT_BUILDERS: Partial<Record<ModelProtocol, ChatBuilder>> = {
       headers: { "x-goog-api-key": c.apiKey, "Content-Type": "application/json" },
       body: {
         system_instruction: { parts: [{ text: systemContent(messages) }] },
-        contents: [{ role: "user", parts: [{ text: mergeNonSystemMessages(messages) }] }],
+        contents: [{ role: "user", parts: [{ text: userContent(messages) }] }],
         ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
       },
       parseText: (json) => {
