@@ -29,7 +29,7 @@ export type ChatBuilder = (
   opts: ChatOptions,
 ) => ChatRequestSpec;
 
-const ANTHROPIC_DEFAULT_MAX_TOKENS = 1024;
+export const ANTHROPIC_DEFAULT_MAX_TOKENS = 1024;
 
 // 四个 helper 均 export：Story 2 的 chat-stream-builders.ts 需要 import 复用，
 // 避免 request-body 构造逻辑（temperature/maxTokens 合并、system/user 消息

@@ -1,9 +1,9 @@
 import type { ModelProtocol, ModelType } from "@codecrush/contracts";
 
 // 端口归 models 域（003:101）。M8.0：chat() 从 012 的简化两消息签名升级为
-// 三层消息 + 结构化输出（011 Design §2），新增 chatStream()（非破坏扩展原则下的
-// 唯一一次签名 breaking change——旧签名的唯一调用方 prompts.service.tryRun()
-// 随本任务一起切到 node-runtime，不留兼容层）。
+// 两层消息（system/user）+ 结构化输出（011 Design §2），新增 chatStream()（非破坏
+// 扩展原则下的唯一一次签名 breaking change——旧签名的唯一调用方
+// prompts.service.tryRun() 随本任务一起切到 node-runtime，不留兼容层）。
 export interface ModelCallConfig {
   type: ModelType;
   protocol: ModelProtocol;

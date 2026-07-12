@@ -1,6 +1,7 @@
 import type { ModelProtocol } from "@codecrush/contracts";
 import { bearerHeaders, isObj, joinUrl, modelId } from "./protocols/types";
 import {
+  ANTHROPIC_DEFAULT_MAX_TOKENS,
   systemContent,
   userContent,
   mergedTemperature,
@@ -67,7 +68,7 @@ export const CHAT_STREAM_BUILDERS: Partial<Record<ModelProtocol, ChatStreamBuild
       },
       body: {
         model: modelId(c),
-        max_tokens: storedMaxTokens(c) ?? 1024,
+        max_tokens: storedMaxTokens(c) ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
         system: systemContent(messages),
         messages: [{ role: "user", content: userContent(messages) }],
         stream: true,

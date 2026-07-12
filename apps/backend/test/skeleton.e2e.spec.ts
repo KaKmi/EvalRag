@@ -2190,7 +2190,7 @@ describe("M2 domain skeleton", () => {
       rewriteVersionId = rewrite.body.versions[0].id;
     });
 
-    it("reply 真实调用：经 NodeRuntime 三层组装打到 provider.chatStream → mode:text（M8.0）", async () => {
+    it("reply 真实调用：经 NodeRuntime 两层组装打到 provider.chatStream → mode:text（M8.0）", async () => {
       const res = await request(app.getHttpServer())
         .post(`/api/prompts/${replyPromptId}/versions/${replyVersionId}/try-run`)
         .set(auth())
@@ -2200,7 +2200,7 @@ describe("M2 domain skeleton", () => {
           testVars: { query: "怎么退货", retrievalContext: "第二条 七天无理由" },
         })
         .expect(200);
-      // 只断言"真的打到了 provider、拿到真实回显"，不锁定三层消息拼装的具体字符串——
+      // 只断言"真的打到了 provider、拿到真实回显"，不锁定两层消息拼装的具体字符串——
       // 那部分已由 node-runtime.compiler.spec.ts 单测覆盖，这里是 wiring smoke test。
       expect(res.body.mode).toBe("text");
       expect(res.body.text).toMatch(/^echo:/);
