@@ -1,8 +1,8 @@
 import type { ModelProtocol } from "@codecrush/contracts";
 import { bearerHeaders, isObj, joinUrl, modelId } from "./protocols/types";
 import {
-  mergeNonSystemMessages,
   systemContent,
+  userContent,
   mergedTemperature,
   storedMaxTokens,
 } from "./chat-builders";
@@ -69,7 +69,7 @@ export const CHAT_STREAM_BUILDERS: Partial<Record<ModelProtocol, ChatStreamBuild
         model: modelId(c),
         max_tokens: storedMaxTokens(c) ?? 1024,
         system: systemContent(messages),
-        messages: [{ role: "user", content: mergeNonSystemMessages(messages) }],
+        messages: [{ role: "user", content: userContent(messages) }],
         stream: true,
         ...(temperature !== undefined ? { temperature } : {}),
       },
@@ -96,7 +96,7 @@ export const CHAT_STREAM_BUILDERS: Partial<Record<ModelProtocol, ChatStreamBuild
       headers: { "x-goog-api-key": c.apiKey, "Content-Type": "application/json" },
       body: {
         system_instruction: { parts: [{ text: systemContent(messages) }] },
-        contents: [{ role: "user", parts: [{ text: mergeNonSystemMessages(messages) }] }],
+        contents: [{ role: "user", parts: [{ text: userContent(messages) }] }],
         ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
       },
       parseChunk: (raw) => {
