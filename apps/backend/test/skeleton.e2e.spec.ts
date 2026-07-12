@@ -2204,7 +2204,7 @@ describe("M2 domain skeleton", () => {
       // 那部分已由 node-runtime.compiler.spec.ts 单测覆盖，这里是 wiring smoke test。
       expect(res.body.mode).toBe("text");
       expect(res.body.text).toMatch(/^echo:/);
-      expect(res.body.text).toContain("依据 第二条 七天无理由 回答 怎么退货"); // developer 层渲染结果
+      expect(res.body.text).toContain("依据 第二条 七天无理由 回答 怎么退货"); // 管理员正文渲染结果，现在拼进 system 消息
       expect(res.body.text).toContain("怎么退货"); // user 层 JSON envelope 里的 query
     });
 
