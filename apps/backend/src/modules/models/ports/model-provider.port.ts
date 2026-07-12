@@ -26,7 +26,7 @@ export interface EmbedResult {
 }
 
 export interface ChatMessage {
-  role: "system" | "developer" | "user" | "assistant";
+  role: "system" | "user";
   content: string;
 }
 

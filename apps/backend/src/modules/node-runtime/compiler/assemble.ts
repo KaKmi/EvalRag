@@ -17,8 +17,7 @@ export function assembleMessages<TInput extends Record<string, unknown>, TOutput
   const rendered = renderTemplateStrict(promptBody, stringVars, contract.node);
   const envelope = { ...input, ...(reserved as object) };
   return [
-    { role: "system", content: contract.systemInstructions },
-    { role: "developer", content: rendered },
+    { role: "system", content: `${contract.systemInstructions}\n\n${rendered}` },
     { role: "user", content: JSON.stringify(envelope) },
   ];
 }

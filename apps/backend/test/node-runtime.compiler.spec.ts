@@ -4,7 +4,8 @@ import { REWRITE_CONTRACT } from "../src/modules/node-runtime/contracts/rewrite.
 import { INTENT_CONTRACT } from "../src/modules/node-runtime/contracts/intent.contract";
 
 // M8.0 Story 6：严格渲染（区别于 contracts 包宽松版 renderTemplate，注释明确
-// "只适用于预览"）+ 三层消息组装（system 固定 + developer 渲染结果 + user JSON envelope）。
+// "只适用于预览"）+ 两层消息组装（system = 平台固定指令 + 管理员正文渲染结果
+// 拼接 / user = JSON envelope）。
 
 describe("renderTemplateStrict", () => {
   it("合法变量：正常替换", () => {
@@ -28,17 +29,19 @@ describe("renderTemplateStrict", () => {
 });
 
 describe("assembleMessages", () => {
-  it("三层顺序：system 固定 → developer 渲染结果 → user JSON envelope", () => {
+  it("两层顺序：system（固定指令 + 渲染结果拼接） → user JSON envelope", () => {
     const messages = assembleMessages({
       contract: REWRITE_CONTRACT,
       promptBody: "改写：{query}",
       input: { query: "怎么退货", history: "" },
       reserved: {},
     });
-    expect(messages[0]).toEqual({ role: "system", content: REWRITE_CONTRACT.systemInstructions });
-    expect(messages[1]).toEqual({ role: "developer", content: "改写：怎么退货" });
-    expect(messages[2].role).toBe("user");
-    expect(JSON.parse(messages[2].content)).toEqual({ query: "怎么退货", history: "" });
+    expect(messages[0]).toEqual({
+      role: "system",
+      content: `${REWRITE_CONTRACT.systemInstructions}\n\n改写：怎么退货`,
+    });
+    expect(messages[1].role).toBe("user");
+    expect(JSON.parse(messages[1].content)).toEqual({ query: "怎么退货", history: "" });
   });
 
   it("user envelope 包含 input 与 reserved 的合并（reserved 字段一并透传给模型，用真实带 reservedDataSchema 的 INTENT_CONTRACT 而非 rewrite 的空 schema，review round 1）", () => {
@@ -48,7 +51,7 @@ describe("assembleMessages", () => {
       input: { query: "q", history: "h" },
       reserved: { availableRoutes: ["kb_a", "kb_b"] },
     });
-    expect(JSON.parse(messages[2].content)).toEqual({
+    expect(JSON.parse(messages[1].content)).toEqual({
       query: "q",
       history: "h",
       availableRoutes: ["kb_a", "kb_b"],
@@ -63,17 +66,17 @@ describe("assembleMessages", () => {
       input: { query: "q", history: "h", availableRoutes: ["untrusted-from-input"] } as never,
       reserved: { availableRoutes: ["kb_trusted"] },
     });
-    expect(JSON.parse(messages[2].content).availableRoutes).toEqual(["kb_trusted"]);
+    expect(JSON.parse(messages[1].content).availableRoutes).toEqual(["kb_trusted"]);
   });
 
-  it("恰好三条消息，顺序固定", () => {
+  it("恰好两条消息，顺序固定", () => {
     const messages = assembleMessages({
       contract: REWRITE_CONTRACT,
       promptBody: "{query}",
       input: { query: "q", history: "" },
       reserved: {},
     });
-    expect(messages).toHaveLength(3);
-    expect(messages.map((m) => m.role)).toEqual(["system", "developer", "user"]);
+    expect(messages).toHaveLength(2);
+    expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
   });
 });
