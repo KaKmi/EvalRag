@@ -28,6 +28,7 @@ import {
   type ApplicationTag,
   type PromptUsageEntry,
   type ReleaseCheck,
+  type ResolvedApplicationConfig,
 } from "@codecrush/contracts";
 import type { AuthenticatedUser } from "../../platform/security/authenticated-user";
 import { ApplicationsService } from "./applications.service";
@@ -124,6 +125,16 @@ export class ApplicationsController {
     @Param("checkId") checkId: string,
   ): Promise<ReleaseCheck> {
     return this.service.getReleaseCheck(id, checkId);
+  }
+
+  // —— M7b 管理员标签预览解析（Q1：非 production 标签仅管理员；全局 JWT 即管理员面；
+  //     匿名公开 resolvePublic 仅作 service 端口，端点随 M8 chat）——
+  @Get(":idOrSlug/resolve") resolve(
+    @Param("idOrSlug") idOrSlug: string,
+    @Query("tag") tag: string | undefined,
+    @Req() req: AuthedRequest,
+  ): Promise<ResolvedApplicationConfig> {
+    return this.service.resolveByTag(idOrSlug, tag, req.user.email);
   }
 
   // —— M7b production 上线/回滚/下线（passed check + expected 指针 CAS + 归属守卫）——

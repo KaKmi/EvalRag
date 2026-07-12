@@ -1998,6 +1998,61 @@ describe("M2 domain skeleton", () => {
       expect(unpublished.productionConfigVersionId).toBeNull();
     });
 
+    it("resolve（M7b）：管理员带标签解析 / production 指针 / slug 直达 / 未上线 404", async () => {
+      const body = validCreate();
+      const created = (
+        await request(app.getHttpServer())
+          .post("/api/applications")
+          .set(auth())
+          .send(body)
+          .expect(201)
+      ).body;
+      const appId = created.id as string;
+      const v1 = created.versions[0].id as string;
+
+      // 未上线且无 tag → 404
+      await request(app.getHttpServer())
+        .get(`/api/applications/${appId}/resolve`)
+        .set(auth())
+        .expect(404);
+
+      // 打自定义标签 qa1 → 带 tag 解析命中该版本，preview=true，带 promptBody
+      await request(app.getHttpServer())
+        .put(`/api/applications/${appId}/config-version-tags`)
+        .set(auth())
+        .send({ name: "qa1", versionId: v1 })
+        .expect(200);
+      const byTag = (
+        await request(app.getHttpServer())
+          .get(`/api/applications/${appId}/resolve?tag=qa1`)
+          .set(auth())
+          .expect(200)
+      ).body;
+      expect(byTag.configVersionId).toBe(v1);
+      expect(byTag.preview).toBe(true);
+      expect(byTag.nodes.reply.promptBody).toEqual(expect.any(String));
+
+      // slug 直达（等价 /chat/:slug/:tag 的解析层）
+      const bySlug = (
+        await request(app.getHttpServer())
+          .get(`/api/applications/${body.slug}/resolve?tag=qa1`)
+          .set(auth())
+          .expect(200)
+      ).body;
+      expect(bySlug.applicationId).toBe(appId);
+
+      // 标签不存在 → 404（不泄漏）
+      await request(app.getHttpServer())
+        .get(`/api/applications/${appId}/resolve?tag=ghost`)
+        .set(auth())
+        .expect(404);
+
+      // 无 JWT → 401（非 production 标签仅管理员，Q1）
+      await request(app.getHttpServer())
+        .get(`/api/applications/${appId}/resolve?tag=qa1`)
+        .expect(401);
+    });
+
     it("POST / kbIds 空 → 400；引用不存在 prompt version → 404；node 不匹配 → 400", async () => {
       await request(app.getHttpServer())
         .post("/api/applications")

@@ -205,6 +205,37 @@ export const ReleaseCheckSchema = z.strictObject({
 });
 export type ReleaseCheck = z.infer<typeof ReleaseCheckSchema>;
 
+// —— M7b 运行时解析（resolveByTag 管理员预览 / resolvePublic 仅 production；M8 chat 消费同一形状）——
+export const ResolvedNodeConfigSchema = z.strictObject({
+  promptVersionId: z.string().min(1),
+  promptBody: z.string(),
+  contractVersion: z.number().int().positive(),
+  modelId: z.string().min(1),
+  freedom: FreedomSchema,
+  temperature: z.number(),
+  topP: z.number(),
+});
+export type ResolvedNodeConfig = z.infer<typeof ResolvedNodeConfigSchema>;
+
+export const ResolvedApplicationConfigSchema = z.strictObject({
+  applicationId: z.string().min(1),
+  slug: z.string().min(1),
+  configVersionId: z.string().min(1),
+  version: z.number().int().positive(),
+  kbIds: z.array(z.string()),
+  nodes: z.strictObject({
+    rewrite: ResolvedNodeConfigSchema,
+    intent: ResolvedNodeConfigSchema,
+    reply: ResolvedNodeConfigSchema,
+    fallback: ResolvedNodeConfigSchema,
+  }),
+  retrieval: ApplicationRetrievalParamsSchema,
+  fallback: z.strictObject({ toHuman: z.boolean() }),
+  /** resolveByTag/resolveForTest=true（rag.preview 打标）；resolvePublic=false */
+  preview: z.boolean(),
+});
+export type ResolvedApplicationConfig = z.infer<typeof ResolvedApplicationConfigSchema>;
+
 // —— M7b production 受门禁 CAS 上线/下线 ——
 export const PublishProductionRequestSchema = z.strictObject({
   versionId: z.string().min(1),

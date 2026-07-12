@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
   UnprocessableEntityException,
 } from "@nestjs/common";
@@ -125,6 +126,11 @@ function service(overrides: Record<string, unknown> = {}) {
       version: 1,
       contractVersion: 1,
       compileStatus: "ok",
+    })),
+    getVersionExecutable: jest.fn(async (id: string) => ({
+      node: id.slice(2),
+      contractVersion: 1,
+      body: `body-of-${id}`,
     })),
     listVersions: jest.fn(async () => []),
   };
@@ -364,6 +370,77 @@ describe("ApplicationsService", () => {
     await expect(conflict.app.unpublishProduction("a1", "v1", "u")).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+
+  // —— M7b S6 resolver（拒绝序 deleted → disabled → 目标缺失 → resolved）——
+  const appRow = (over: Record<string, unknown> = {}) => ({
+    id: "a1",
+    slug: "after-sale",
+    name: "售后",
+    description: "",
+    enabled: true,
+    productionConfigVersionId: "v1",
+    productionVersion: 1,
+    latestVersion: 1,
+    versionCount: 1,
+    createdBy: "u",
+    updatedBy: "u",
+    createdAt: now,
+    updatedAt: now,
+    ...over,
+  });
+
+  it("resolvePublic：应用缺失/软删 → 404（byId 已过滤 + bySlug 显式判）", async () => {
+    const { app } = service({
+      findApplicationById: jest.fn(async () => undefined),
+      findBySlug: jest.fn(async () => undefined),
+    });
+    await expect(app.resolvePublic("nope")).rejects.toBeInstanceOf(NotFoundException);
+    const softDeleted = service({
+      findApplicationById: jest.fn(async () => undefined),
+      findBySlug: jest.fn(async () => ({ id: "a1", deletedAt: now })),
+    });
+    await expect(softDeleted.app.resolvePublic("after-sale")).rejects.toBeInstanceOf(NotFoundException);
+  });
+  it("resolvePublic：停用 → 403；production 缺失 → 404", async () => {
+    const disabled = service({ findApplicationById: jest.fn(async () => appRow({ enabled: false })) });
+    await expect(disabled.app.resolvePublic("a1")).rejects.toBeInstanceOf(ForbiddenException);
+    const unpublished = service({
+      findApplicationById: jest.fn(async () => appRow({ productionConfigVersionId: null })),
+    });
+    await expect(unpublished.app.resolvePublic("a1")).rejects.toBeInstanceOf(NotFoundException);
+  });
+  it("resolvePublic happy：只读指针，preview=false，四节点带 promptBody", async () => {
+    const { app } = service({ findApplicationById: jest.fn(async () => appRow()) });
+    const resolved = await app.resolvePublic("a1");
+    expect(resolved.preview).toBe(false);
+    expect(resolved.configVersionId).toBe("v1");
+    expect(resolved.nodes.reply.promptBody).toBe("body-of-p-reply");
+    expect(resolved.kbIds).toEqual(["kb"]);
+  });
+  it("resolveByTag：自定义标签命中该版本，preview=true；标签缺失 → 404", async () => {
+    const { app } = service({ findApplicationById: jest.fn(async () => appRow()) });
+    const resolved = await app.resolveByTag("a1", "QA1", "admin");
+    expect(resolved.preview).toBe(true);
+    expect(resolved.configVersionId).toBe("v1"); // fake findTagsWithVersion: qa1 → v1
+    await expect(app.resolveByTag("a1", "nope", "admin")).rejects.toBeInstanceOf(NotFoundException);
+  });
+  it("resolveByTag：tag 省略或 production → 读指针；未上线 → 404", async () => {
+    const { app } = service({ findApplicationById: jest.fn(async () => appRow()) });
+    expect((await app.resolveByTag("a1", undefined, "admin")).configVersionId).toBe("v1");
+    expect((await app.resolveByTag("a1", "production", "admin")).configVersionId).toBe("v1");
+    const unpublished = service({
+      findApplicationById: jest.fn(async () => appRow({ productionConfigVersionId: null })),
+    });
+    await expect(unpublished.app.resolveByTag("a1", undefined, "admin")).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+  it("resolveForTest：显式版本，preview=true", async () => {
+    const { app } = service();
+    const resolved = await app.resolveForTest("a1", "v1", "admin");
+    expect(resolved.preview).toBe(true);
+    expect(resolved.version).toBe(1);
   });
 
   it("getReleaseCheck：归属校验 + 返回 DTO；异应用 → 404", async () => {

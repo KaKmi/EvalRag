@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -19,6 +20,7 @@ import type {
   PromptUsageEntry,
   ReleaseCheck,
   ReleaseCheckIssue,
+  ResolvedApplicationConfig,
   UpdateApplicationRequest,
 } from "@codecrush/contracts";
 import { KnowledgeBasesService } from "../knowledge-bases/knowledge-bases.service";
@@ -263,6 +265,99 @@ export class ApplicationsService {
     const row = await this.mustFind(id);
     const tagsByApp = await this.repo.findTagNamesByAppIds([id]);
     return this.toApplication(row, tagsByApp.get(id) ?? []);
+  }
+
+  // —— M7b 运行时解析（009 §运行时解析：拒绝序 deleted → disabled → 目标缺失 → resolved）——
+
+  /** 匿名公开解析：只读 production 指针。M7b 仅作端口（匿名 chat 端点随 M8）。 */
+  async resolvePublic(idOrSlug: string): Promise<ResolvedApplicationConfig> {
+    const app = await this.findVisibleAppByIdOrSlug(idOrSlug); // deleted/missing → 404
+    if (!app.enabled) throw new ForbiddenException("应用已停用"); // disabled
+    if (!app.productionConfigVersionId) throw new NotFoundException("应用未上线"); // 目标缺失
+    return this.buildResolvedConfig(app, app.productionConfigVersionId, false);
+  }
+
+  /** 管理员带标签解析（Q1：非 production 标签仅管理员可达；controller 全局 JWT 即管理员面）。 */
+  async resolveByTag(
+    idOrSlug: string,
+    tag: string | undefined,
+    actor: string,
+  ): Promise<ResolvedApplicationConfig> {
+    const app = await this.findVisibleAppByIdOrSlug(idOrSlug);
+    if (!app.enabled) throw new ForbiddenException("应用已停用");
+    let versionId: string;
+    if (!tag || tag.toLowerCase() === "production") {
+      if (!app.productionConfigVersionId) throw new NotFoundException("应用未上线");
+      versionId = app.productionConfigVersionId;
+    } else {
+      const hit = (await this.repo.findTagsWithVersion(app.id)).find(
+        (t) => t.name === tag.toLowerCase(),
+      );
+      if (!hit) throw new NotFoundException(`标签 ${tag} 不存在`);
+      versionId = hit.versionId;
+    }
+    this.logger.log(`application.resolve app=${app.id} tag=${tag ?? "production"} by=${actor}`);
+    return this.buildResolvedConfig(app, versionId, true);
+  }
+
+  /** 管理员显式版本解析（对话测试），preview=true。 */
+  async resolveForTest(
+    applicationId: string,
+    configVersionId: string,
+    _actor: string,
+  ): Promise<ResolvedApplicationConfig> {
+    const app = await this.mustFind(applicationId);
+    const v = await this.mustFindVersion(applicationId, configVersionId);
+    return this.buildResolvedConfig(app, v.id, true);
+  }
+
+  private async findVisibleAppByIdOrSlug(idOrSlug: string): Promise<ApplicationListRow> {
+    const byId = await this.repo.findApplicationById(idOrSlug); // 已过滤软删
+    if (byId) return byId;
+    const bySlug = await this.repo.findBySlug(idOrSlug); // D8：未过滤软删，此处显式判
+    if (!bySlug || bySlug.deletedAt) throw new NotFoundException(`应用 ${idOrSlug} 不存在`);
+    const row = await this.repo.findApplicationById(bySlug.id);
+    if (!row) throw new NotFoundException(`应用 ${idOrSlug} 不存在`);
+    return row;
+  }
+
+  private async buildResolvedConfig(
+    app: ApplicationListRow,
+    versionId: string,
+    preview: boolean,
+  ): Promise<ResolvedApplicationConfig> {
+    const v = await this.repo.findVersionById(versionId);
+    if (!v || v.applicationId !== app.id) throw new NotFoundException("目标配置版本不存在");
+    const kbIds = await this.repo.findVersionKbIds(v.id);
+    const nodesOut = {} as ResolvedApplicationConfig["nodes"];
+    for (const node of nodes) {
+      const promptVersionId = v[NODE_COLUMNS[node].prompt] as string;
+      const exec = await this.prompts.getVersionExecutable(promptVersionId);
+      // FK RESTRICT 保护下不应发生；发生即数据完整性破坏，快速失败
+      if (!exec)
+        throw new UnprocessableEntityException(`${node} 的 PromptVersion ${promptVersionId} 不存在`);
+      const p = v.nodeParams[node];
+      nodesOut[node] = {
+        promptVersionId,
+        promptBody: exec.body,
+        contractVersion: exec.contractVersion,
+        modelId: v[NODE_COLUMNS[node].model] as string,
+        freedom: p.freedom,
+        temperature: p.temperature,
+        topP: p.topP,
+      };
+    }
+    return {
+      applicationId: app.id,
+      slug: app.slug,
+      configVersionId: v.id,
+      version: v.version,
+      kbIds,
+      nodes: nodesOut,
+      retrieval: v.retrievalParams,
+      fallback: v.fallbackParams,
+      preview,
+    };
   }
 
   /** 同一函数供上线校验重算 fingerprint（S5）——保证 start 与 publish 用同一算法。 */
