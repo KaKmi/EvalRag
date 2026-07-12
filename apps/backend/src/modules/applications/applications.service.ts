@@ -34,7 +34,8 @@ import { computeFingerprint, type FingerprintInput } from "./fingerprint";
 import type { ApplicationConfigVersionRow, ReleaseCheckRow } from "./schema";
 
 const APPLICATION_TAG_CAP = 20;
-const APPLICATION_TAG_RESERVED = ["production", "v"];
+const PRODUCTION_TAG = "production";
+const APPLICATION_TAG_RESERVED = [PRODUCTION_TAG, "v"];
 const nodes = ["rewrite", "intent", "reply", "fallback"] as const;
 type NodeKey = (typeof nodes)[number];
 
@@ -288,7 +289,7 @@ export class ApplicationsService {
     const app = await this.findVisibleAppByIdOrSlug(idOrSlug);
     if (!app.enabled) throw new ForbiddenException("应用已停用");
     let versionId: string;
-    if (!tag || tag.toLowerCase() === "production") {
+    if (!tag || tag.toLowerCase() === PRODUCTION_TAG) {
       if (!app.productionConfigVersionId) throw new NotFoundException("应用未上线");
       versionId = app.productionConfigVersionId;
     } else {
@@ -298,7 +299,7 @@ export class ApplicationsService {
       if (!hit) throw new NotFoundException(`标签 ${tag} 不存在`);
       versionId = hit.versionId;
     }
-    this.logger.log(`application.resolve app=${app.id} tag=${tag ?? "production"} by=${actor}`);
+    this.logger.log(`application.resolve app=${app.id} tag=${tag ?? PRODUCTION_TAG} by=${actor}`);
     return this.buildResolvedConfig(app, versionId, true);
   }
 
@@ -330,25 +331,35 @@ export class ApplicationsService {
   ): Promise<ResolvedApplicationConfig> {
     const v = await this.repo.findVersionById(versionId);
     if (!v || v.applicationId !== app.id) throw new NotFoundException("目标配置版本不存在");
-    const kbIds = await this.repo.findVersionKbIds(v.id);
-    const nodesOut = {} as ResolvedApplicationConfig["nodes"];
-    for (const node of nodes) {
-      const promptVersionId = v[NODE_COLUMNS[node].prompt] as string;
-      const exec = await this.prompts.getVersionExecutable(promptVersionId);
-      // FK RESTRICT 保护下不应发生；发生即数据完整性破坏，快速失败
-      if (!exec)
-        throw new UnprocessableEntityException(`${node} 的 PromptVersion ${promptVersionId} 不存在`);
-      const p = v.nodeParams[node];
-      nodesOut[node] = {
-        promptVersionId,
-        promptBody: exec.body,
-        contractVersion: exec.contractVersion,
-        modelId: v[NODE_COLUMNS[node].model] as string,
-        freedom: p.freedom,
-        temperature: p.temperature,
-        topP: p.topP,
-      };
-    }
+    // review（refactor）：四节点互不依赖，并行取代顺序 await——resolvePublic 热路径受益最大
+    const [kbIds, nodeEntries] = await Promise.all([
+      this.repo.findVersionKbIds(v.id),
+      Promise.all(
+        nodes.map(async (node) => {
+          const promptVersionId = v[NODE_COLUMNS[node].prompt] as string;
+          const exec = await this.prompts.getVersionExecutable(promptVersionId);
+          // FK RESTRICT 保护下不应发生；发生即数据完整性破坏，快速失败
+          if (!exec)
+            throw new UnprocessableEntityException(
+              `${node} 的 PromptVersion ${promptVersionId} 不存在`,
+            );
+          const p = v.nodeParams[node];
+          return [
+            node,
+            {
+              promptVersionId,
+              promptBody: exec.body,
+              contractVersion: exec.contractVersion,
+              modelId: v[NODE_COLUMNS[node].model] as string,
+              freedom: p.freedom,
+              temperature: p.temperature,
+              topP: p.topP,
+            },
+          ] as const;
+        }),
+      ),
+    ]);
+    const nodesOut = Object.fromEntries(nodeEntries) as ResolvedApplicationConfig["nodes"];
     return {
       applicationId: app.id,
       slug: app.slug,
@@ -368,15 +379,28 @@ export class ApplicationsService {
   }
 
   private async buildReleaseContext(version: ApplicationConfigVersionRow): Promise<ReleaseContext> {
-    const kbIds = await this.repo.findVersionKbIds(version.id);
+    // review（refactor）：四节点的 prompt/model 元数据、KB id 集合、rerank 元数据互不依赖，
+    // 并行取代顺序 await（kbRows 依赖 kbIds，保留其后置的必要顺序）。
+    const [kbIds, nodeMetas, rerank] = await Promise.all([
+      this.repo.findVersionKbIds(version.id),
+      Promise.all(
+        nodes.map(async (node) => {
+          const [promptMeta, modelMeta] = await Promise.all([
+            this.prompts.getVersionMeta(version[NODE_COLUMNS[node].prompt] as string),
+            this.safeGetModel(version[NODE_COLUMNS[node].model] as string),
+          ]);
+          return [node, promptMeta, modelMeta] as const;
+        }),
+      ),
+      version.rerankModelId ? this.safeGetModel(version.rerankModelId) : Promise.resolve(null),
+    ]);
     const kbRows = await this.knowledgeBases.findByIds(kbIds);
-    const promptMetas = new Map<NodeKey, Awaited<ReturnType<PromptsService["getVersionMeta"]>>>();
-    const modelMetas = new Map<NodeKey, ModelMeta>();
-    for (const node of nodes) {
-      promptMetas.set(node, await this.prompts.getVersionMeta(version[NODE_COLUMNS[node].prompt] as string));
-      modelMetas.set(node, await this.safeGetModel(version[NODE_COLUMNS[node].model] as string));
-    }
-    const rerank = version.rerankModelId ? await this.safeGetModel(version.rerankModelId) : null;
+    const promptMetas = new Map<NodeKey, Awaited<ReturnType<PromptsService["getVersionMeta"]>>>(
+      nodeMetas.map(([node, promptMeta]) => [node, promptMeta]),
+    );
+    const modelMetas = new Map<NodeKey, ModelMeta>(
+      nodeMetas.map(([node, , modelMeta]) => [node, modelMeta]),
+    );
     return { kbIds, kbRows, promptMetas, modelMetas, rerank };
   }
 
