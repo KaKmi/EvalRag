@@ -77,4 +77,13 @@ describe("TracesController", () => {
     await expect(ctrl.sessions()).resolves.toEqual([]);
     expect(listSessions).toHaveBeenCalled();
   });
+
+  // M9 W3：session 详情
+  it("GET /traces/sessions/:sessionId calls service.getSession", async () => {
+    const detail = { sessionId: "conv1", userId: "u1", agentId: "app1", agentName: "退款助手", rounds: [] };
+    const getSession = jest.fn().mockResolvedValue(detail);
+    const ctrl = await build({ getSession } as Partial<TracesService>);
+    await expect(ctrl.session("conv1")).resolves.toEqual(detail);
+    expect(getSession).toHaveBeenCalledWith("conv1");
+  });
 });

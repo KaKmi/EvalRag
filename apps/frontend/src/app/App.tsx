@@ -23,6 +23,7 @@ const EvalSetsPage = lazy(() => import("../pages/admin/EvalSetsPage"));
 const EvalsPage = lazy(() => import("../pages/admin/EvalsPage"));
 const TracesPage = lazy(() => import("../pages/admin/TracesPage"));
 const TraceDetailPage = lazy(() => import("../pages/admin/TraceDetailPage"));
+const SessionDetailPage = lazy(() => import("../pages/admin/SessionDetailPage"));
 const ModelsPage = lazy(() => import("../pages/admin/ModelsPage"));
 
 const Fallback = (
@@ -80,6 +81,7 @@ export function App() {
           <Route path="evaluations" element={<EvalsPage />} />
           <Route path="evaluations/:reportId" element={<EvalsPage />} />
           <Route path="traces" element={<TracesPage />} />
+          <Route path="traces/sessions/:sessionId" element={<SessionDetailPage />} />
           <Route path="traces/:traceId" element={<TraceDetailPage />} />
           <Route path="models" element={<ModelsPage />} />
         </Route>

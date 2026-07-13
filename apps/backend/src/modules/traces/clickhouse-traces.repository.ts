@@ -4,8 +4,10 @@ import { dirname, join } from "node:path";
 import { Inject, Injectable } from "@nestjs/common";
 import type {
   QualitySignal,
+  SessionDetailResponse,
   SessionListResponse,
   SessionListRow,
+  SessionRound,
   SessionStatus,
   TraceDetailMeta,
   TraceDetailResponse,
@@ -375,5 +377,35 @@ export class ClickHouseTracesRepository {
       {},
     );
     return rows.map(mapSessionRow);
+  }
+
+  /**
+   * M9 W3：Session 详情 = 该会话所有正式 trace（排除 preview）按时间升序，每行一轮。
+   * 直接复用 codecrush_traces VIEW（已含 output/user_input/status/duration），无需第二个 VIEW。
+   * 冷库/未落库返回空 rounds（页面占位）。
+   */
+  async findSessionById(sessionId: string): Promise<SessionDetailResponse> {
+    const empty: SessionDetailResponse = { sessionId, userId: null, agentId: "", agentName: "", rounds: [] };
+    if (!(await this.ensureTraceViews())) return empty;
+    const rows = await this.runView<TracesViewRow>(
+      `SELECT * FROM ${TRACES_VIEW_NAME} WHERE session_id = {sid:String} AND preview = 0 ORDER BY start_time ASC`,
+      { sid: sessionId },
+    );
+    const rounds: SessionRound[] = rows.map((r) => ({
+      traceId: r.trace_id,
+      userInput: r.user_input ?? "",
+      output: r.output ?? "",
+      status: r.status,
+      durationMs: Number(r.total_duration_ms ?? 0),
+      startTime: toIsoUtc(r.start_time),
+    }));
+    const first = rows[0];
+    return {
+      sessionId,
+      userId: first?.user_id ? first.user_id : null,
+      agentId: first?.agent_id ?? "",
+      agentName: first?.agent_name ?? "",
+      rounds,
+    };
   }
 }

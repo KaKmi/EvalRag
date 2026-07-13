@@ -308,4 +308,30 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
       firstTs: "2026-07-13T09:11:00.000Z", lastTs: "2026-07-13T09:20:00.000Z", status: "has_fallback",
     });
   });
+
+  // M9 W3：Session 详情——从 codecrush_traces 按 session_id 聚多轮，每行一轮
+  it("findSessionById maps rounds + derives meta (user_input/output/status/duration)", async () => {
+    const { client } = buildClient({
+      tableExists: true,
+      rows: [
+        { trace_id: "a".repeat(32), session_id: "conv1", agent_id: "app1", agent_name: "退款助手", user_id: "u1", user_input: "怎么退款", output: "答案A[1]", start_time: "2026-07-13 09:11:00.000", total_duration_ms: "2410", status: "success" },
+        { trace_id: "b".repeat(32), session_id: "conv1", agent_id: "app1", agent_name: "退款助手", user_id: "u1", user_input: "多久到账", output: "很抱歉，暂时无法回答。", start_time: "2026-07-13 09:12:00.000", total_duration_ms: "1500", status: "fallback" },
+      ],
+    });
+    const repo = new ClickHouseTracesRepository(client);
+    const res = await repo.findSessionById("conv1");
+    expect(res).toMatchObject({ sessionId: "conv1", userId: "u1", agentId: "app1", agentName: "退款助手" });
+    expect(res.rounds).toHaveLength(2);
+    expect(res.rounds[0]).toEqual({ traceId: "a".repeat(32), userInput: "怎么退款", output: "答案A[1]", status: "success", durationMs: 2410, startTime: "2026-07-13T09:11:00.000Z" });
+    expect(res.rounds[1].status).toBe("fallback");
+  });
+
+  it("findSessionById 冷库（exporter 表未建）→ 空 rounds、不建 VIEW", async () => {
+    const { client, raw } = buildClient({ tableExists: false });
+    const repo = new ClickHouseTracesRepository(client);
+    await expect(repo.findSessionById("conv1")).resolves.toEqual({
+      sessionId: "conv1", userId: null, agentId: "", agentName: "", rounds: [],
+    });
+    expect(raw.command).not.toHaveBeenCalled();
+  });
 });

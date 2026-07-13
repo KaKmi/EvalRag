@@ -402,6 +402,7 @@ export default function TracesPage() {
                 return (
                   <div
                     key={s.sessionId}
+                    onClick={() => nav(`/admin/traces/sessions/${s.sessionId}`)}
                     style={{
                       display: "grid",
                       gridTemplateColumns: "180px 110px 120px 70px 1fr 90px",
@@ -409,6 +410,7 @@ export default function TracesPage() {
                       borderBottom: "1px solid #f0f0f0",
                       fontSize: 13,
                       alignItems: "center",
+                      cursor: "pointer",
                     }}
                   >
                     <div style={{ fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12, color: "#1677ff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>

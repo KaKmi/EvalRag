@@ -108,6 +108,27 @@ export type SessionListRow = z.infer<typeof SessionListRowSchema>;
 export const SessionListResponseSchema = z.array(SessionListRowSchema);
 export type SessionListResponse = z.infer<typeof SessionListResponseSchema>;
 
+// —— M9 W3：Session 详情（C 端聊天窗口回放 + 每 bot 气泡溯源条）——
+// 一轮 = 一条 trace（user_input=用户泡 / output=bot 泡 / trace_id+status+duration=溯源条）。
+export const SessionRoundSchema = z.object({
+  traceId: traceIdSchema,
+  userInput: z.string(),
+  output: z.string(),
+  status: TraceStatusSchema,
+  durationMs: z.number().nonnegative(),
+  startTime: z.string().datetime(),
+});
+export type SessionRound = z.infer<typeof SessionRoundSchema>;
+
+export const SessionDetailResponseSchema = z.object({
+  sessionId: z.string(),
+  userId: z.string().nullable(),
+  agentId: z.string(),
+  agentName: z.string(),
+  rounds: z.array(SessionRoundSchema),
+});
+export type SessionDetailResponse = z.infer<typeof SessionDetailResponseSchema>;
+
 // query：status/quick 用中文 enum 直传（repository 内翻 CH 值）；page/pageSize coerce（query 全字符串）
 export const TraceListQuerySchema = z.object({
   q: z.string().optional(),

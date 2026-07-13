@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   HelloTraceResponseSchema,
   QualitySignalSchema,
+  SessionDetailResponseSchema,
   SessionListRowSchema,
   TraceDetailMetaSchema,
   TraceDetailResponseSchema,
@@ -115,6 +116,30 @@ describe("M9 W2 详情契约", () => {
 
   it("缺 meta 拒绝", () => {
     expect(TraceDetailResponseSchema.safeParse({ traceId: "a".repeat(32), spans: [span] }).success).toBe(false);
+  });
+});
+
+describe("M9 W3 Session 详情契约", () => {
+  const base = {
+    sessionId: "conv1",
+    userId: "u1",
+    agentId: "app1",
+    agentName: "退款助手",
+    rounds: [
+      { traceId: "a".repeat(32), userInput: "怎么退款", output: "答", status: "success", durationMs: 2410, startTime: "2026-07-13T09:11:00.000Z" },
+    ],
+  };
+
+  it("SessionDetailResponse 合法（含轮次）", () => {
+    expect(SessionDetailResponseSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("userId 可空 + rounds 可空数组", () => {
+    expect(SessionDetailResponseSchema.safeParse({ ...base, userId: null, rounds: [] }).success).toBe(true);
+  });
+
+  it("round.traceId 非 32-hex 拒绝", () => {
+    expect(SessionDetailResponseSchema.safeParse({ ...base, rounds: [{ ...base.rounds[0], traceId: "bad" }] }).success).toBe(false);
   });
 });
 
