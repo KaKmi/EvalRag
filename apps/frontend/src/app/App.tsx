@@ -41,14 +41,17 @@ export function App() {
     <Suspense fallback={Fallback}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* M8 T4：一个 bot 一个 URL——:agentId 为 slug 或 applicationId，直传 resolvePublic/getApplications */}
         <Route
-          path="/chat"
+          path="/chat/:agentId"
           element={
             <AuthGuard>
               <ChatPage />
             </AuthGuard>
           }
         />
+        {/* 裸 /chat 无 agent 落点 → 重定向管理台（与通配一致） */}
+        <Route path="/chat" element={<Navigate to="/admin" replace />} />
         <Route
           path="/admin"
           element={

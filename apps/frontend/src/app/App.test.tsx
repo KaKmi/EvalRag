@@ -269,10 +269,10 @@ it("loads ChunksPage from real /api/documents/:id/chunks on the chunks route (M4
   });
 });
 
-it("renders chat three-column layout on /chat when authenticated", async () => {
+it("renders chat three-column layout on /chat/:agentId when authenticated", async () => {
   localStorage.setItem("token", "fake-token");
   render(
-    <MemoryRouter initialEntries={["/chat"]}>
+    <MemoryRouter initialEntries={["/chat/aftersale"]}>
       <App />
     </MemoryRouter>,
   );
@@ -282,9 +282,9 @@ it("renders chat three-column layout on /chat when authenticated", async () => {
   expect(screen.getByText("引用原文")).toBeInTheDocument();
 });
 
-it("protects /chat behind AuthGuard", async () => {
+it("protects /chat/:agentId behind AuthGuard", async () => {
   render(
-    <MemoryRouter initialEntries={["/chat"]}>
+    <MemoryRouter initialEntries={["/chat/aftersale"]}>
       <App />
     </MemoryRouter>,
   );
