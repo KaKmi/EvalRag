@@ -696,3 +696,76 @@ describe("NodeRuntimeService.compileAndSample", () => {
     expect(res.results[1].ok).toBe(true);
   });
 });
+
+// M8 T3：gen_ai.usage.* 落 LLM span（executeStructured 两次尝试求和；stream 逐字段合并）
+describe("NodeRuntimeService · gen_ai.usage (M8 T3)", () => {
+  let exporter: InMemorySpanExporter;
+  beforeEach(() => {
+    exporter = new InMemorySpanExporter();
+    trace.disable();
+    trace.setGlobalTracerProvider(
+      new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }),
+    );
+  });
+  afterEach(() => trace.disable());
+
+  const attrs = (name: string) => {
+    const span = exporter.getFinishedSpans().find((s) => s.name === name);
+    if (!span) throw new Error(`span ${name} not found`);
+    return span.attributes as Record<string, unknown>;
+  };
+
+  it("executeStructured：单次成功 → span 带 usage", async () => {
+    const chat = jest.fn(async () => ({
+      content: '{"rewrittenQuery":"q","keywords":[]}',
+      usage: { inputTokens: 11, outputTokens: 4 },
+    }));
+    const svc = makeService(chat);
+    await svc.executeStructured("rewrite", 1, "{query}", "m1", { query: "q", history: "" }, {});
+    const a = attrs("node_runtime.execute_structured");
+    expect(a["gen_ai.usage.input_tokens"]).toBe(11);
+    expect(a["gen_ai.usage.output_tokens"]).toBe(4);
+  });
+
+  it("executeStructured：修复重试 → 两次尝试 usage 求和", async () => {
+    const chat = jest
+      .fn()
+      .mockResolvedValueOnce({ content: "不是JSON", usage: { inputTokens: 10, outputTokens: 2 } })
+      .mockResolvedValueOnce({
+        content: '{"rewrittenQuery":"q","keywords":[]}',
+        usage: { inputTokens: 11, outputTokens: 4 },
+      });
+    const svc = makeService(chat);
+    await svc.executeStructured("rewrite", 1, "{query}", "m1", { query: "q", history: "" }, {});
+    const a = attrs("node_runtime.execute_structured");
+    expect(a["gen_ai.usage.input_tokens"]).toBe(21);
+    expect(a["gen_ai.usage.output_tokens"]).toBe(6);
+  });
+
+  it("streamTextChunks：分帧 usage 逐字段合并落 span（anthropic 式 message_start/delta）", async () => {
+    const chatStream = jest.fn(async function* () {
+      yield { usage: { inputTokens: 30, outputTokens: 0 } }; // message_start
+      yield { delta: "答" };
+      yield { usage: { inputTokens: 0, outputTokens: 12 } }; // message_delta
+      yield { done: true };
+    });
+    const svc = makeService(jest.fn(), chatStream);
+    const gen = svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, {
+      citations: [],
+    });
+    let r = await gen.next();
+    while (!r.done) r = await gen.next();
+    const a = attrs("node_runtime.stream_text");
+    expect(a["gen_ai.usage.input_tokens"]).toBe(30);
+    expect(a["gen_ai.usage.output_tokens"]).toBe(12);
+  });
+
+  it("无 usage → 不 set 属性、不抛", async () => {
+    const chat = jest.fn(async () => ({ content: '{"rewrittenQuery":"q","keywords":[]}' }));
+    const svc = makeService(chat);
+    await svc.executeStructured("rewrite", 1, "{query}", "m1", { query: "q", history: "" }, {});
+    const a = attrs("node_runtime.execute_structured");
+    expect(a["gen_ai.usage.input_tokens"]).toBeUndefined();
+    expect(a["gen_ai.usage.output_tokens"]).toBeUndefined();
+  });
+});

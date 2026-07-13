@@ -230,3 +230,33 @@ describe("CHAT_BUILDERS · 支持矩阵", () => {
     expect(body.model).toBe("deploy-42");
   });
 });
+
+// M8 T3：三协议 token 用量解析（gen_ai.usage.*）
+describe("CHAT_BUILDERS · parseUsage", () => {
+  it("openai：usage.prompt_tokens/completion_tokens → inputTokens/outputTokens", () => {
+    const spec = CHAT_BUILDERS.openai_compat!(base(), messages, {});
+    expect(spec.parseUsage({ usage: { prompt_tokens: 12, completion_tokens: 5 } })).toEqual({
+      inputTokens: 12,
+      outputTokens: 5,
+    });
+    expect(spec.parseUsage({})).toBeUndefined();
+    expect(spec.parseUsage({ usage: { prompt_tokens: "x" } })).toBeUndefined();
+  });
+
+  it("anthropic：usage.input_tokens/output_tokens", () => {
+    const spec = CHAT_BUILDERS.anthropic!(base({ protocol: "anthropic" }), messages, {});
+    expect(spec.parseUsage({ usage: { input_tokens: 8, output_tokens: 3 } })).toEqual({
+      inputTokens: 8,
+      outputTokens: 3,
+    });
+    expect(spec.parseUsage({ usage: {} })).toBeUndefined();
+  });
+
+  it("gemini：usageMetadata.promptTokenCount/candidatesTokenCount", () => {
+    const spec = CHAT_BUILDERS.gemini!(base({ protocol: "gemini" }), messages, {});
+    expect(
+      spec.parseUsage({ usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 7 } }),
+    ).toEqual({ inputTokens: 20, outputTokens: 7 });
+    expect(spec.parseUsage({ usageMetadata: {} })).toBeUndefined();
+  });
+});

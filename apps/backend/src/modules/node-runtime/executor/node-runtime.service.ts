@@ -86,6 +86,28 @@ export const SUPPORTED_CHAT_PROTOCOLS = ["openai_compat", "anthropic", "gemini"]
 /** 协议不在 SUPPORTED_CHAT_PROTOCOLS 内——prompts.service 捕获后转 unavailable/unsupported_protocol */
 export class UnsupportedChatProtocolError extends Error {}
 
+/**
+ * M8 T3：把累计 token 用量写为 gen_ai.usage.* span 属性（>0 才写，避免 0 噪声与"未取到数"混淆）。
+ * 结构化入参而非 @opentelemetry/api 的 Span 类型：node-runtime 不直接依赖 @opentelemetry/api（边界）。
+ */
+function setUsageAttrs(
+  span: { setAttribute(key: string, value: number): void },
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  if (inputTokens > 0) span.setAttribute(GEN_AI.USAGE_INPUT_TOKENS, inputTokens);
+  if (outputTokens > 0) span.setAttribute(GEN_AI.USAGE_OUTPUT_TOKENS, outputTokens);
+}
+
+/** M8 T3：流式 chunk 的 usage 逐字段合并（openai/gemini 末帧同时给两值、anthropic 分帧到达）。 */
+function mergeStreamUsage(
+  acc: { inputTokens: number; outputTokens: number },
+  usage: { inputTokens: number; outputTokens: number },
+): void {
+  if (usage.inputTokens) acc.inputTokens = usage.inputTokens;
+  if (usage.outputTokens) acc.outputTokens = usage.outputTokens;
+}
+
 @Injectable()
 export class NodeRuntimeService {
   constructor(private readonly models: ModelsService) {}
@@ -174,6 +196,9 @@ export class NodeRuntimeService {
           strict: true,
         };
         const chatOpts = { structuredOutput, temperature: opts?.temperature };
+        // M8 T3：两次尝试（首次 + 修复）是两次独立 completion，token 用量求和
+        let uin = 0;
+        let uout = 0;
 
         // review round 1：区分"输出不是合法结构"(output_schema) 与"结构合法但触发
         // 动态值域校验"(extra_validate) 两类失败原因，validateSteps 才能真正驱动
@@ -185,6 +210,10 @@ export class NodeRuntimeService {
           | { ok: false; step: "output_schema" | "extra_validate"; issues: string[] }
         > => {
           const res = await this.models.chat(modelId, messages, chatOpts);
+          if (res.usage) {
+            uin += res.usage.inputTokens;
+            uout += res.usage.outputTokens;
+          }
           const normalized = normalizeStructuredOutput(res.content);
           let parsed: unknown;
           try {
@@ -218,6 +247,7 @@ export class NodeRuntimeService {
           steps.push({ step: "output_schema", ok: true });
           span.setAttribute(RAG.FALLBACK_USED, false);
           span.setAttribute(RAG.REPAIR_RETRY_COUNT, 0);
+          setUsageAttrs(span, uin, uout);
           return {
             output: first.output,
             fallbackUsed: false,
@@ -240,6 +270,7 @@ export class NodeRuntimeService {
         if (second.ok) {
           steps.push({ step: "repair", ok: true });
           span.setAttribute(RAG.FALLBACK_USED, false);
+          setUsageAttrs(span, uin, uout);
           return {
             output: second.output,
             fallbackUsed: false,
@@ -251,6 +282,7 @@ export class NodeRuntimeService {
 
         steps.push({ step: "fallback", ok: true });
         span.setAttribute(RAG.FALLBACK_USED, true);
+        setUsageAttrs(span, uin, uout);
         return {
           output: contract.fallback(validInput, validReserved),
           fallbackUsed: true,
@@ -321,11 +353,13 @@ export class NodeRuntimeService {
           reserved: validReserved,
         });
         let text = "";
+        const usageAcc = { inputTokens: 0, outputTokens: 0 };
         try {
           const stream = await this.models.chatStream(modelId, messages, {
             temperature: opts?.temperature,
           });
           for await (const chunk of stream) {
+            if (chunk.usage) mergeStreamUsage(usageAcc, chunk.usage);
             if (chunk.error) {
               // review round 1：报错时不再无条件清空 text——011 Design 明确区分"首 token
               // 前报错/空响应"(无痕切 fallback) 和"已发送 token 后断流"(不可撤回已产出内容)。
@@ -338,6 +372,7 @@ export class NodeRuntimeService {
         } catch {
           // 网络层异常同样只看已产出内容：text 非空则保留，不清空。
         }
+        setUsageAttrs(span, usageAcc.inputTokens, usageAcc.outputTokens);
         if (text.length === 0) {
           span.setAttribute(RAG.FALLBACK_USED, true);
           return {
@@ -407,6 +442,7 @@ export class NodeRuntimeService {
     );
     const traceId = span.spanContext().traceId;
     let text = "";
+    const usageAcc = { inputTokens: 0, outputTokens: 0 }; // M8 T3：跨帧累计 usage，finally 统一落 span
     let interrupted = false; // 已发 token 后 error/异常中断 → partial（区别于正常读完的 ok）
     let timer: ReturnType<typeof setTimeout> | undefined; // 单一首 token 计时器，外层 finally 统一清
     let it: AsyncIterator<ChatStreamChunk> | undefined; // 方法作用域：finally 显式 return() 级联取消上游
@@ -437,6 +473,7 @@ export class NodeRuntimeService {
         let res = await firstTokenGate(it.next());
         while (!res.done) {
           const chunk = res.value;
+          if (chunk.usage) mergeStreamUsage(usageAcc, chunk.usage); // usage 帧无 delta，仅记账
           if (chunk.error) {
             interrupted = true; // 首 token 前：text 仍空 → 下方转 fallback；已发 token：保留为 partial
             break;
@@ -471,6 +508,8 @@ export class NodeRuntimeService {
       return { outcome: interrupted ? "partial" : "ok", text, traceId };
     } finally {
       if (timer) clearTimeout(timer);
+      // M8 T3：所有结束路径（ok/partial/fallback/timeout/abort）统一落 usage span 属性
+      setUsageAttrs(span, usageAcc.inputTokens, usageAcc.outputTokens);
       // 级联取消上游：消费者提前 return()（abort）/ 超时 / error 后，显式 return 底层 chatStream 迭代器，
       // 触发其 finally 的 reader.cancel()，避免上游 fetch 悬挂到 CHAT_TIMEOUT_MS（review 发现，AC6）。
       // return() 对已读完/已 return 的迭代器是安全 no-op。

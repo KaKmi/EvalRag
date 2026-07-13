@@ -274,3 +274,29 @@ describe("ProtocolDispatchAdapter.rerank", () => {
     jest.useRealTimers();
   });
 });
+
+// M8 T3：chat() 透传 token 用量（openai usage → ChatResult.usage；缺 usage 时 undefined，不抛）
+describe("ProtocolDispatchAdapter.chat · usage", () => {
+  const adapter = new ProtocolDispatchAdapter();
+  let fetchMock: jest.Mock;
+  beforeEach(() => {
+    fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  it("返回 content 与 usage", async () => {
+    fetchMock.mockResolvedValue(
+      okJson({ choices: [{ message: { content: "答复" } }], usage: { prompt_tokens: 15, completion_tokens: 6 } }),
+    );
+    const res = await adapter.chat(cfg(), [{ role: "user", content: "q" }]);
+    expect(res.content).toBe("答复");
+    expect(res.usage).toEqual({ inputTokens: 15, outputTokens: 6 });
+  });
+
+  it("响应无 usage 字段 → usage undefined，不抛", async () => {
+    fetchMock.mockResolvedValue(okJson({ choices: [{ message: { content: "答复" } }] }));
+    const res = await adapter.chat(cfg(), [{ role: "user", content: "q" }]);
+    expect(res.content).toBe("答复");
+    expect(res.usage).toBeUndefined();
+  });
+});
