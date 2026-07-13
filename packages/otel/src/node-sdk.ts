@@ -5,6 +5,7 @@ import { NodeSDK } from "@opentelemetry/sdk-node";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
 import { setForceFlushHookForTelemetry } from "./trace";
+import { RedactingSpanExporter } from "./redact";
 
 let sdk: NodeSDK | undefined;
 let spanProcessor: BatchSpanProcessor | undefined;
@@ -26,8 +27,10 @@ export function startNodeTelemetry(options: StartNodeTelemetryOptions): void {
   if (sdk) return;
 
   try {
+    // M8 T3：OTLP 导出前套一层脱敏——落 ClickHouse 前 scrub IO 敏感字段（信任边界咽喉）
     const traceExporter = new OTLPTraceExporter({ url: options.otlpEndpoint });
-    spanProcessor = new BatchSpanProcessor(traceExporter, { scheduledDelayMillis: 500 });
+    const redactingExporter = new RedactingSpanExporter(traceExporter);
+    spanProcessor = new BatchSpanProcessor(redactingExporter, { scheduledDelayMillis: 500 });
     sdk = new NodeSDK({
       resource: new Resource({
         [ATTR_SERVICE_NAME]: options.serviceName,
