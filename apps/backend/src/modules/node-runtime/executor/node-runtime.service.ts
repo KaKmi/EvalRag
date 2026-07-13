@@ -1,10 +1,15 @@
 import { Injectable } from "@nestjs/common";
 import { z } from "zod";
 import type { PromptNode } from "@codecrush/contracts";
-import { withSpan } from "@codecrush/otel";
+import { withSpan, startManualSpan, SpanStatusCode, type Context } from "@codecrush/otel";
 import { CODECRUSH_SPAN_KIND, GEN_AI, OTEL_OPERATIONS, RAG } from "@codecrush/otel-conventions";
+import { FIRST_TOKEN_TIMEOUT_MS } from "./stream.constants";
 import { ModelsService } from "../../models/models.service";
-import type { ChatMessage, StructuredOutputSpec } from "../../models/ports/model-provider.port";
+import type {
+  ChatMessage,
+  ChatStreamChunk,
+  StructuredOutputSpec,
+} from "../../models/ports/model-provider.port";
 import { NodeContractRegistry } from "../contracts/registry";
 import type { NodeContract, ValidationIssue } from "../contracts/types";
 import { assembleMessages } from "../compiler/assemble";
@@ -32,6 +37,20 @@ export interface StreamTextResult {
   /** M7b S0：见 ExecuteStructuredResult.traceId */
   traceId?: string;
 }
+
+/**
+ * M8 T2：streamTextChunks 的 generator 返回值（TReturn）。编排用手写 next 循环读末值，
+ * 据 outcome 分支：ok/partial → 已 yield 的 token 为准；fallback → 把 text 当整段；
+ * timeout → 编排 yield error 事件、不发 done。
+ */
+export type StreamChunksSummary =
+  | { outcome: "ok"; text: string; traceId?: string }
+  | { outcome: "partial"; text: string; traceId?: string }
+  | { outcome: "fallback"; text: string; traceId?: string }
+  | { outcome: "timeout"; traceId?: string };
+
+/** 首 token 超时熔断的内部信号（仅 streamTextChunks 内部 race 用，不外泄）。 */
+class FirstTokenTimeoutError extends Error {}
 
 export interface NodeExecuteOptions {
   /** TryRunPromptRequest.temperature / NodeSampleRequest.modelParams.temperature 透传 */
@@ -331,6 +350,133 @@ export class NodeRuntimeService {
         return { text, fallbackUsed: false, traceId: span.spanContext().traceId };
       },
     );
+  }
+
+  /**
+   * M8 T2：reply 节点真流式——逐 delta yield（对照 streamText 整段返回）。
+   * 内部持手动 LLM span（跨 yield 存活，显式挂父到 parentCtx，不靠活动上下文）+ 首 token 超时熔断。
+   * fallback 节点/校验失败仍走整段 fallback（不进真流），summary 回传 outcome 供编排分支。
+   */
+  async *streamTextChunks<
+    TInput extends Record<string, unknown>,
+    TOutput extends { text: string },
+    TReserved,
+  >(
+    node: PromptNode,
+    contractVersion: number,
+    promptBody: string,
+    modelId: string,
+    input: TInput,
+    reserved: TReserved,
+    opts?: NodeExecuteOptions,
+    parentCtx?: Context,
+  ): AsyncGenerator<{ delta: string }, StreamChunksSummary> {
+    const contract = NodeContractRegistry.resolve(node, contractVersion) as unknown as NodeContract<
+      TInput,
+      TOutput,
+      TReserved
+    >;
+    // fallback 节点不进真流（版本化纯文本，无 delta）；误调时防御性整段返回
+    if (contract.node === "fallback") {
+      const t = promptBody.trim();
+      return { outcome: "fallback", text: t.length > 0 ? t : contract.fallback(input, reserved).text };
+    }
+    // 与 streamText 一致的两步前置校验：失败即 fallback，不调模型
+    const inputCheck = contract.inputSchema.safeParse(input);
+    const reservedCheck = contract.reservedDataSchema.safeParse(reserved);
+    if (!inputCheck.success || !reservedCheck.success) {
+      return { outcome: "fallback", text: contract.fallback(input, reserved).text };
+    }
+    const validInput = inputCheck.data;
+    const validReserved = reservedCheck.data;
+    const model = await this.resolveModel(modelId);
+
+    const { span } = startManualSpan(
+      "node_runtime.stream_text",
+      {
+        attributes: {
+          [RAG.NODE_NAME]: node,
+          [RAG.PROMPT_CONTRACT_VERSION]: contractVersion,
+          [GEN_AI.OPERATION_NAME]: OTEL_OPERATIONS.CHAT,
+          [GEN_AI.SYSTEM]: model.protocol,
+          [GEN_AI.REQUEST_MODEL]: model.deploymentId ?? model.name,
+          "codecrush.span.kind": CODECRUSH_SPAN_KIND.LLM,
+        },
+      },
+      parentCtx,
+    );
+    const traceId = span.spanContext().traceId;
+    let text = "";
+    let interrupted = false; // 已发 token 后 error/异常中断 → partial（区别于正常读完的 ok）
+    let timer: ReturnType<typeof setTimeout> | undefined; // 单一首 token 计时器，外层 finally 统一清
+    let it: AsyncIterator<ChatStreamChunk> | undefined; // 方法作用域：finally 显式 return() 级联取消上游
+    try {
+      const messages = assembleMessages({
+        contract,
+        promptBody,
+        input: validInput,
+        reserved: validReserved,
+      });
+      const stream = await this.models.chatStream(modelId, messages, {
+        temperature: opts?.temperature,
+      });
+      it = stream[Symbol.asyncIterator]();
+
+      // —— 首 token 超时：单一计时器覆盖"从流开始到第一个非空 delta 到达"的累计窗口 ——
+      // review 修复：先前每次 it.next() 新建 timer 会（a）泄漏旧 timer（b）每来一个前置空/keepalive
+      // 帧就重置窗口，使 breaker 形同虚设（anthropic message_start/ping、openai role 首帧都映射为空 delta）。
+      // 单一 deadline 只在首个非空 delta 到达时 clear，故窗口累计、且只有一个计时器。
+      let sawDelta = false;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new FirstTokenTimeoutError()), FIRST_TOKEN_TIMEOUT_MS);
+      });
+      const firstTokenGate = <T>(p: Promise<T>): Promise<T> =>
+        sawDelta ? p : Promise.race([p, deadline]);
+
+      try {
+        let res = await firstTokenGate(it.next());
+        while (!res.done) {
+          const chunk = res.value;
+          if (chunk.error) {
+            interrupted = true; // 首 token 前：text 仍空 → 下方转 fallback；已发 token：保留为 partial
+            break;
+          }
+          if (chunk.delta) {
+            if (!sawDelta) {
+              sawDelta = true;
+              if (timer) clearTimeout(timer); // 首 delta 到达，撤计时器，后续不再熔断/不再 race deadline
+            }
+            text += chunk.delta;
+            yield { delta: chunk.delta };
+          }
+          if (chunk.done) break;
+          res = await firstTokenGate(it.next());
+        }
+      } catch (err) {
+        if (err instanceof FirstTokenTimeoutError) {
+          // it.return() 由 finally 统一级联；此处只定状态并返回 outcome
+          span.setStatus({ code: SpanStatusCode.ERROR, message: "first token timeout" });
+          span.setAttribute(RAG.FALLBACK_USED, false);
+          return { outcome: "timeout", traceId };
+        }
+        interrupted = true; // 网络层异常：只看已产出（text 非空保留为 partial，空则下方 fallback）
+      }
+
+      if (text.length === 0) {
+        span.setAttribute(RAG.FALLBACK_USED, true);
+        return { outcome: "fallback", text: contract.fallback(validInput, validReserved).text, traceId };
+      }
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.setAttribute(RAG.FALLBACK_USED, false);
+      return { outcome: interrupted ? "partial" : "ok", text, traceId };
+    } finally {
+      if (timer) clearTimeout(timer);
+      // 级联取消上游：消费者提前 return()（abort）/ 超时 / error 后，显式 return 底层 chatStream 迭代器，
+      // 触发其 finally 的 reader.cancel()，避免上游 fetch 悬挂到 CHAT_TIMEOUT_MS（review 发现，AC6）。
+      // return() 对已读完/已 return 的迭代器是安全 no-op。
+      if (it) await it.return?.(undefined);
+      span.end(); // 手动生命周期：所有路径必 end（含 return / 异常 / 消费者 abort）
+    }
   }
 
   async compileAndSample(request: NodeSampleRequest): Promise<NodeSampleResult> {

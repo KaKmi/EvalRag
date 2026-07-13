@@ -13,6 +13,9 @@ export default tseslint.config(
       "RAG知识库问答系统设计/**",
       // Ship 工作流过程产物（spec/plan/ledger/QA 脚本等，gitignored，非源码）
       ".ship/**",
+      // Ship/Claude 临时 git worktree（gitignored；各含独立 tsconfig，会打断
+      // typescript-eslint 的 tsconfigRootDir 自动探测——扫进去会导致全仓 Parsing error）
+      ".claude/**",
     ],
   },
   // 让 ESLint flat config 处理 .ts/.tsx（默认只处理 .js/.mjs/.cjs）
