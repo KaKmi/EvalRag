@@ -121,6 +121,14 @@ export class OrchestrationService {
       chain.setAttribute(RAG.QUALITY_TIMEOUT, sig.timeout);
       // M9 W1：兜底状态判据——检索层未命中走兜底话术（区别于 refusal=isFallback||replyDegraded，PDF「兜底=知识未命中」）
       chain.setAttribute(RAG.FALLBACK_USED, prep.isFallback);
+      // M9 W2 D2：引用角标↔命中分块（n 编号跨 KB 合并后才产生，只活在 prep.citations）——落根 span 供详情引用面板纯 CH 驱动。
+      // 兜底/CHAT 分支 citations 为 []。RAG.CITATION_IDS 常量首次真实落地。
+      chain.setAttribute(
+        RAG.CITATION_IDS,
+        JSON.stringify(
+          prep.citations.map((c) => ({ n: c.n, doc: c.doc, section: c.section, score: c.score })),
+        ),
+      );
     };
 
     try {

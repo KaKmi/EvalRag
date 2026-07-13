@@ -455,6 +455,24 @@ describe("OrchestrationService · chain span 质量信号 + IO (M8 T3)", () => {
     expect(chainAttrs()["enduser.id"]).toBeUndefined();
   });
 
+  it("M9 W2：reply 分支根 span 落 rag.citation.ids（n/doc/score）", async () => {
+    const d = makeDeps();
+    await collect(makeSvc(d).run("app1", "怎么退货", undefined, "u1"));
+    const cites = JSON.parse(chainAttrs()["rag.citation.ids"] as string);
+    expect(Array.isArray(cites)).toBe(true);
+    expect(cites.length).toBeGreaterThan(0);
+    expect(cites[0]).toMatchObject({ n: expect.any(Number), doc: expect.any(String), score: expect.any(Number) });
+  });
+
+  it("M9 W2：低分兜底 rag.citation.ids 为空数组", async () => {
+    const d = makeDeps();
+    d.retrieval.test = jest.fn(async (req: { kbId: string }) => ({
+      hits: [hit(`${req.kbId}_low`, 0.1)],
+    }));
+    await collect(makeSvc(d).run("app1", "无关问题", undefined, "u1"));
+    expect(JSON.parse(chainAttrs()["rag.citation.ids"] as string)).toEqual([]);
+  });
+
   it("低分兜底 → refusal + low_recall + no_citations 为 true", async () => {
     const d = makeDeps();
     // 两 KB 命中最高分均 < FALLBACK_THRESHOLD(0.2) → decideFallback 判 low_similarity → 兜底
