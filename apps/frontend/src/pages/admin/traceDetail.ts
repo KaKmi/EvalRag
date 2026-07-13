@@ -34,8 +34,23 @@ export function rootSpanOf(spans: TraceSpan[]): TraceSpan | undefined {
 
 export function autoSelectSpan(spans: TraceSpan[], sel: string | null): string {
   if (sel && spans.some((s) => s.spanId === sel)) return sel;
-  const err = spans.find((s) => isErrorCode(s.statusCode));
+  const errs = spans.filter((s) => isErrorCode(s.statusCode));
+  // 失败时优先定位到具体报错的子节点（非根）；仅根 Error 时退回根——避免总是选中根 chain span。
+  const err = errs.find((s) => s.parentSpanId !== null) ?? errs[0];
   return (err ?? rootSpanOf(spans) ?? spans[0])?.spanId ?? "";
+}
+
+/** span 相对 root 的层级深度（root=0，root 的直接子节点=1，孙节点=2…）。 */
+function depthFromRoot(span: TraceSpan, byId: Map<string, TraceSpan>): number {
+  let d = 0;
+  let cur: TraceSpan | undefined = span;
+  const seen = new Set<string>();
+  while (cur?.parentSpanId && !seen.has(cur.spanId)) {
+    seen.add(cur.spanId);
+    d += 1;
+    cur = byId.get(cur.parentSpanId);
+  }
+  return d;
 }
 
 export interface WfRow {
@@ -58,24 +73,30 @@ const KNOWN_CODES = ["Ok", "Error", "Unset", "STATUS_CODE_OK", "STATUS_CODE_ERRO
 export function buildWaterfall(spans: TraceSpan[], selSid: string): WfRow[] {
   const root = rootSpanOf(spans);
   const t0 = root ? Date.parse(root.startTime) : 0;
+  // total 用全部 span（含 root）算轴宽；行只渲染非 root 节点（root 单独作 TRACE 头行，避免重复）。
   const total = Math.max(...spans.map((s) => Date.parse(s.startTime) - t0 + s.durationMs), 1);
-  return spans.map((s) => {
-    const offsetMs = Date.parse(s.startTime) - t0;
-    return {
-      sid: s.spanId,
-      name: s.name,
-      kindLabel: spanKindColor(s.kind).label,
-      kindC: spanKindColor(s.kind).c,
-      offsetMs,
-      durationMs: s.durationMs,
-      leftPct: ((offsetMs / total) * 100).toFixed(2) + "%",
-      widthPct: Math.max((s.durationMs / total) * 100, 1.2).toFixed(2) + "%",
-      indent: s.parentSpanId ? 20 : 0,
-      isErr: isErrorCode(s.statusCode),
-      isSkip: !KNOWN_CODES.includes(s.statusCode),
-      sel: s.spanId === selSid,
-    };
-  });
+  const byId = new Map(spans.map((s) => [s.spanId, s]));
+  return spans
+    .filter((s) => s.spanId !== root?.spanId)
+    .map((s) => {
+      const offsetMs = Date.parse(s.startTime) - t0;
+      // 显示缩进 = 相对 root 深度 − 1（root 直接子 = 0，孙节点 = 20，对齐原型层级）。
+      const indent = Math.max(0, depthFromRoot(s, byId) - 1) * 20;
+      return {
+        sid: s.spanId,
+        name: s.name,
+        kindLabel: spanKindColor(s.kind).label,
+        kindC: spanKindColor(s.kind).c,
+        offsetMs,
+        durationMs: s.durationMs,
+        leftPct: ((offsetMs / total) * 100).toFixed(2) + "%",
+        widthPct: Math.max((s.durationMs / total) * 100, 1.2).toFixed(2) + "%",
+        indent,
+        isErr: isErrorCode(s.statusCode),
+        isSkip: !KNOWN_CODES.includes(s.statusCode),
+        sel: s.spanId === selSid,
+      };
+    });
 }
 
 export interface ScoreRow {

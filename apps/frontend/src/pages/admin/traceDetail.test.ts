@@ -32,14 +32,19 @@ describe("traceDetail", () => {
     expect(autoSelectSpan(spans, "r")).toBe("r");
   });
 
-  it("buildWaterfall offset 相对 root start", () => {
+  it("buildWaterfall 排除 root、offset 相对 root、缩进按深度", () => {
     const spans = [
-      mk({ spanId: "root", startTime: "2026-07-13T09:11:00.000Z", durationMs: 1000 }),
-      mk({ spanId: "child", parentSpanId: "root", startTime: "2026-07-13T09:11:00.400Z", durationMs: 200, kind: "llm" }),
+      mk({ spanId: "root", kind: "chain", startTime: "2026-07-13T09:11:00.000Z", durationMs: 1000 }),
+      mk({ spanId: "child", parentSpanId: "root", startTime: "2026-07-13T09:11:00.400Z", durationMs: 200, kind: "retrieval" }),
+      mk({ spanId: "grand", parentSpanId: "child", startTime: "2026-07-13T09:11:00.450Z", durationMs: 100, kind: "embeddings" }),
     ];
-    const wf = buildWaterfall(spans, "root");
-    expect(wf.find((w) => w.sid === "child")!.offsetMs).toBe(400);
-    expect(wf.find((w) => w.sid === "child")!.indent).toBe(20);
+    const wf = buildWaterfall(spans, "child");
+    // root 不进瀑布行（单独作 TRACE 头行）
+    expect(wf.find((w) => w.sid === "root")).toBeUndefined();
+    const child = wf.find((w) => w.sid === "child")!;
+    expect(child.offsetMs).toBe(400);
+    expect(child.indent).toBe(0); // root 直接子 → 0
+    expect(wf.find((w) => w.sid === "grand")!.indent).toBe(20); // 孙节点 → 20
   });
 
   it("buildSpanDetail 解析 chunk.scores（doc + pass 阈值）", () => {
