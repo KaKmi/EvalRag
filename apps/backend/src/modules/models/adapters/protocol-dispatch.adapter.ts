@@ -151,7 +151,8 @@ export class ProtocolDispatchAdapter implements ModelProviderPort {
     if (text === undefined || text.length === 0) {
       throw new Error("chat 响应形状不符：未找到非空文本输出");
     }
-    return { content: text };
+    // M8 T3：透传 token 用量（缺字段则 undefined，node-runtime 侧不 set span 属性）
+    return { content: text, usage: req.parseUsage(json) };
   }
 
   // M8.0：流式 chat。SSE 帧解析（fetch/超时/密钥擦除同 chat()；解析残缺 JSON 时

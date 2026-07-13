@@ -1,5 +1,6 @@
 import type { ModelProtocol } from "@codecrush/contracts";
 import { bearerHeaders, isObj, joinUrl, modelId } from "./protocols/types";
+import { pickAnthropicUsage, pickGeminiUsage, pickOpenaiUsage, type TokenUsage } from "./usage";
 import type {
   ChatMessage,
   ChatOptions,
@@ -21,6 +22,8 @@ export interface ChatRequestSpec {
   body: unknown;
   /** 抽取首个规范文本输出；形状不符返回 undefined（由 adapter 归一为稳定错误） */
   parseText: (json: unknown) => string | undefined;
+  /** M8 T3：抽 token 用量（gen_ai.usage.*）；缺字段/形状不符返回 undefined（best-effort，不抛） */
+  parseUsage: (json: unknown) => TokenUsage | undefined;
 }
 
 export type ChatBuilder = (
@@ -88,6 +91,7 @@ export const CHAT_BUILDERS: Partial<Record<ModelProtocol, ChatBuilder>> = {
         const content = first?.message?.content;
         return typeof content === "string" ? content : undefined;
       },
+      parseUsage: pickOpenaiUsage,
     };
   },
   anthropic: (c, messages, opts) => {
@@ -127,6 +131,7 @@ export const CHAT_BUILDERS: Partial<Record<ModelProtocol, ChatBuilder>> = {
         );
         return block ? (block.text as string) : undefined;
       },
+      parseUsage: pickAnthropicUsage,
     };
   },
   gemini: (c, messages, opts) => {
@@ -159,6 +164,7 @@ export const CHAT_BUILDERS: Partial<Record<ModelProtocol, ChatBuilder>> = {
           .join("");
         return text.length > 0 ? text : undefined;
       },
+      parseUsage: pickGeminiUsage,
     };
   },
 };

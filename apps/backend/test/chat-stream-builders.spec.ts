@@ -100,3 +100,38 @@ describe("CHAT_STREAM_BUILDERS · gemini", () => {
     expect(req.parseEvent("anything", "{}")).toEqual({});
   });
 });
+
+// M8 T3：三协议流式 token 用量解析
+describe("CHAT_STREAM_BUILDERS · usage", () => {
+  it("openai：body 含 stream_options.include_usage；末帧 choices 空 + usage → { usage }", () => {
+    const req = CHAT_STREAM_BUILDERS.openai_compat!(config, messages, {});
+    expect(req.body).toMatchObject({ stream: true, stream_options: { include_usage: true } });
+    expect(
+      req.parseChunk(JSON.stringify({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 4 } })),
+    ).toEqual({ usage: { inputTokens: 9, outputTokens: 4 } });
+  });
+
+  it("anthropic：message_start → input，message_delta → output", () => {
+    const c = { ...config, protocol: "anthropic" as const };
+    const req = CHAT_STREAM_BUILDERS.anthropic!(c, messages, {});
+    expect(
+      req.parseEvent("message_start", JSON.stringify({ message: { usage: { input_tokens: 8 } } })),
+    ).toEqual({ usage: { inputTokens: 8, outputTokens: 0 } });
+    expect(req.parseEvent("message_delta", JSON.stringify({ usage: { output_tokens: 3 } }))).toEqual({
+      usage: { inputTokens: 0, outputTokens: 3 },
+    });
+  });
+
+  it("gemini：usageMetadata 可与 delta 同帧返回", () => {
+    const c = { ...config, protocol: "gemini" as const };
+    const req = CHAT_STREAM_BUILDERS.gemini!(c, messages, {});
+    expect(
+      req.parseChunk(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "hi" }] } }],
+          usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 7 },
+        }),
+      ),
+    ).toEqual({ delta: "hi", usage: { inputTokens: 20, outputTokens: 7 } });
+  });
+});

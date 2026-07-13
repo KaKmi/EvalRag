@@ -64,7 +64,20 @@ export class PgHybridRetriever implements RetrieverPort {
     tag: (key: string, value: string) => void,
   ): Promise<RetrievalHit[]> {
     const kb = await this.kbs.get(req.kbId);
-    const [queryVector] = await this.models.embedTexts(req.embedModelId, [req.query]);
+    // M8 T3：embed 子 span——doRetrieve 整段在 retrieval.retrieve 的活动上下文内，
+    // 嵌套 withSpan 自动挂父。embed 抛出 = 向量核心信号硬失败，子 span 自动标 ERROR 并冒泡。
+    // gen_ai.system（协议）省略：adapter 只有 embedModelId、不知其协议（协议在 models 域 row）。
+    const [queryVector] = await withSpan(
+      "retrieval.embedding",
+      {
+        attributes: {
+          [GEN_AI.OPERATION_NAME]: OTEL_OPERATIONS.EMBEDDINGS,
+          [GEN_AI.REQUEST_MODEL]: req.embedModelId,
+          "codecrush.span.kind": CODECRUSH_SPAN_KIND.EMBEDDINGS,
+        },
+      },
+      () => this.models.embedTexts(req.embedModelId, [req.query]),
+    );
 
     const vecWeight = req.vecWeight ?? 0.5;
     const poolSize = Math.min(req.topK, RERANK_POOL_CAP);
@@ -104,11 +117,20 @@ export class PgHybridRetriever implements RetrieverPort {
 
     let candidates = fused;
     if (req.rerankModelId && candidates.length > 0) {
+      const rerankModelId = req.rerankModelId;
       try {
-        const rerankResults = await this.models.rerankTexts(
-          req.rerankModelId,
-          req.query,
-          candidates.map((c) => c.text),
+        // M8 T3：rerank 子 span——try/catch 放 withSpan 外层，使 rerank 失败时子 span
+        // 标 ERROR（瀑布图可见），同时父检索照常降级保留融合分（008 Invariant 3 非对称降级）。
+        const rerankResults = await withSpan(
+          "retrieval.rerank",
+          {
+            attributes: {
+              [GEN_AI.OPERATION_NAME]: OTEL_OPERATIONS.RERANK,
+              [GEN_AI.REQUEST_MODEL]: rerankModelId,
+              "codecrush.span.kind": CODECRUSH_SPAN_KIND.RERANK,
+            },
+          },
+          () => this.models.rerankTexts(rerankModelId, req.query, candidates.map((c) => c.text)),
         );
         const byIndex = new Map(rerankResults.map((r) => [r.index, r.score]));
         candidates = candidates.map((c, i) => {
@@ -128,7 +150,7 @@ export class PgHybridRetriever implements RetrieverPort {
     }
 
     const topN = req.topN ?? candidates.length;
-    return candidates
+    const finalHits = candidates
       .sort((a, b) => b.finalScore - a.finalScore)
       .slice(0, topN)
       .map((c) => ({
@@ -142,6 +164,23 @@ export class PgHybridRetriever implements RetrieverPort {
         rerankScore: c.rerankScore,
         finalScore: c.finalScore,
       }));
+
+    // M8 T3：命中分表——每命中分块的向量/关键词/rerank/最终分落 retrieval span（供 M9 命中面板）。
+    // 正文不落（004 §「命中只存 chunk_id 引用，正文回 Postgres 取」）；对象数组必须 JSON 串
+    // （span attribute 只能是 primitive/数组，ClickHouse attributes 是开放字符串 Map）。
+    tag(
+      RAG.CHUNK_SCORES,
+      JSON.stringify(
+        finalHits.map((h) => ({
+          chunkId: h.chunkId,
+          vec: h.vecScore,
+          kw: h.kwScore ?? null,
+          rerank: h.rerankScore ?? null,
+          final: h.finalScore,
+        })),
+      ),
+    );
+    return finalHits;
   }
 
   // 加权线性和（不是 RRF——008 §融合算法：finalScore 已被契约锁死 [0,1]，凸组合天然满足，
