@@ -23,7 +23,35 @@ export function spanKindColor(kind: string): { label: string; c: string } {
   return KIND_MAP[kind] ?? { label: kind, c: "#8c8c8c" };
 }
 
+// RAG 节点 → 中文友好名（span 原始名如 node_runtime.execute_structured / retrieval.retrieve 对用户无意义）。
+const NODE_LABEL: Record<string, string> = {
+  rewrite: "问题改写",
+  intent: "意图识别",
+  reply: "大模型生成",
+  fallback: "兜底应答",
+};
+export function spanDisplayName(span: TraceSpan): string {
+  const node = (span.attributes as Record<string, unknown>)["rag.node.name"] as string | undefined;
+  if (node && NODE_LABEL[node]) return NODE_LABEL[node];
+  if (span.kind === "retrieval") return "多路召回";
+  if (span.kind === "embeddings") return "向量召回";
+  if (span.kind === "rerank") return "重排";
+  const n = span.name.toLowerCase();
+  if (n.includes("keyword")) return "关键词召回";
+  if (n.includes("hits")) return "命中知识";
+  return span.name; // 未知 span 保留原名
+}
+
 const isErrorCode = (code: string): boolean => code === "Error" || code === "STATUS_CODE_ERROR";
+
+// 属性值都来自 ClickHouse Map(String,String)（全字符串）。
+const attrStr = (v: unknown): string | null => (v == null || v === "" ? null : String(v));
+const attrTruthy = (v: unknown): boolean => v === true || v === "true" || v === 1 || v === "1";
+const fmtNum = (v: unknown): string | null => {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isNaN(n) ? null : Number.isInteger(n) ? String(n) : String(Number(n.toFixed(3)));
+};
 
 // HTTP 自动埋点使 rag.pipeline chain span 挂在 POST server span 下（ParentSpanId≠''），
 // 故 RAG 根按 kind='chain' 认，而非 parentSpanId===null（那是 HTTP 传输根）。
@@ -76,6 +104,8 @@ export interface WfRow {
   indent: number;
   isErr: boolean;
   isSkip: boolean;
+  isFallback: boolean; // 该节点触发降级兜底（rag.fallback.used）——waterfall 打标 + 顶部置顶
+  pctOfTotal: number; // 占 chain 根总时长的百分比（定位瓶颈比纯 ms 直观）
   sel: boolean;
 }
 
@@ -100,9 +130,10 @@ export function buildWaterfall(spans: TraceSpan[], selSid: string): WfRow[] {
       const offsetMs = Date.parse(s.startTime) - t0;
       // 显示缩进 = 相对 chain 根深度 − 1（root 直接子 = 0，孙节点 = 20，对齐原型层级）。
       const indent = Math.max(0, depthFromRoot(s, root!.spanId, byId) - 1) * 20;
+      const isErr = isErrorCode(s.statusCode);
       return {
         sid: s.spanId,
-        name: s.name,
+        name: spanDisplayName(s),
         kindLabel: spanKindColor(s.kind).label,
         kindC: spanKindColor(s.kind).c,
         offsetMs,
@@ -110,11 +141,114 @@ export function buildWaterfall(spans: TraceSpan[], selSid: string): WfRow[] {
         leftPct: ((offsetMs / total) * 100).toFixed(2) + "%",
         widthPct: Math.max((s.durationMs / total) * 100, 1.2).toFixed(2) + "%",
         indent,
-        isErr: isErrorCode(s.statusCode),
+        isErr,
         isSkip: !KNOWN_CODES.includes(s.statusCode),
+        isFallback: !isErr && attrTruthy((s.attributes as Record<string, unknown>)["rag.fallback.used"]),
+        pctOfTotal: Math.round((s.durationMs / total) * 100),
         sel: s.spanId === selSid,
       };
     });
+}
+
+/** 面板一行键值；tone 给告警类（降级/校验失败/修复重试）着色。 */
+export interface MetaRow {
+  k: string;
+  v: string;
+  tone?: "warn" | "err";
+}
+
+/**
+ * 批 A：按 span kind 从属性铺「有料」的面板行——数据早已在 span，只是之前没铺到面板。
+ * LLM 出 模型/协议/输出模式/修复重试/校验错误码/降级；检索出 topK/阈值/融合权重/rerank阈值/多路；
+ * 向量·重排出各自模型。缺失的键自动跳过（push 只收非空值）。
+ */
+export function buildSpanMeta(span: TraceSpan): MetaRow[] {
+  const a = span.attributes as Record<string, unknown>;
+  const rows: MetaRow[] = [];
+  const push = (k: string, v: string | null, tone?: MetaRow["tone"]): void => {
+    if (v != null) rows.push(tone ? { k, v, tone } : { k, v });
+  };
+
+  if (span.kind === "llm") {
+    push("模型", attrStr(a["gen_ai.request.model"]));
+    push("协议", attrStr(a["gen_ai.system"]));
+    push("输出模式", attrStr(a["rag.structured_output.mode"]));
+    const retry = fmtNum(a["rag.repair.retry_count"]);
+    if (retry != null && Number(retry) > 0) push("修复重试", `${retry} 次`, "warn");
+    push("校验错误码", attrStr(a["rag.validation.error_code"]), "err");
+    if (attrTruthy(a["rag.fallback.used"])) push("降级", "已降级兜底", "warn");
+  } else if (span.kind === "retrieval") {
+    push("Top K", fmtNum(a["rag.retrieval.top_k"]));
+    push("Top N", fmtNum(a["rag.retrieval.top_n"]));
+    push("召回阈值", fmtNum(a["rag.retrieval.threshold"]));
+    const vw = fmtNum(a["rag.retrieval.vec_weight"]);
+    if (vw != null) push("融合权重", `向量 ${vw} · 关键词 ${Number((1 - Number(vw)).toFixed(3))}`);
+    push("Rerank 阈值", fmtNum(a["rag.rerank.threshold"]));
+    if (a["rag.multi"] != null) push("多路召回", attrTruthy(a["rag.multi"]) ? "是" : "否");
+  } else if (span.kind === "embeddings") {
+    push("向量模型", attrStr(a["gen_ai.request.model"]));
+  } else if (span.kind === "rerank") {
+    push("重排模型", attrStr(a["gen_ai.request.model"]));
+    push("Rerank 阈值", fmtNum(a["rag.rerank.threshold"]));
+  } else {
+    push("模型", attrStr(a["gen_ai.request.model"]));
+    push("节点", attrStr(a["rag.node.name"]));
+    if (span.kind === "chain" && attrTruthy(a["rag.fallback.used"])) push("降级", "本轮触发兜底", "warn");
+  }
+  return rows;
+}
+
+/** NodeContract 校验链的一步（结构化输出→校验→修复→降级）。 */
+export interface ContractStep {
+  label: string;
+  status: "ok" | "warn" | "err";
+  detail?: string;
+}
+/**
+ * 我们独有（原型没有）：把 LLM 节点的「结构化输出失败→修复→仍失败→降级」画成一条状态链，
+ * 排查「这条回答为什么是兜底」一眼看到根因。数据全在 span：
+ * rag.validation.error_code（首次校验失败码）/ rag.repair.retry_count / rag.fallback.used。
+ * 非结构化节点（三信号皆无且无 structured_output.mode）返回空——面板不渲染。
+ */
+export function buildContractChain(span: TraceSpan): ContractStep[] {
+  if (span.kind !== "llm") return [];
+  const a = span.attributes as Record<string, unknown>;
+  const errCode = attrStr(a["rag.validation.error_code"]);
+  const retry = Number(fmtNum(a["rag.repair.retry_count"]) ?? "0");
+  const fellBack = attrTruthy(a["rag.fallback.used"]);
+  const failedFirst = errCode != null || retry > 0;
+  if (!failedFirst && !fellBack && a["rag.structured_output.mode"] == null) return [];
+
+  const steps: ContractStep[] = [{ label: "结构化输出", status: "ok" }];
+  if (failedFirst) {
+    steps.push({ label: "首次校验", status: "err", detail: errCode ?? undefined });
+    if (retry > 0) steps.push({ label: `修复 ${retry} 次`, status: fellBack ? "err" : "warn" });
+  }
+  steps.push(fellBack ? { label: "降级兜底", status: "err" } : failedFirst ? { label: "修复通过", status: "ok" } : { label: "校验通过", status: "ok" });
+  return steps;
+}
+
+/** Trace 级异常/降级汇总（顶部置顶红条：不用逐个点节点就知道哪步出问题）。 */
+export interface TraceAlert {
+  sid: string;
+  name: string;
+  tone: "err" | "warn";
+  msg: string;
+}
+export function traceAlerts(spans: TraceSpan[]): TraceAlert[] {
+  const root = rootSpanOf(spans);
+  if (!root) return [];
+  const byId = new Map(spans.map((s) => [s.spanId, s]));
+  const out: TraceAlert[] = [];
+  for (const s of spans) {
+    if (!inSubtree(s, root.spanId, byId)) continue; // 只看调用链内节点，排除 HTTP/PG 传输 span
+    if (isErrorCode(s.statusCode)) {
+      out.push({ sid: s.spanId, name: spanDisplayName(s), tone: "err", msg: s.statusMessage ?? "节点报错" });
+    } else if (attrTruthy((s.attributes as Record<string, unknown>)["rag.fallback.used"])) {
+      out.push({ sid: s.spanId, name: spanDisplayName(s), tone: "warn", msg: "触发降级兜底" });
+    }
+  }
+  return out;
 }
 
 export interface ScoreRow {
@@ -137,7 +271,7 @@ export interface SpanDetailView {
   isErr: boolean;
   errType: string;
   errMsg: string;
-  meta: { k: string; v: string }[];
+  meta: MetaRow[];
   scores: ScoreRow[];
   cites: CiteRow[];
   isRoot: boolean;
@@ -145,6 +279,10 @@ export interface SpanDetailView {
   output: string | null;
   tokens: string | null;
   model: string | null;
+  durationMs: number;
+  durationPct: number; // 占 chain 根总时长的百分比（面板显示「占总时长 X%」）
+  contractChain: ContractStep[];
+  routing: { intent: string; kbNames: string[] } | null; // #2 意图→KB 路由（仅 intent 节点有 rag.intent）
 }
 
 function parseJsonArray<T>(v: unknown): T[] {
@@ -183,17 +321,16 @@ export function buildSpanDetail(span: TraceSpan, root: TraceSpan): SpanDetailVie
   const tout = a["gen_ai.usage.output_tokens"];
   const isErr = isErrorCode(span.statusCode);
   const model = (a["gen_ai.request.model"] as string) ?? null;
+  const intentVal = attrStr(a["rag.intent"]);
+  const routing = intentVal != null ? { intent: intentVal, kbNames: parseJsonArray<string>(a["rag.route.kb_names"]) } : null;
   return {
-    title: span.name,
+    title: spanDisplayName(span),
     kindLabel: spanKindColor(span.kind).label,
     statusLabel: isErr ? "失败" : span.statusCode === "Unset" ? "跳过" : "成功",
     isErr,
     errType: isErr ? (span.statusMessage ? "错误" : "Error") : "",
     errMsg: span.statusMessage ?? "该节点报错（无详细信息）",
-    meta: [
-      { k: "模型", v: model },
-      { k: "节点", v: a["rag.node.name"] as string | null },
-    ].filter((m): m is { k: string; v: string } => !!m.v),
+    meta: buildSpanMeta(span),
     scores,
     cites,
     isRoot,
@@ -201,6 +338,10 @@ export function buildSpanDetail(span: TraceSpan, root: TraceSpan): SpanDetailVie
     output: isRoot ? String(a["codecrush.io.output"] ?? "") : null,
     tokens: tin != null || tout != null ? `入 ${Number(tin ?? 0)} · 出 ${Number(tout ?? 0)}` : null,
     model,
+    durationMs: span.durationMs,
+    durationPct: Math.round((span.durationMs / Math.max(root.durationMs, 1)) * 100),
+    contractChain: buildContractChain(span),
+    routing,
   };
 }
 

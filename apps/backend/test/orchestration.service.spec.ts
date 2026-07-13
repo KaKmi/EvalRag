@@ -500,4 +500,23 @@ describe("OrchestrationService · chain span 质量信号 + IO (M8 T3)", () => {
     expect(a["rag.quality.no_citations"]).toBe(false); // 有引用
     expect(a["codecrush.io.output"]).toBe("很抱歉，暂时无法回答。");
   });
+
+  // M9 #2：intent 节点 spanEnrich 落「意图分类 + 路由 KB 名」（nodeRuntime 被 mock，直接取 opts.spanEnrich 验路由逻辑）
+  it("M9：intent 节点 enrich 产出 rag.intent + 路由 KB 名（SUPPORT → 含售后库）", async () => {
+    const d = makeDeps();
+    await collect(makeSvc(d).run("app1", "怎么退货", undefined, "u1"));
+    const intentCall = d.nodeRuntime.executeStructured.mock.calls.find((c) => c[0] === "intent")!;
+    const enrich = intentCall[6].spanEnrich as (o: unknown) => Record<string, string>;
+    const out = enrich({ intent: "SUPPORT" });
+    expect(out["rag.intent"]).toBe("SUPPORT");
+    expect(JSON.parse(out["rag.route.kb_names"])).toContain("售后库");
+  });
+
+  it("M9：CHAT 意图 enrich 路由 KB 名为空数组（不检索）", async () => {
+    const d = makeDeps();
+    await collect(makeSvc(d).run("app1", "怎么退货", undefined, "u1"));
+    const intentCall = d.nodeRuntime.executeStructured.mock.calls.find((c) => c[0] === "intent")!;
+    const enrich = intentCall[6].spanEnrich as (o: unknown) => Record<string, string>;
+    expect(JSON.parse(enrich({ intent: "CHAT" })["rag.route.kb_names"])).toEqual([]);
+  });
 });

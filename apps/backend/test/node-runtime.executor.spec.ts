@@ -768,4 +768,25 @@ describe("NodeRuntimeService · gen_ai.usage (M8 T3)", () => {
     expect(a["gen_ai.usage.input_tokens"]).toBeUndefined();
     expect(a["gen_ai.usage.output_tokens"]).toBeUndefined();
   });
+
+  // M9：spanEnrich 把 output 派生属性写到 span（intent 路由用它落 rag.intent / rag.route.kb_names）
+  it("spanEnrich：成功路径把 output 派生属性写入 span", async () => {
+    const chat = jest.fn(async () => ({ content: '{"rewrittenQuery":"路由查询","keywords":[]}' }));
+    const svc = makeService(chat);
+    await svc.executeStructured("rewrite", 1, "{query}", "m1", { query: "q", history: "" }, {}, {
+      spanEnrich: (o) => ({ "rag.intent": (o as { rewrittenQuery: string }).rewrittenQuery }),
+    });
+    expect(attrs("node_runtime.execute_structured")["rag.intent"]).toBe("路由查询");
+  });
+
+  it("spanEnrich 抛错被吞，不影响产出（遥测不得中断请求）", async () => {
+    const chat = jest.fn(async () => ({ content: '{"rewrittenQuery":"q","keywords":[]}' }));
+    const svc = makeService(chat);
+    const r = await svc.executeStructured("rewrite", 1, "{query}", "m1", { query: "q", history: "" }, {}, {
+      spanEnrich: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(r.output).toMatchObject({ rewrittenQuery: "q" });
+  });
 });

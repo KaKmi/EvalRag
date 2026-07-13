@@ -55,6 +55,12 @@ class FirstTokenTimeoutError extends Error {}
 export interface NodeExecuteOptions {
   /** TryRunPromptRequest.temperature / NodeSampleRequest.modelParams.temperature 透传 */
   temperature?: number;
+  /**
+   * M9：产出就绪后基于 output 计算额外 span 属性（在 span 关闭前写入）。
+   * 用于 intent 节点把「意图分类 + 路由 KB 名」落到自己的 span（数据是 output 的纯函数）。
+   * 仅结构化成功/修复/兜底路径调用；抛错被吞（遥测不得中断请求）。
+   */
+  spanEnrich?: (output: unknown) => Record<string, string | number | boolean>;
 }
 
 export interface NodeSampleRequest {
@@ -190,6 +196,15 @@ export class NodeRuntimeService {
         },
       },
       async (span) => {
+        // M9：把 output 派生的属性（如 intent 路由）写到本 span；遥测异常不得冒泡中断请求。
+        const applyEnrich = (output: TOutput): void => {
+          if (!opts?.spanEnrich) return;
+          try {
+            for (const [k, v] of Object.entries(opts.spanEnrich(output))) span.setAttribute(k, v);
+          } catch {
+            /* 遥测富化失败静默：不影响回答产出 */
+          }
+        };
         const structuredOutput: StructuredOutputSpec = {
           name: `${contract.key}_v${contract.version}`,
           schema: z.toJSONSchema(contract.outputSchema as z.ZodType) as Record<string, unknown>,
@@ -248,6 +263,7 @@ export class NodeRuntimeService {
           span.setAttribute(RAG.FALLBACK_USED, false);
           span.setAttribute(RAG.REPAIR_RETRY_COUNT, 0);
           setUsageAttrs(span, uin, uout);
+          applyEnrich(first.output);
           return {
             output: first.output,
             fallbackUsed: false,
@@ -271,6 +287,7 @@ export class NodeRuntimeService {
           steps.push({ step: "repair", ok: true });
           span.setAttribute(RAG.FALLBACK_USED, false);
           setUsageAttrs(span, uin, uout);
+          applyEnrich(second.output);
           return {
             output: second.output,
             fallbackUsed: false,
@@ -283,8 +300,10 @@ export class NodeRuntimeService {
         steps.push({ step: "fallback", ok: true });
         span.setAttribute(RAG.FALLBACK_USED, true);
         setUsageAttrs(span, uin, uout);
+        const fbOutput = contract.fallback(validInput, validReserved);
+        applyEnrich(fbOutput);
         return {
-          output: contract.fallback(validInput, validReserved),
+          output: fbOutput,
           fallbackUsed: true,
           validateSteps: steps,
           traceId: span.spanContext().traceId,

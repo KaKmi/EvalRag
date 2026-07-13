@@ -8,8 +8,10 @@ import {
   buildOtlpJson,
   buildSpanDetail,
   buildWaterfall,
+  type ContractStep,
   KIND_LEGEND,
   rootSpanOf,
+  traceAlerts,
   traceSpanTotal,
 } from "./traceDetail";
 
@@ -57,6 +59,7 @@ export default function TraceDetailPage() {
   const total = useMemo(() => traceSpanTotal(spans), [spans]);
   const selSpan = useMemo(() => spans.find((s) => s.spanId === effSid), [spans, effSid]);
   const detail = useMemo(() => (selSpan && root ? buildSpanDetail(selSpan, root) : null), [selSpan, root]);
+  const alerts = useMemo(() => traceAlerts(spans), [spans]);
 
   const copyJson = () => {
     if (!data) return;
@@ -128,15 +131,41 @@ export default function TraceDetailPage() {
       <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "16px 20px", marginBottom: 16 }}>
         <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)", marginBottom: 4 }}>用户问题</div>
         <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 14 }}>{meta.userInput || "—"}</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 14 }}>
-          <MetaCell label="Agent" value={meta.agentName ?? "—"} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 14 }}>
+          <MetaCell label="应用" value={meta.agentName ?? "—"} />
           <MetaCell label="生成模型" value={meta.genModel ?? "—"} sub={meta.genModelVersion ?? undefined} />
-          <MetaCell label="Prompt 版本" value={meta.promptVersionId ?? "—"} mono />
           <MetaCell label="总耗时" value={fmtMs(meta.durationMs)} bold />
           <MetaCell label="Tokens" value={(meta.inputTokens + meta.outputTokens).toLocaleString()} sub={`入 ${meta.inputTokens} / 出 ${meta.outputTokens}`} />
           <MetaCell label="Cost" value={meta.cost == null ? "—" : "¥" + meta.cost.toFixed(4)} bold color="#1677ff" />
         </div>
       </div>
+
+      {/* #4 降级/异常置顶：任一节点报错/降级，顶部汇总一条，点击直达对应节点，不用逐个点 */}
+      {alerts.length > 0 && (
+        <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+          {alerts.map((al) => (
+            <div
+              key={al.sid}
+              onClick={() => setSelSid(al.sid)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 14px",
+                borderRadius: 6,
+                cursor: "pointer",
+                background: al.tone === "err" ? "#fff2f0" : "#fffbe6",
+                border: `1px solid ${al.tone === "err" ? "#ffccc7" : "#ffe58f"}`,
+              }}
+            >
+              <span style={{ fontSize: 14, color: al.tone === "err" ? "#ff4d4f" : "#d48806" }}>{al.tone === "err" ? "✕" : "⚠"}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "rgba(0,0,0,.75)" }}>{al.name}</span>
+              <span style={{ fontSize: 13, color: "rgba(0,0,0,.55)", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{al.msg}</span>
+              <span style={{ fontSize: 12, color: al.tone === "err" ? "#ff4d4f" : "#d48806", flex: "none" }}>定位 →</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* 两栏：左调用链 + 右 span 面板 */}
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
@@ -180,10 +209,13 @@ export default function TraceDetailPage() {
                     <span style={{ fontSize: 12, color: s.isErr ? "#ff4d4f" : "rgba(0,0,0,.85)", fontWeight: s.sel ? 600 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
                   </div>
                   <div style={{ flex: 1, position: "relative", height: "100%", minWidth: 0 }}>
-                    <div style={{ position: "absolute", top: 8, height: 14, left: s.leftPct, width: s.widthPct, background: s.isErr ? "#ff4d4f" : s.kindC, opacity: s.isSkip ? 0.35 : s.sel ? 1 : 0.85, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <div style={{ position: "absolute", top: 8, height: 14, left: s.leftPct, width: s.widthPct, background: s.isErr ? "#ff4d4f" : s.isFallback ? "#faad14" : s.kindC, opacity: s.isSkip ? 0.35 : s.sel ? 1 : 0.85, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center" }}>
                       {s.isErr && <span style={{ fontSize: 10, color: "#fff", fontWeight: 700 }}>✕</span>}
+                      {!s.isErr && s.isFallback && <span style={{ fontSize: 10, color: "#fff", fontWeight: 700 }}>⚠</span>}
                     </div>
-                    <span style={{ position: "absolute", top: 7, left: `calc(${s.leftPct} + ${s.widthPct} + 6px)`, fontSize: 10, color: "rgba(0,0,0,.4)", whiteSpace: "nowrap" }}>{s.isSkip ? "未执行" : fmtMs(s.durationMs)}</span>
+                    <span style={{ position: "absolute", top: 7, left: `calc(${s.leftPct} + ${s.widthPct} + 6px)`, fontSize: 10, color: "rgba(0,0,0,.4)", whiteSpace: "nowrap" }}>
+                      {s.isSkip ? "未执行" : `${fmtMs(s.durationMs)} · ${s.pctOfTotal}%`}
+                    </span>
                   </div>
                 </div>
               ))}
@@ -206,8 +238,9 @@ export default function TraceDetailPage() {
                   <span style={{ width: 6, height: 6, flex: "none", borderRadius: 2, background: s.kindC }} />
                   <span style={{ fontSize: 12.5, color: s.isErr ? "#ff4d4f" : "rgba(0,0,0,.85)", fontWeight: s.sel ? 600 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
                   <span style={{ fontSize: 10, color: s.kindC, border: `1px solid ${s.kindC}`, borderRadius: 3, padding: "0 4px", lineHeight: "14px", flex: "none", opacity: 0.75 }}>{s.kindLabel}</span>
+                  {s.isFallback && <span style={{ fontSize: 10, color: "#d48806", border: "1px solid #ffe58f", background: "#fffbe6", borderRadius: 3, padding: "0 4px", lineHeight: "14px", flex: "none" }}>降级</span>}
                   <div style={{ flex: 1 }} />
-                  <span style={{ fontSize: 11, color: "rgba(0,0,0,.4)", flex: "none", width: 56, textAlign: "right" }}>{s.isSkip ? "未执行" : fmtMs(s.durationMs)}</span>
+                  <span style={{ fontSize: 11, color: "rgba(0,0,0,.4)", flex: "none", width: 90, textAlign: "right" }}>{s.isSkip ? "未执行" : `${fmtMs(s.durationMs)} · ${s.pctOfTotal}%`}</span>
                 </div>
               ))}
             </div>
@@ -222,6 +255,7 @@ export default function TraceDetailPage() {
               <span style={{ fontSize: 11, lineHeight: "20px", padding: "0 8px", borderRadius: 4, background: "#f5f5f5", color: "rgba(0,0,0,.5)", border: "1px solid #e8e8e8" }}>{detail.kindLabel}</span>
               <span style={{ fontSize: 12, lineHeight: "20px", padding: "0 8px", borderRadius: 4, background: detail.isErr ? "#fff2f0" : "#f6ffed", color: detail.isErr ? "#ff4d4f" : "#52c41a", border: `1px solid ${detail.isErr ? "#ffccc7" : "#b7eb8f"}` }}>{detail.statusLabel}</span>
               <div style={{ flex: 1 }} />
+              <span style={{ fontSize: 12, color: "rgba(0,0,0,.5)" }}>耗时 {fmtMs(detail.durationMs)} · 占总时长 {detail.durationPct}%</span>
               {detail.tokens && <span style={{ fontSize: 12, color: "rgba(0,0,0,.5)" }}>Tokens {detail.tokens}</span>}
             </div>
 
@@ -232,12 +266,42 @@ export default function TraceDetailPage() {
               </div>
             )}
 
+            {/* #1 NodeContract 校验链（我们独有）：结构化输出→校验→修复→降级，一眼看到「为什么兜底」 */}
+            {detail.contractChain.length > 0 && (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "rgba(0,0,0,.45)", marginBottom: 8 }}>NodeContract 校验链</div>
+                <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 2, marginBottom: 16 }}>
+                  {detail.contractChain.map((step, i) => (
+                    <ContractPill key={i} step={step} last={i === detail.contractChain.length - 1} />
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* #2 意图→KB 路由高亮：意图节点直接显「路由到 售后库 / 订单FAQ」，解释后面召回为何命中/落空 */}
+            {detail.routing && (
+              <div style={{ background: "#f0f7ff", border: "1px solid #d6e8ff", borderRadius: 6, padding: "12px 14px", marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>识别意图</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#1677ff", fontFamily: "ui-monospace,Menlo,monospace" }}>{detail.routing.intent}</span>
+                  <span style={{ color: "rgba(0,0,0,.35)", fontSize: 12 }}>→ 路由到</span>
+                  {detail.routing.kbNames.length > 0 ? (
+                    detail.routing.kbNames.map((kb) => (
+                      <span key={kb} style={{ fontSize: 12, lineHeight: "20px", padding: "0 8px", borderRadius: 4, background: "#e6f4ff", color: "#1677ff", border: "1px solid #91caff" }}>{kb}</span>
+                    ))
+                  ) : (
+                    <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>不检索（闲聊/未命中路由）</span>
+                  )}
+                </div>
+              </div>
+            )}
+
             {detail.meta.length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
                 {detail.meta.map((mt) => (
                   <div key={mt.k} style={{ display: "flex", gap: 12, fontSize: 13 }}>
                     <div style={{ width: 80, flex: "none", color: "rgba(0,0,0,.45)" }}>{mt.k}</div>
-                    <div style={{ color: "rgba(0,0,0,.75)" }}>{mt.v}</div>
+                    <div style={{ color: mt.tone === "err" ? "#ff4d4f" : mt.tone === "warn" ? "#d48806" : "rgba(0,0,0,.75)", fontWeight: mt.tone ? 600 : 400 }}>{mt.v}</div>
                   </div>
                 ))}
               </div>
@@ -330,6 +394,24 @@ export default function TraceDetailPage() {
         </>
       )}
     </div>
+  );
+}
+
+function ContractPill({ step, last }: { step: ContractStep; last: boolean }) {
+  const tone =
+    step.status === "err"
+      ? { bg: "#fff2f0", c: "#ff4d4f", bd: "#ffccc7" }
+      : step.status === "warn"
+        ? { bg: "#fffbe6", c: "#d48806", bd: "#ffe58f" }
+        : { bg: "#f6ffed", c: "#52c41a", bd: "#b7eb8f" };
+  return (
+    <>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, lineHeight: "22px", padding: "0 10px", borderRadius: 12, background: tone.bg, color: tone.c, border: `1px solid ${tone.bd}` }}>
+        {step.label}
+        {step.detail && <code style={{ fontSize: 11, fontFamily: "ui-monospace,Menlo,monospace", opacity: 0.85 }}>{step.detail}</code>}
+      </span>
+      {!last && <span style={{ color: "rgba(0,0,0,.25)", fontSize: 12, padding: "0 4px" }}>→</span>}
+    </>
   );
 }
 

@@ -18,6 +18,9 @@ export const RAG = {
   MULTI_RECALL: "rag.multi",
   CHUNK_SCORES: "rag.chunk.scores",
   CITATION_IDS: "rag.citation.ids",
+  // M9：意图路由（落 intent 节点 span，供详情面板显示「意图 → 路由到 X 库」）
+  INTENT: "rag.intent",
+  ROUTE_KB_NAMES: "rag.route.kb_names",
   COST_USD: "rag.cost.usd",
   PROMPT_VERSION_ID: "rag.prompt.version_id",
   VEC_WEIGHT: "rag.retrieval.vec_weight",
