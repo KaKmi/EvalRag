@@ -40,12 +40,12 @@ last_modified: "2026-07-13"
 | **M8.0** | Prompt 组装 / NodeContract | ✅ | | 011 |
 | **M7b** | 应用发布闭环 | ✅ | | 009 |
 | **M8** | 问答 / RAG 编排 | ✅ | 四波全交付：**T1**（PR #16）/ **T2**（PR #18）/ **T3**（PR #19）/ **T4**（PR #20，C 端问答页真实化 + markdown）——见附录 A | 013 / 014 |
-| **M9** | Trace 追踪（完整版） | 🔄 | **W1 读模型地基 + W2 详情下钻已交付**（分支 m9-trace-read-model-w1，见附录 A）；**W3 Session 详情 + cost 待做** | 015 |
+| **M9** | Trace 追踪（完整版） | 🔄 | **W1 读模型地基 + W2 详情下钻已交付**（PR #21）；**P1 根认定修复**（PR #22）；**每节点面板增量**（校验链/耗时占比/降级置顶/意图路由 + dev 落 trace，PR #23）；**W3 Session 详情 + cost 待做**，见附录 A | 015 |
 | **M10** | 运行看板 | ⬜ | 里程碑 2（首期不做） | — |
 | **M11** | 评测集 / 管理 / 报告 | ⬜ | 里程碑 2（首期不做） | — |
 | **M12** | RBAC 权限 | ⬜ | 里程碑 2（首期不做） | — |
 
-**当前下一步**：**M9 W3（Session 详情气泡流 + cost 真算）**——M9 已设计（015）并分三波：W1 读模型地基（列表/Session/概览 + 根 span 身份 + VIEW）、W2 详情下钻（瀑布/树 + span 面板 + 命中分表/引用 + OTLP 导出）均已交付（分支 m9-trace-read-model-w1，见附录 A）；W3 待做：Session 详情 1:1 还原 C 端聊天窗口 + 溯源条下钻 + cost 计算（模型 params 带定价）。
+**当前下一步**：**M9 W3（Session 详情气泡流 + cost 真算）**——M9 已设计（015）分三波：W1 读模型地基 + W2 详情下钻（PR #21）、P1 根认定修复（PR #22）、每节点面板增量（PR #23）均已合并 main（见附录 A）；W3 待做：Session 详情 1:1 还原 C 端聊天窗口 + 溯源条下钻 + cost 计算（模型 params 带定价）。
 
 ## Boundaries
 
@@ -173,10 +173,12 @@ M9 按 015 拆三波（见 015「建议分波」），逐波闭环：
 | 波 | 范围 | 状态 |
 |---|---|---|
 | **W1** | 读模型地基：根 span 身份富化（session.id/agent.id/name/enduser.id/fallback.used）+ `codecrush_traces`/`codecrush_sessions` VIEW + `GET /traces`(list+summary)/`GET /traces/sessions` + 前端 Trace/Session 双列表接真 | **已交付**（分支 m9-trace-read-model-w1；完整对抗：peer 调查+diff+drill+每波 review） |
-| **W2** | 详情下钻：`GET /traces/:traceId` 补 meta 聚合 + `StatusMessage` 投影 + span 规范化；写侧 D1（chunk.scores 加 doc/section）+ D2（根 span 落 `rag.citation.ids`）；前端 TraceDetailPage 脱 mock（时间轴/树双视图 + 数据驱动 span 面板 + 命中分表/引用/脱敏 IO + 失败自动定位 + 复制 OTLP JSON，前端构建不建 /otlp 端点）；e2e `traces.e2e.spec.ts` | **已交付**（同分支；peer diff 6 conceded + drill 9/9 + dev-peer PASS_WITH_CONCERNS 2 fidelity 已修） |
+| **W2** | 详情下钻：`GET /traces/:traceId` 补 meta 聚合 + `StatusMessage` 投影 + span 规范化；写侧 D1（chunk.scores 加 doc/section）+ D2（根 span 落 `rag.citation.ids`）；前端 TraceDetailPage 脱 mock（时间轴/树双视图 + 数据驱动 span 面板 + 命中分表/引用/脱敏 IO + 失败自动定位 + 复制 OTLP JSON，前端构建不建 /otlp 端点）；e2e `traces.e2e.spec.ts` | **已交付**（PR #21；peer diff 6 conceded + drill 9/9 + dev-peer PASS_WITH_CONCERNS 2 fidelity 已修） |
+| **P1 修复** | 运行时 QA 抓到：HttpInstrumentation 给每请求加 POST server 根 span → `ParentSpanId='' AND kind=chain` 认根失效、读模型对真实 trace 全空。修复=改按 `kind='chain'` 认根（VIEW + repo + 前端 rootSpanOf），详情瀑布 scope 到 chain 子树排除 HTTP/PG span | **已交付**（PR #22） |
+| **每节点面板增量** | 让点每节点都「有料」：批 A 铺料（buildSpanMeta 按 kind 铺 LLM/检索/向量/重排参数）+ 原型没有的排查视角——#1 NodeContract 校验链、#3 耗时占比、#4 降级/异常置顶、#2 意图→KB 路由（落 intent 节点 span，executeStructured 加 `spanEnrich` 钩子 + `rag.intent`/`rag.route.kb_names`）；附带 dev 落 trace（OTel 引导移 main.ts 首条 import，prod/dev 统一）。非 015 硬范围的加分增强 | **已交付**（PR #23；直接写码不走 spec，用户手动 QA） |
 | **W3** | Session 详情 1:1 还原 C 端聊天窗口 + 每 bot 气泡溯源条下钻；cost 真算（模型 params 带单价 → generation span 落 `rag.cost.usd`，VIEW 聚合，否则 —） | **待做** |
 
-> 提示（给后续会话）：M9 **W1+W2 已交付**（读模型地基 + 详情下钻），在分支 `m9-trace-read-model-w1`（W1+W2 累积一个 PR，未合并）。**下一步 W3**。运行时 QA（真 ClickHouse trace 数据）需起 docker，本地测试全绿但运行时验收待人工。
+> 提示（给后续会话）：M9 **W1+W2（PR #21）+ P1 修复（PR #22）+ 每节点面板增量（PR #23）均已合并 main**。**下一步 = W3**（Session 详情气泡流 + cost 真算）。cost 真算需先确认模型 params 是否带单价字段。运行时 QA（真 ClickHouse trace）需起 docker + `pnpm start`；本地测试全绿但运行时验收待人工。
 
 ### M4.1 需求记录与暂停点
 
