@@ -15,6 +15,7 @@ import {
   getMessages,
 } from "../../api/client";
 import { ChatStreamError, openChatStream } from "../../api/sse";
+import { MessageMarkdown } from "./message-markdown";
 
 /** C 端问答页（M8 T4）：1:1 还原原型三栏（单 Agent 信息卡 + 会话历史 / 消息流 / 引用原文）。
  * 真接后端：进页 getApplications 取元信息（未上线→占位）；send 走 openChatStream 逐 token 流；
@@ -91,21 +92,6 @@ function historyToView(m: Message): MsgView {
     fallbackReasons: m.fallbackInfo?.reasons ?? [],
     streaming: false,
   };
-}
-
-/** 正文按 [n] 切分为文本段 / 角标段。 */
-function splitParts(text: string): Array<{ isCite: boolean; text?: string; n?: number }> {
-  const out: Array<{ isCite: boolean; text?: string; n?: number }> = [];
-  const re = /\[(\d+)\]/g;
-  let last = 0;
-  let mt: RegExpExecArray | null;
-  while ((mt = re.exec(text))) {
-    if (mt.index > last) out.push({ isCite: false, text: text.slice(last, mt.index) });
-    out.push({ isCite: true, n: Number(mt[1]) });
-    last = re.lastIndex;
-  }
-  if (last < text.length) out.push({ isCite: false, text: text.slice(last) });
-  return out;
 }
 
 /** 复制用纯文本：去掉行内 [n] 标记。 */
@@ -453,7 +439,25 @@ export default function ChatPage() {
 
   return (
     <div style={{ height: "100%", display: "flex", background: "#f0f2f5", overflow: "hidden" }}>
-      <style>{`@keyframes ccb-blink{0%,60%,100%{opacity:.25}30%{opacity:1}}`}</style>
+      <style>{`@keyframes ccb-blink{0%,60%,100%{opacity:.25}30%{opacity:1}}
+.ccb-md{font-size:14px;line-height:1.8;word-break:break-word}
+.ccb-md>*:first-child{margin-top:0}
+.ccb-md>*:last-child{margin-bottom:0}
+.ccb-md p{margin:0 0 8px}
+.ccb-md ul,.ccb-md ol{margin:4px 0;padding-left:22px}
+.ccb-md li{margin:2px 0}
+.ccb-md li>p{margin:0}
+.ccb-md h1,.ccb-md h2,.ccb-md h3,.ccb-md h4{margin:12px 0 6px;font-weight:600;line-height:1.4}
+.ccb-md h1{font-size:18px}.ccb-md h2{font-size:16px}.ccb-md h3{font-size:15px}.ccb-md h4{font-size:14px}
+.ccb-md code{background:#f5f5f5;border-radius:4px;padding:1px 5px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.ccb-md pre{background:#f6f8fa;border:1px solid #eaecef;border-radius:8px;padding:12px;overflow-x:auto;margin:8px 0}
+.ccb-md pre code{background:none;padding:0;font-size:12.5px}
+.ccb-md blockquote{margin:8px 0;padding:2px 12px;border-left:3px solid #d9d9d9;color:rgba(0,0,0,.6)}
+.ccb-md table{border-collapse:collapse;margin:8px 0;font-size:13px;display:block;overflow-x:auto}
+.ccb-md th,.ccb-md td{border:1px solid #e8e8e8;padding:5px 10px}
+.ccb-md hr{border:none;border-top:1px solid #f0f0f0;margin:12px 0}
+.ccb-md strong{font-weight:600}
+.ccb-md a{color:#1677ff;text-decoration:none}`}</style>
 
       {/* 左侧栏：单 Agent 信息卡 + 新建会话 + 会话历史 + 账号区 */}
       <div
@@ -753,38 +757,13 @@ export default function ChatPage() {
                     {m.errored ? (
                       <span style={{ color: "#ff4d4f" }}>{m.errored}</span>
                     ) : (
-                      splitParts(m.text).map((p, i) =>
-                        p.isCite ? (
-                          <span
-                            key={i}
-                            onClick={() => p.n != null && pickCite(m.key, p.n)}
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              minWidth: 17,
-                              height: 17,
-                              padding: "0 3px",
-                              margin: "0 3px",
-                              borderRadius: 4,
-                              background:
-                                citeSel?.msgKey === m.key && citeSel.n === p.n ? "#1677ff" : "#e6f4ff",
-                              color: citeSel?.msgKey === m.key && citeSel.n === p.n ? "#fff" : "#1677ff",
-                              fontSize: 11,
-                              fontWeight: 600,
-                              cursor: "pointer",
-                              verticalAlign: 2,
-                              userSelect: "none",
-                            }}
-                          >
-                            {p.n}
-                          </span>
-                        ) : (
-                          <span key={i} style={{ whiteSpace: "pre-wrap" }}>
-                            {p.text}
-                          </span>
-                        ),
-                      )
+                      <MessageMarkdown
+                        text={m.text}
+                        msgKey={m.key}
+                        citations={m.citations}
+                        activeN={citeSel?.msgKey === m.key ? citeSel.n : null}
+                        onPickCite={pickCite}
+                      />
                     )}
                   </div>
                 </div>
