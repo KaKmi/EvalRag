@@ -449,6 +449,35 @@ describe("NodeRuntimeService.streamTextChunks · reply 逐 token", () => {
     expect(returned).toBe(true);
   });
 
+  it("首 token 前的空/keepalive 帧被跳过、不重置窗口、不泄漏计时器（单一 deadline）", async () => {
+    // 真实适配器：首 delta 前常有空帧（anthropic message_start/ping、openai role 首帧映射为 {}）。
+    // 旧实现每帧新建 timer → 泄漏 + 窗口重置；本用例用真实计时器，若泄漏会拖慢/开句柄。
+    const chatStream = jest.fn(() => replyStream([{}, {}, { delta: "x" }, { done: true }])());
+    const svc = makeService(jest.fn(), chatStream);
+    const { deltas, summary } = await drain(
+      svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, { citations: [] }),
+    );
+    expect(deltas).toEqual(["x"]);
+    expect(summary).toMatchObject({ outcome: "ok", text: "x" });
+  });
+
+  it("消费者提前 return()（abort）→ 级联 return 底层迭代器（reader.cancel）", async () => {
+    let returned = false;
+    const upstream = replyStream([{ delta: "答" }, { delta: "案" }, { done: true }])();
+    const origReturn = upstream.return?.bind(upstream);
+    upstream.return = ((v?: unknown) => {
+      returned = true;
+      return origReturn ? origReturn(v as never) : Promise.resolve({ done: true, value: undefined });
+    }) as never;
+    const chatStream = jest.fn(() => upstream);
+    const svc = makeService(jest.fn(), chatStream);
+    const gen = svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, { citations: [] });
+    const first = await gen.next(); // 第一个 token
+    expect(first.value).toEqual({ delta: "答" });
+    await gen.return(undefined); // 模拟消费者 abort：应触发 finally 级联 upstream.return()
+    expect(returned).toBe(true);
+  });
+
   it("input 校验失败 → 不调 chatStream，outcome=fallback", async () => {
     const chatStream = jest.fn();
     const svc = makeService(jest.fn(), chatStream);

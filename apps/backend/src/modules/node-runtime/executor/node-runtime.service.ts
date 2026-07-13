@@ -5,7 +5,11 @@ import { withSpan, startManualSpan, SpanStatusCode, type Context } from "@codecr
 import { CODECRUSH_SPAN_KIND, GEN_AI, OTEL_OPERATIONS, RAG } from "@codecrush/otel-conventions";
 import { FIRST_TOKEN_TIMEOUT_MS } from "./stream.constants";
 import { ModelsService } from "../../models/models.service";
-import type { ChatMessage, StructuredOutputSpec } from "../../models/ports/model-provider.port";
+import type {
+  ChatMessage,
+  ChatStreamChunk,
+  StructuredOutputSpec,
+} from "../../models/ports/model-provider.port";
 import { NodeContractRegistry } from "../contracts/registry";
 import type { NodeContract, ValidationIssue } from "../contracts/types";
 import { assembleMessages } from "../compiler/assemble";
@@ -404,7 +408,8 @@ export class NodeRuntimeService {
     const traceId = span.spanContext().traceId;
     let text = "";
     let interrupted = false; // 已发 token 后 error/异常中断 → partial（区别于正常读完的 ok）
-    let timer: ReturnType<typeof setTimeout> | undefined; // 方法作用域：外层 finally 统一清，杜绝 error-first 路径泄漏
+    let timer: ReturnType<typeof setTimeout> | undefined; // 单一首 token 计时器，外层 finally 统一清
+    let it: AsyncIterator<ChatStreamChunk> | undefined; // 方法作用域：finally 显式 return() 级联取消上游
     try {
       const messages = assembleMessages({
         contract,
@@ -415,19 +420,18 @@ export class NodeRuntimeService {
       const stream = await this.models.chatStream(modelId, messages, {
         temperature: opts?.temperature,
       });
-      const it = stream[Symbol.asyncIterator]();
+      it = stream[Symbol.asyncIterator]();
 
-      // —— 首 token 超时：仅覆盖到"第一个非空 delta 到达"之前 ——
+      // —— 首 token 超时：单一计时器覆盖"从流开始到第一个非空 delta 到达"的累计窗口 ——
+      // review 修复：先前每次 it.next() 新建 timer 会（a）泄漏旧 timer（b）每来一个前置空/keepalive
+      // 帧就重置窗口，使 breaker 形同虚设（anthropic message_start/ping、openai role 首帧都映射为空 delta）。
+      // 单一 deadline 只在首个非空 delta 到达时 clear，故窗口累计、且只有一个计时器。
       let sawDelta = false;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new FirstTokenTimeoutError()), FIRST_TOKEN_TIMEOUT_MS);
+      });
       const firstTokenGate = <T>(p: Promise<T>): Promise<T> =>
-        sawDelta
-          ? p
-          : Promise.race([
-              p,
-              new Promise<never>((_, reject) => {
-                timer = setTimeout(() => reject(new FirstTokenTimeoutError()), FIRST_TOKEN_TIMEOUT_MS);
-              }),
-            ]);
+        sawDelta ? p : Promise.race([p, deadline]);
 
       try {
         let res = await firstTokenGate(it.next());
@@ -440,7 +444,7 @@ export class NodeRuntimeService {
           if (chunk.delta) {
             if (!sawDelta) {
               sawDelta = true;
-              if (timer) clearTimeout(timer); // 首 delta 到达，撤计时器，后续不再熔断
+              if (timer) clearTimeout(timer); // 首 delta 到达，撤计时器，后续不再熔断/不再 race deadline
             }
             text += chunk.delta;
             yield { delta: chunk.delta };
@@ -449,9 +453,8 @@ export class NodeRuntimeService {
           res = await firstTokenGate(it.next());
         }
       } catch (err) {
-        if (timer) clearTimeout(timer);
         if (err instanceof FirstTokenTimeoutError) {
-          await it.return?.(undefined); // 级联 chatStream finally → reader.cancel()
+          // it.return() 由 finally 统一级联；此处只定状态并返回 outcome
           span.setStatus({ code: SpanStatusCode.ERROR, message: "first token timeout" });
           span.setAttribute(RAG.FALLBACK_USED, false);
           return { outcome: "timeout", traceId };
@@ -467,8 +470,12 @@ export class NodeRuntimeService {
       span.setAttribute(RAG.FALLBACK_USED, false);
       return { outcome: interrupted ? "partial" : "ok", text, traceId };
     } finally {
-      if (timer) clearTimeout(timer); // error-first break 路径不再泄漏 15s 计时器（jest open-handle）
-      span.end(); // 手动生命周期：所有路径必 end（含 return / 异常）
+      if (timer) clearTimeout(timer);
+      // 级联取消上游：消费者提前 return()（abort）/ 超时 / error 后，显式 return 底层 chatStream 迭代器，
+      // 触发其 finally 的 reader.cancel()，避免上游 fetch 悬挂到 CHAT_TIMEOUT_MS（review 发现，AC6）。
+      // return() 对已读完/已 return 的迭代器是安全 no-op。
+      if (it) await it.return?.(undefined);
+      span.end(); // 手动生命周期：所有路径必 end（含 return / 异常 / 消费者 abort）
     }
   }
 
