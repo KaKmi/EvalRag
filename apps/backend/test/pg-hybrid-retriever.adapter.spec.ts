@@ -1,3 +1,10 @@
+import { context, trace } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { PgHybridRetriever } from "../src/modules/retrieval/adapters/pg-hybrid-retriever.adapter";
 import type { ChunksService } from "../src/modules/chunks/chunks.service";
 import type { ModelsService } from "../src/modules/models/models.service";
@@ -204,5 +211,75 @@ describe("PgHybridRetriever.retrieve — 候选池上限与 topN", () => {
     const hits = await retriever.retrieve({ ...baseReq, multi: false, threshold: 0, topN: 1 });
     expect(hits).toHaveLength(1);
     expect(hits[0].chunkId).toBe("c1");
+  });
+});
+
+// M8 T3：检索 span 三拆（embedding/rerank 子 span 自动挂父）+ 命中分表 rag.chunk.scores。
+// 自动挂父依赖活动 ContextManager——jest harness 默认 NoopContextManager 会让子 span 挂到 root，
+// 故此 describe 注册 AsyncLocalStorageContextManager（生产由 NodeSDK 自注册，见 node-sdk.ts）。
+describe("PgHybridRetriever — 检索 span 三拆 + 命中分表 (M8 T3)", () => {
+  let exporter: InMemorySpanExporter;
+  const ctxManager = new AsyncLocalStorageContextManager();
+  beforeAll(() => {
+    context.setGlobalContextManager(ctxManager.enable());
+  });
+  afterAll(() => {
+    context.disable();
+    trace.disable();
+  });
+  beforeEach(() => {
+    exporter = new InMemorySpanExporter();
+    trace.disable();
+    trace.setGlobalTracerProvider(
+      new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }),
+    );
+  });
+
+  const oneHit = [
+    { chunkId: "c1", docId: "d1", docName: "doc1", text: "t", section: "s", vecScore: 0.9 },
+  ];
+  const spanByName = (name: string) =>
+    exporter.getFinishedSpans().find((s) => s.name === name);
+
+  it("rerank 开启 → retrieve 下挂 embedding + rerank 子 span", async () => {
+    const { chunks, models, kbs } = makeDeps({ vecRows: oneHit, rerankResults: [{ index: 0, score: 0.95 }] });
+    await new PgHybridRetriever(chunks, models, kbs).retrieve({
+      ...baseReq,
+      multi: false,
+      rerankModelId: "rk1",
+    });
+    const parent = spanByName("retrieval.retrieve")!;
+    const embed = spanByName("retrieval.embedding")!;
+    const rerank = spanByName("retrieval.rerank")!;
+    expect(parent).toBeDefined();
+    expect(embed.parentSpanId).toBe(parent.spanContext().spanId);
+    expect(rerank.parentSpanId).toBe(parent.spanContext().spanId);
+  });
+
+  it("rerank 失败 → rerank span ERROR，父检索照常降级返回融合分", async () => {
+    const { chunks, models, kbs } = makeDeps({ vecRows: oneHit, rerankFails: true });
+    const hits = await new PgHybridRetriever(chunks, models, kbs).retrieve({
+      ...baseReq,
+      multi: false,
+      rerankModelId: "rk1",
+    });
+    expect(hits[0].finalScore).toBe(0.9); // 融合分保留
+    expect(spanByName("retrieval.rerank")!.status.code).toBe(2); // SpanStatusCode.ERROR
+  });
+
+  it("rerank 未开启 → 无 rerank 子 span", async () => {
+    const { chunks, models, kbs } = makeDeps({ vecRows: oneHit });
+    await new PgHybridRetriever(chunks, models, kbs).retrieve({ ...baseReq, multi: false });
+    expect(spanByName("retrieval.rerank")).toBeUndefined();
+    expect(spanByName("retrieval.embedding")).toBeDefined();
+  });
+
+  it("retrieve span 带 rag.chunk.scores JSON（未跑的路为 null）", async () => {
+    const { chunks, models, kbs } = makeDeps({ vecRows: oneHit });
+    await new PgHybridRetriever(chunks, models, kbs).retrieve({ ...baseReq, multi: false });
+    const parent = spanByName("retrieval.retrieve")!;
+    expect(JSON.parse(parent.attributes["rag.chunk.scores"] as string)).toEqual([
+      { chunkId: "c1", vec: 0.9, kw: null, rerank: null, final: 0.9 },
+    ]);
   });
 });
