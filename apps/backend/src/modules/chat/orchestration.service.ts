@@ -273,11 +273,21 @@ export class OrchestrationService {
     const rewrittenQuery = rewrite.rewrittenQuery;
 
     // 2) intent：候选恒注入静态全表（014 D3）
+    //    M9：把「意图分类 + 路由 KB 名」写到 intent 节点自己的 span（详情面板显示「意图 → 路由到 X 库」）。
+    //    route 是 intent 的纯函数，enrich 内按 output.intent 重算——CHAT 短路不检索故路由为空。
     const intentOut = await this.executeNode<{ intent: string }>(
       cfg.nodes.intent,
       "intent",
       { query, history },
       { availableIntents: INTENT_TABLE },
+      (out) => {
+        const cls = (out as { intent: string }).intent;
+        const kbNames =
+          cls === CHAT_INTENT_KEY
+            ? []
+            : resolveRetrievalKbIds(cls, cfg, kbRows).map((id) => kbNameById.get(id) ?? id);
+        return { [RAG.INTENT]: cls, [RAG.ROUTE_KB_NAMES]: JSON.stringify(kbNames) };
+      },
     );
     const intent = intentOut.intent;
 
@@ -386,6 +396,7 @@ export class OrchestrationService {
     name: "rewrite" | "intent",
     input: Record<string, unknown>,
     reserved: unknown,
+    spanEnrich?: (output: unknown) => Record<string, string | number | boolean>,
   ): Promise<TOutput> {
     const r = await this.nodeRuntime.executeStructured<Record<string, unknown>, TOutput, unknown>(
       name,
@@ -394,7 +405,7 @@ export class OrchestrationService {
       node.modelId,
       input,
       reserved,
-      { temperature: node.temperature },
+      { temperature: node.temperature, spanEnrich },
     );
     return r.output;
   }

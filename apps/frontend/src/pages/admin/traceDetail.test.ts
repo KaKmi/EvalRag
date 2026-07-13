@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TraceSpan } from "@codecrush/contracts";
-import { autoSelectSpan, buildOtlpJson, buildSpanDetail, buildWaterfall, rootSpanOf, spanKindColor } from "./traceDetail";
+import { autoSelectSpan, buildContractChain, buildOtlpJson, buildSpanDetail, buildSpanMeta, buildWaterfall, rootSpanOf, spanKindColor, traceAlerts } from "./traceDetail";
 
 const mk = (o: Partial<TraceSpan>): TraceSpan => ({
   traceId: "a".repeat(32),
@@ -106,6 +106,127 @@ describe("traceDetail", () => {
     const d = buildSpanDetail(span, span);
     expect(d.isErr).toBe(true);
     expect(d.errMsg).toBe("上游超时");
+  });
+
+  // 批 A：每节点面板铺料（属性值都是 CH Map(String,String) 的字符串）
+  const rowV = (rows: { k: string; v: string; tone?: string }[], k: string) => rows.find((r) => r.k === k);
+
+  it("buildSpanMeta LLM 节点：模型/输出模式/修复重试(warn)/校验错误码(err)/降级", () => {
+    const rows = buildSpanMeta(
+      mk({
+        kind: "llm",
+        attributes: {
+          "gen_ai.request.model": "deepseek-v3",
+          "gen_ai.system": "openai",
+          "rag.structured_output.mode": "json_schema",
+          "rag.repair.retry_count": "1",
+          "rag.validation.error_code": "SCHEMA_MISMATCH",
+          "rag.fallback.used": "true",
+        },
+      }),
+    );
+    expect(rowV(rows, "模型")?.v).toBe("deepseek-v3");
+    expect(rowV(rows, "输出模式")?.v).toBe("json_schema");
+    expect(rowV(rows, "修复重试")).toMatchObject({ v: "1 次", tone: "warn" });
+    expect(rowV(rows, "校验错误码")).toMatchObject({ v: "SCHEMA_MISMATCH", tone: "err" });
+    expect(rowV(rows, "降级")).toMatchObject({ tone: "warn" });
+  });
+
+  it("buildSpanMeta LLM 正常：修复重试=0 与无校验错误 均不显示", () => {
+    const rows = buildSpanMeta(mk({ kind: "llm", attributes: { "rag.repair.retry_count": "0", "rag.fallback.used": "false" } }));
+    expect(rowV(rows, "修复重试")).toBeUndefined();
+    expect(rowV(rows, "校验错误码")).toBeUndefined();
+    expect(rowV(rows, "降级")).toBeUndefined();
+  });
+
+  it("buildSpanMeta 检索节点：topK/阈值/融合权重(向量·关键词)/rerank阈值/多路", () => {
+    const rows = buildSpanMeta(
+      mk({
+        kind: "retrieval",
+        attributes: {
+          "rag.retrieval.top_k": "5",
+          "rag.retrieval.threshold": "0.5",
+          "rag.retrieval.vec_weight": "0.7",
+          "rag.rerank.threshold": "0.65",
+          "rag.multi": "true",
+        },
+      }),
+    );
+    expect(rowV(rows, "Top K")?.v).toBe("5");
+    expect(rowV(rows, "召回阈值")?.v).toBe("0.5");
+    expect(rowV(rows, "融合权重")?.v).toBe("向量 0.7 · 关键词 0.3");
+    expect(rowV(rows, "Rerank 阈值")?.v).toBe("0.65");
+    expect(rowV(rows, "多路召回")?.v).toBe("是");
+  });
+
+  it("buildSpanMeta 向量/重排节点出各自模型", () => {
+    expect(rowV(buildSpanMeta(mk({ kind: "embeddings", attributes: { "gen_ai.request.model": "bge-m3" } })), "向量模型")?.v).toBe("bge-m3");
+    expect(rowV(buildSpanMeta(mk({ kind: "rerank", attributes: { "gen_ai.request.model": "bge-reranker" } })), "重排模型")?.v).toBe("bge-reranker");
+  });
+
+  // #1 NodeContract 校验链
+  it("buildContractChain 降级路径：结构化输出→首次校验(码)→修复1次→降级兜底", () => {
+    const chain = buildContractChain(
+      mk({ kind: "llm", attributes: { "rag.structured_output.mode": "json_schema", "rag.validation.error_code": "SCHEMA_MISMATCH", "rag.repair.retry_count": "1", "rag.fallback.used": "true" } }),
+    );
+    expect(chain.map((s) => s.label)).toEqual(["结构化输出", "首次校验", "修复 1 次", "降级兜底"]);
+    expect(chain[1]).toMatchObject({ status: "err", detail: "SCHEMA_MISMATCH" });
+    expect(chain[3]).toMatchObject({ status: "err" });
+  });
+
+  it("buildContractChain 一次通过：结构化输出→校验通过", () => {
+    const chain = buildContractChain(mk({ kind: "llm", attributes: { "rag.structured_output.mode": "json_schema", "rag.repair.retry_count": "0", "rag.fallback.used": "false" } }));
+    expect(chain.map((s) => s.label)).toEqual(["结构化输出", "校验通过"]);
+    expect(chain.every((s) => s.status === "ok")).toBe(true);
+  });
+
+  it("buildContractChain 修复后通过：修复步 warn、终态 修复通过 ok", () => {
+    const chain = buildContractChain(mk({ kind: "llm", attributes: { "rag.validation.error_code": "MISSING_FIELD", "rag.repair.retry_count": "1", "rag.fallback.used": "false" } }));
+    expect(chain.map((s) => s.label)).toEqual(["结构化输出", "首次校验", "修复 1 次", "修复通过"]);
+    expect(chain[2].status).toBe("warn");
+    expect(chain[3].status).toBe("ok");
+  });
+
+  it("buildContractChain 非 LLM / 无契约信号 → 空（不渲染）", () => {
+    expect(buildContractChain(mk({ kind: "retrieval", attributes: {} }))).toEqual([]);
+    expect(buildContractChain(mk({ kind: "llm", attributes: {} }))).toEqual([]);
+  });
+
+  // #4 降级/异常置顶
+  it("traceAlerts 汇总链内报错(err)与降级(warn)，排除 HTTP 传输 span", () => {
+    const spans = [
+      mk({ spanId: "http", kind: "Server", parentSpanId: null, statusCode: "Error" }),
+      mk({ spanId: "chain", kind: "chain", parentSpanId: "http" }),
+      mk({ spanId: "ret", kind: "retrieval", parentSpanId: "chain", statusCode: "Error", statusMessage: "上游超时" }),
+      mk({ spanId: "llm", kind: "llm", parentSpanId: "chain", attributes: { "rag.fallback.used": "true" } }),
+    ];
+    const al = traceAlerts(spans);
+    // http（不在 chain 子树）不计入；仅 ret(err) + llm(fallback)
+    expect(al.map((a) => a.sid)).toEqual(["ret", "llm"]);
+    expect(al[0]).toMatchObject({ tone: "err", msg: "上游超时" });
+    expect(al[1]).toMatchObject({ tone: "warn" });
+  });
+
+  // #3 耗时占比
+  it("buildSpanDetail / buildWaterfall 计算占总时长百分比", () => {
+    const root = mk({ spanId: "root", kind: "chain", durationMs: 1000, startTime: "2026-07-13T09:11:00.000Z" });
+    const child = mk({ spanId: "c", kind: "llm", parentSpanId: "root", durationMs: 640, startTime: "2026-07-13T09:11:00.100Z" });
+    expect(buildSpanDetail(child, root).durationPct).toBe(64);
+    expect(buildWaterfall([root, child], "c").find((w) => w.sid === "c")!.pctOfTotal).toBe(64);
+  });
+
+  // #2 意图→KB 路由
+  it("buildSpanDetail 意图节点解析 routing（意图 + 路由 KB 名）", () => {
+    const root = mk({ spanId: "root" });
+    const intent = mk({ spanId: "i", parentSpanId: "root", kind: "llm", attributes: { "rag.intent": "SUPPORT", "rag.route.kb_names": JSON.stringify(["售后库", "订单FAQ"]) } });
+    expect(buildSpanDetail(intent, root).routing).toEqual({ intent: "SUPPORT", kbNames: ["售后库", "订单FAQ"] });
+  });
+
+  it("buildSpanDetail 非意图节点 routing 为 null；CHAT 空路由 kbNames=[]", () => {
+    const root = mk({ spanId: "root" });
+    expect(buildSpanDetail(mk({ spanId: "r", kind: "retrieval", parentSpanId: "root" }), root).routing).toBeNull();
+    const chat = mk({ spanId: "i", parentSpanId: "root", kind: "llm", attributes: { "rag.intent": "CHAT", "rag.route.kb_names": "[]" } });
+    expect(buildSpanDetail(chat, root).routing).toEqual({ intent: "CHAT", kbNames: [] });
   });
 
   it("buildOtlpJson 含 span 数组 + offset", () => {

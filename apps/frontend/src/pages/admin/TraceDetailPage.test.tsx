@@ -79,7 +79,8 @@ describe("TraceDetailPage (M9 W2)", () => {
 
   it("failed trace auto-selects the error span and shows error message", async () => {
     renderAt("a".repeat(32));
-    expect(await screen.findByText(/上游超时/)).toBeInTheDocument();
+    // 错误信息出现在顶部置顶告警条 + 选中节点错误框（#4 降级/异常置顶）
+    expect((await screen.findAllByText(/上游超时/)).length).toBeGreaterThan(0);
   });
 
   it("retrieval span shows hit-scores table with doc name", async () => {

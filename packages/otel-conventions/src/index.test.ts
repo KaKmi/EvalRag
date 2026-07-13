@@ -41,6 +41,11 @@ describe("otel conventions", () => {
     expect(CODECRUSH_REDACTED).toBe("codecrush.redacted");
   });
 
+  it("M9：意图路由键稳定（intent 节点 span）", () => {
+    expect(RAG.INTENT).toBe("rag.intent");
+    expect(RAG.ROUTE_KB_NAMES).toBe("rag.route.kb_names");
+  });
+
   it("M9 W1：身份约定键用 OTel 标准键名", () => {
     expect(SESSION_ID).toBe("session.id");
     expect(ENDUSER_ID).toBe("enduser.id");
