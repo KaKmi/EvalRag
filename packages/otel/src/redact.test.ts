@@ -1,4 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { CODECRUSH_IO, CODECRUSH_REDACTED } from "@codecrush/otel-conventions";
 import { redactPii, redactAttributes, RedactingSpanExporter } from "./redact";
 
@@ -19,8 +24,22 @@ describe("redactPii", () => {
     expect(r.redacted).toBe(true);
   });
 
-  it("银行卡 → 占位", () => {
-    expect(redactPii("卡号 6222020200112233445").redacted).toBe(true);
+  it("银行卡（Luhn 合法）→ 占位", () => {
+    // 4111111111111111 = 标准 Visa 测试卡号，Luhn 合法
+    const r = redactPii("卡号 4111111111111111 已绑定");
+    expect(r.text).toBe("卡号 [REDACTED_CARD] 已绑定");
+    expect(r.redacted).toBe(true);
+  });
+
+  it("13 位 Unix 毫秒时间戳（Luhn 不合法）→ 不脱敏（review Finding 1 防误伤）", () => {
+    const r = redactPii("订单 1752396840000 已发货");
+    expect(r.text).toBe("订单 1752396840000 已发货");
+    expect(r.redacted).toBe(false);
+  });
+
+  it("13–19 位订单号（Luhn 不合法）→ 不脱敏", () => {
+    // 780012345678901（15 位运单号，Luhn 不合法）
+    expect(redactPii("运单号 780012345678901").redacted).toBe(false);
   });
 
   it("无 PII → 原样返回、redacted=false", () => {
@@ -108,5 +127,24 @@ describe("RedactingSpanExporter", () => {
     expect(attrs[CODECRUSH_IO.INPUT]).toBe("[REDACTED_EMAIL]");
     expect(attrs[CODECRUSH_IO.OUTPUT]).toBe("回你 [REDACTED_PHONE]");
     expect(attrs[CODECRUSH_REDACTED]).toBe(true);
+  });
+
+  // review Finding 3：把「就地 mutate 落到导出」从一次性 spike 固化为回归测试——
+  // 真实 SDK 管线 BasicTracerProvider → SimpleSpanProcessor → RedactingSpanExporter(inner)，
+  // 断言 inner 收到的真实 ReadableSpan 属性已脱敏（防未来 SDK 冻结/克隆 attributes 致静默失效）。
+  it("真实 SDK 管线：导出到底层 exporter 的 span 属性已脱敏 + 打标", async () => {
+    const inner = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(new RedactingSpanExporter(inner))],
+    });
+    const span = provider.getTracer("t").startSpan("rag.pipeline");
+    span.setAttribute(CODECRUSH_IO.INPUT, "我的邮箱 alice@example.com");
+    span.setAttribute(CODECRUSH_IO.OUTPUT, "已记录");
+    span.end();
+    await provider.forceFlush();
+    const got = inner.getFinishedSpans()[0];
+    expect(got.attributes[CODECRUSH_IO.INPUT]).toBe("我的邮箱 [REDACTED_EMAIL]");
+    expect(got.attributes[CODECRUSH_IO.OUTPUT]).toBe("已记录");
+    expect(got.attributes[CODECRUSH_REDACTED]).toBe(true);
   });
 });

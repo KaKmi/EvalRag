@@ -13,25 +13,49 @@ import { CODECRUSH_IO, CODECRUSH_REDACTED } from "@codecrush/otel-conventions";
  */
 type ExportResultLike = { code: number; error?: Error };
 
-// 启发式 PII 正则（首版；真实规则应可配置——见 013 Revisit）。银行卡放最后、且用数字边界
-// 收窄，避免吃掉已被前几条替换的手机号/身份证。子串替换（保留其余文本），非整段丢弃。
-const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+// 启发式 PII 正则（首版；真实规则应可配置——见 013 Revisit）。子串替换（保留其余文本），非整段丢弃。
+// 身份证在银行卡之前处理（18 位纯数字优先判身份证）。
+const SIMPLE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/[\w.+-]+@[\w-]+\.[\w.-]+/g, "[REDACTED_EMAIL]"],
   [/(?<!\d)1[3-9]\d{9}(?!\d)/g, "[REDACTED_PHONE]"], // 中国大陆手机号
   [/(?<!\d)\d{17}[\dxX](?!\d)/g, "[REDACTED_ID]"], // 18 位身份证（末位可 X）
-  [/(?<!\d)\d{13,19}(?!\d)/g, "[REDACTED_CARD]"], // 银行卡
 ];
+
+// 银行卡候选：13–19 位连续数字。**必须 Luhn 校验通过才脱敏**——否则 13 位 Unix 毫秒时间戳、
+// 13–19 位订单号/运单号会被误当卡号脱掉（review Finding 1：污染 trace 正文 + 误报 redacted）。
+// 真实银行卡按 Luhn 构造必过；随机长数字过 Luhn 概率低，误伤大幅下降。
+const CARD_CANDIDATE = /(?<!\d)\d{13,19}(?!\d)/g;
+
+function luhnValid(digits: string): boolean {
+  let sum = 0;
+  let alt = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48; // '0'..'9'
+    if (alt) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
 
 /** 对单段文本脱敏；返回替换后文本与是否发生替换。无 PII 时原样返回、redacted=false。 */
 export function redactPii(text: string): { text: string; redacted: boolean } {
   let out = text;
   let redacted = false;
-  for (const [re, placeholder] of PATTERNS) {
+  for (const [re, placeholder] of SIMPLE_PATTERNS) {
     const next = out.replace(re, placeholder);
     if (next !== out) {
       redacted = true;
       out = next;
     }
+  }
+  const carded = out.replace(CARD_CANDIDATE, (m) => (luhnValid(m) ? "[REDACTED_CARD]" : m));
+  if (carded !== out) {
+    redacted = true;
+    out = carded;
   }
   return { text: out, redacted };
 }
