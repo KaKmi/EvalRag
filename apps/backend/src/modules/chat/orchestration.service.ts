@@ -119,6 +119,8 @@ export class OrchestrationService {
           }
           const summary = res.value;
           if (summary.outcome === "timeout") {
+            // 降级路径也要在后端日志留痕（不只 span），否则无 ClickHouse 时排查无迹（QA 观察 2）。
+            this.logger.warn(`reply 首 token 超时熔断（agentId=${agentId}, traceId=${traceId}）`);
             chain.setStatus({ code: SpanStatusCode.ERROR, message: "first token timeout" });
             yield { type: "error", message: "生成超时，请稍后重试" };
             await this.persist(this.buildResult(traceId, "", prep), persistCtx);
@@ -132,8 +134,14 @@ export class OrchestrationService {
           }
           // ok / partial：replyText 已逐 token 累加
         } catch (err) {
-          // reply 节点 infra 失败（模型被删/协议不支持 → resolveModel 抛）发生在首帧后，HTTP 头已发，
-          // 不能截断流 → 优雅降级为 error 事件收尾（对齐 timeout；不冒泡截断，review Finding 2）。
+          // reply 节点 infra 失败（模型被删/协议不支持 → resolveModel 抛；或提示词非法字段 →
+          // assembleMessages 抛）发生在首帧后，HTTP 头已发，不能截断流 → 优雅降级为 error 事件收尾
+          // （对齐 timeout；不冒泡截断，review Finding 2）。
+          // 除记 span 外必须写后端日志：该路径不 rethrow，Nest 异常过滤器看不到它，无 ClickHouse
+          // 时将完全无迹可查（QA 观察 2——真实环境靠此定位过提示词非法字段 {context}）。
+          this.logger.error(
+            `reply 生成失败降级（agentId=${agentId}, traceId=${traceId}）：${(err as Error).message}`,
+          );
           chain.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
           chain.recordException(err as Error);
           yield { type: "error", message: "生成失败，请稍后重试" };
