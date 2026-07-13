@@ -122,6 +122,11 @@ import {
   type UpdateDocumentMetadataRequest,
   UpdateKnowledgeBaseRequestSchema,
   type UpdateKnowledgeBaseRequest,
+  TraceListResponseSchema,
+  type TraceListResponse,
+  type TraceListQuery,
+  SessionListResponseSchema,
+  type SessionListResponse,
 } from "@codecrush/contracts";
 
 const TOKEN_KEY = "token";
@@ -270,6 +275,23 @@ export const rollbackAgentConfigVersion = (
 // 版本对话骨架；production 上线语义留 M7b）
 export const getApplications = (): Promise<ApplicationListResponse> =>
   getJson("/api/applications", ApplicationListResponseSchema);
+
+// M9 W1：Trace 追踪读模型（列表 + 概览 / Session 列表）
+export const getTraces = (q: TraceListQuery): Promise<TraceListResponse> => {
+  const p = new URLSearchParams();
+  if (q.q) p.set("q", q.q);
+  if (q.agentId) p.set("agentId", q.agentId);
+  if (q.status && q.status !== "全部") p.set("status", q.status);
+  if (q.quick && q.quick !== "全部") p.set("quick", q.quick);
+  if (q.from) p.set("from", q.from);
+  if (q.to) p.set("to", q.to);
+  p.set("page", String(q.page ?? 1));
+  p.set("pageSize", String(q.pageSize ?? 20));
+  return getJson(`/api/traces?${p.toString()}`, TraceListResponseSchema);
+};
+
+export const getTraceSessions = (): Promise<SessionListResponse> =>
+  getJson("/api/traces/sessions", SessionListResponseSchema);
 export const getApplicationDetail = (id: string): Promise<ApplicationDetail> =>
   getJson(`/api/applications/${encodeURIComponent(id)}`, ApplicationDetailSchema);
 export const createApplication = (req: CreateApplicationRequest): Promise<ApplicationDetail> =>
