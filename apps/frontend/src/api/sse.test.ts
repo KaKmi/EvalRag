@@ -130,20 +130,16 @@ it("throws ChatStreamError carrying HTTP status (404 未上线)", async () => {
     statusText: "Not Found",
   }) as unknown as typeof fetch;
 
-  await expect(
-    (async () => {
-      for await (const _ of openChatStream({ agentId: "a1", query: "q" })) {
-        // drain
-      }
-    })(),
-  ).rejects.toMatchObject({ status: 404 });
-
-  // 类型可辨识：instanceof ChatStreamError
-  const err = await openChatStream({ agentId: "a1", query: "q" })
-    .next()
-    .then(() => null)
-    .catch((e) => e);
-  expect(err).toBeInstanceOf(ChatStreamError);
+  let caught: unknown;
+  try {
+    for await (const _ of openChatStream({ agentId: "a1", query: "q" })) {
+      // drain
+    }
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(ChatStreamError);
+  expect((caught as ChatStreamError).status).toBe(404);
 });
 
 it("skips comment lines, event fields, and retry directives", async () => {
