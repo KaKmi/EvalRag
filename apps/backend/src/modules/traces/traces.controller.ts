@@ -1,6 +1,7 @@
 import { BadRequestException, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import {
   type HelloTraceResponse,
+  type SessionDetailResponse,
   type SessionListResponse,
   type TraceDetailResponse,
   type TraceListResponse,
@@ -31,6 +32,12 @@ export class TracesController {
   @Get("sessions")
   async sessions(): Promise<SessionListResponse> {
     return await this.tracesService.listSessions();
+  }
+
+  // 两段路径，不与单段 :traceId 冲突；仍置于 :traceId 之前保持静态优先声明习惯。
+  @Get("sessions/:sessionId")
+  async session(@Param("sessionId") sessionId: string): Promise<SessionDetailResponse> {
+    return await this.tracesService.getSession(sessionId);
   }
 
   @Get(":traceId")

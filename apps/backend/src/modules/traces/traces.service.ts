@@ -2,6 +2,7 @@ import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { emitManualHelloSpan } from "@codecrush/otel";
 import type {
   HelloTraceResponse,
+  SessionDetailResponse,
   SessionListResponse,
   TraceDetailResponse,
   TraceListQuery,
@@ -38,5 +39,9 @@ export class TracesService {
 
   async listSessions(): Promise<SessionListResponse> {
     return await this.tracesRepository.listSessions();
+  }
+
+  async getSession(sessionId: string): Promise<SessionDetailResponse> {
+    return await this.tracesRepository.findSessionById(sessionId);
   }
 }
