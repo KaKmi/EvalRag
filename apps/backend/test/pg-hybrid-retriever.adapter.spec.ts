@@ -28,6 +28,7 @@ function makeDeps(
     kwFails?: boolean;
     rerankResults?: unknown[];
     rerankFails?: boolean;
+    embedFails?: boolean;
   } = {},
 ) {
   const chunks = {
@@ -41,7 +42,10 @@ function makeDeps(
     }),
   } as unknown as ChunksService;
   const models = {
-    embedTexts: jest.fn(async () => [[0.1, 0.2]]),
+    embedTexts: jest.fn(async () => {
+      if (overrides.embedFails) throw new Error("embed down");
+      return [[0.1, 0.2]];
+    }),
     rerankTexts: jest.fn(async () => {
       if (overrides.rerankFails) throw new Error("rerank down");
       return overrides.rerankResults ?? [];
@@ -281,5 +285,13 @@ describe("PgHybridRetriever — 检索 span 三拆 + 命中分表 (M8 T3)", () =
     expect(JSON.parse(parent.attributes["rag.chunk.scores"] as string)).toEqual([
       { chunkId: "c1", vec: 0.9, kw: null, rerank: null, final: 0.9 },
     ]);
+  });
+
+  it("embed 失败 → embedding span ERROR，检索硬失败上抛（向量核心信号）", async () => {
+    const { chunks, models, kbs } = makeDeps({ embedFails: true });
+    await expect(
+      new PgHybridRetriever(chunks, models, kbs).retrieve({ ...baseReq, multi: false }),
+    ).rejects.toThrow();
+    expect(spanByName("retrieval.embedding")!.status.code).toBe(2); // SpanStatusCode.ERROR
   });
 });
