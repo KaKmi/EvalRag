@@ -23,6 +23,25 @@ export function spanKindColor(kind: string): { label: string; c: string } {
   return KIND_MAP[kind] ?? { label: kind, c: "#8c8c8c" };
 }
 
+// RAG 节点 → 中文友好名（span 原始名如 node_runtime.execute_structured / retrieval.retrieve 对用户无意义）。
+const NODE_LABEL: Record<string, string> = {
+  rewrite: "问题改写",
+  intent: "意图识别",
+  reply: "大模型生成",
+  fallback: "兜底应答",
+};
+export function spanDisplayName(span: TraceSpan): string {
+  const node = (span.attributes as Record<string, unknown>)["rag.node.name"] as string | undefined;
+  if (node && NODE_LABEL[node]) return NODE_LABEL[node];
+  if (span.kind === "retrieval") return "多路召回";
+  if (span.kind === "embeddings") return "向量召回";
+  if (span.kind === "rerank") return "重排";
+  const n = span.name.toLowerCase();
+  if (n.includes("keyword")) return "关键词召回";
+  if (n.includes("hits")) return "命中知识";
+  return span.name; // 未知 span 保留原名
+}
+
 const isErrorCode = (code: string): boolean => code === "Error" || code === "STATUS_CODE_ERROR";
 
 // HTTP 自动埋点使 rag.pipeline chain span 挂在 POST server span 下（ParentSpanId≠''），
@@ -102,7 +121,7 @@ export function buildWaterfall(spans: TraceSpan[], selSid: string): WfRow[] {
       const indent = Math.max(0, depthFromRoot(s, root!.spanId, byId) - 1) * 20;
       return {
         sid: s.spanId,
-        name: s.name,
+        name: spanDisplayName(s),
         kindLabel: spanKindColor(s.kind).label,
         kindC: spanKindColor(s.kind).c,
         offsetMs,
@@ -184,7 +203,7 @@ export function buildSpanDetail(span: TraceSpan, root: TraceSpan): SpanDetailVie
   const isErr = isErrorCode(span.statusCode);
   const model = (a["gen_ai.request.model"] as string) ?? null;
   return {
-    title: span.name,
+    title: spanDisplayName(span),
     kindLabel: spanKindColor(span.kind).label,
     statusLabel: isErr ? "失败" : span.statusCode === "Unset" ? "跳过" : "成功",
     isErr,

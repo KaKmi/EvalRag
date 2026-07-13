@@ -128,10 +128,9 @@ export default function TraceDetailPage() {
       <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "16px 20px", marginBottom: 16 }}>
         <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)", marginBottom: 4 }}>用户问题</div>
         <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 14 }}>{meta.userInput || "—"}</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 14 }}>
-          <MetaCell label="Agent" value={meta.agentName ?? "—"} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 14 }}>
+          <MetaCell label="应用" value={meta.agentName ?? "—"} />
           <MetaCell label="生成模型" value={meta.genModel ?? "—"} sub={meta.genModelVersion ?? undefined} />
-          <MetaCell label="Prompt 版本" value={meta.promptVersionId ?? "—"} mono />
           <MetaCell label="总耗时" value={fmtMs(meta.durationMs)} bold />
           <MetaCell label="Tokens" value={(meta.inputTokens + meta.outputTokens).toLocaleString()} sub={`入 ${meta.inputTokens} / 出 ${meta.outputTokens}`} />
           <MetaCell label="Cost" value={meta.cost == null ? "—" : "¥" + meta.cost.toFixed(4)} bold color="#1677ff" />
