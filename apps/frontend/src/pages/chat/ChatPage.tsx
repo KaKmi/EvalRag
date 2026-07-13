@@ -111,6 +111,14 @@ function splitParts(text: string): Array<{ isCite: boolean; text?: string; n?: n
 /** 复制用纯文本：去掉行内 [n] 标记。 */
 const plainText = (t: string) => t.replace(/\[\d+\]/g, "");
 
+/** 回复是否真的引用了检索知识：正文含至少一个 [n] 且 n 命中本条 citation。
+ * 只有「检索过并在回复里真的引用」才展示可信度/引用完整度（闲聊/无据拒答不展示）。 */
+function isCited(m: MsgView): boolean {
+  if (m.citations.length === 0) return false;
+  const ns = new Set([...m.text.matchAll(/\[(\d+)\]/g)].map((x) => Number(x[1])));
+  return m.citations.some((c) => ns.has(c.n));
+}
+
 export default function ChatPage() {
   const { agentId = "" } = useParams();
   const navigate = useNavigate();
@@ -126,7 +134,6 @@ export default function ChatPage() {
   const [citeSel, setCiteSel] = useState<{ msgKey: string; n: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Record<string, "up" | "down">>({});
-  const [handoff, setHandoff] = useState<Record<string, true>>({});
 
   const abortRef = useRef<AbortController | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -835,7 +842,7 @@ export default function ChatPage() {
                       </div>
                     )}
 
-                    {!m.isFallback && m.confidence != null && (
+                    {!m.isFallback && m.confidence != null && isCited(m) && (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                         {(() => {
                           const lv = levelOf(m.confidence);
@@ -890,7 +897,7 @@ export default function ChatPage() {
                       </div>
                     )}
 
-                    {!m.isFallback && m.confidence != null && m.confidence < 0.7 && (
+                    {!m.isFallback && m.confidence != null && m.confidence < 0.7 && isCited(m) && (
                       <div
                         style={{
                           display: "flex",
@@ -974,48 +981,6 @@ export default function ChatPage() {
                         </svg>
                         <span>不准确</span>
                       </div>
-                      <div style={{ width: 1, height: 14, background: "#e8e8e8", margin: "0 6px" }} />
-                      {handoff[m.key] ? (
-                        <div
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 6,
-                            height: 28,
-                            padding: "0 10px",
-                            fontSize: 12,
-                            color: "#52c41a",
-                          }}
-                        >
-                          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#52c41a" }} />
-                          已转接人工，客服将尽快接入
-                        </div>
-                      ) : (
-                        <div
-                          onClick={() => setHandoff((h) => ({ ...h, [m.key]: true }))}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 5,
-                            height: 28,
-                            padding: "0 12px",
-                            borderRadius: 6,
-                            fontSize: 12,
-                            fontWeight: 500,
-                            color: "#1677ff",
-                            border: "1px solid #91caff",
-                            background: "#fff",
-                            cursor: "pointer",
-                            userSelect: "none",
-                          }}
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                            <circle cx="12" cy="7" r="4" />
-                          </svg>
-                          转人工
-                        </div>
-                      )}
                     </div>
 
                     {feedback[m.key] === "down" && (

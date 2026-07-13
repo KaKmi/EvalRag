@@ -41,12 +41,15 @@ export function App() {
     <Suspense fallback={Fallback}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        {/* M8 T4：一个 bot 一个 URL——:agentId 为 slug 或 applicationId，直传 resolvePublic/getApplications */}
+        {/* M8 T4：一个 bot 一个 URL——:agentId 为 slug 或 applicationId，直传 resolvePublic/getApplications。
+            /chat 不套 AdminLayout，故在此用 100vh 容器锁整页高（ChatPage 内层 height:100% 依赖之）。 */}
         <Route
           path="/chat/:agentId"
           element={
             <AuthGuard>
-              <ChatPage />
+              <div style={{ height: "100vh" }}>
+                <ChatPage />
+              </div>
             </AuthGuard>
           }
         />
