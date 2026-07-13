@@ -1,3 +1,10 @@
+import { trace } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
+import { startManualSpan } from "@codecrush/otel";
 import { INTENT_TABLE } from "@codecrush/contracts";
 import {
   NodeRuntimeService,
@@ -366,6 +373,133 @@ describe("NodeRuntimeService.streamText · reply/fallback", () => {
     );
     expect(chatStream).not.toHaveBeenCalled();
     expect(res.fallbackUsed).toBe(true);
+  });
+});
+
+describe("NodeRuntimeService.streamTextChunks · reply 逐 token", () => {
+  // 手动 drain generator：收集 yield 的 delta 与末位 summary
+  async function drain(gen: AsyncGenerator<{ delta: string }, unknown>) {
+    const deltas: string[] = [];
+    let r = await gen.next();
+    while (!r.done) {
+      deltas.push(r.value.delta);
+      r = await gen.next();
+    }
+    return { deltas, summary: r.value as { outcome: string; text?: string; traceId?: string } };
+  }
+  function replyStream(chunks: Array<{ delta?: string; done?: boolean; error?: string }>) {
+    return async function* () {
+      for (const c of chunks) yield c;
+    };
+  }
+
+  it("逐个 yield 每个 delta（不整段），summary.outcome=ok 且 text=拼接", async () => {
+    const chatStream = jest.fn(() => replyStream([{ delta: "你" }, { delta: "好" }, { done: true }])());
+    const svc = makeService(jest.fn(), chatStream);
+    const { deltas, summary } = await drain(
+      svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, { citations: [] }),
+    );
+    expect(deltas).toEqual(["你", "好"]);
+    expect(summary).toMatchObject({ outcome: "ok", text: "你好" });
+  });
+
+  it("首 token 前即报错 → 无 delta，outcome=fallback", async () => {
+    const chatStream = jest.fn(() => replyStream([{ error: "boom" }])());
+    const svc = makeService(jest.fn(), chatStream);
+    const { deltas, summary } = await drain(
+      svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, { citations: [] }),
+    );
+    expect(deltas).toEqual([]);
+    expect(summary.outcome).toBe("fallback");
+    expect(summary.text && summary.text.length).toBeGreaterThan(0);
+  });
+
+  it("已 yield token 后断流 → 保留已产出，outcome=partial", async () => {
+    const chatStream = jest.fn(() => replyStream([{ delta: "答" }, { error: "断" }])());
+    const svc = makeService(jest.fn(), chatStream);
+    const { deltas, summary } = await drain(
+      svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, { citations: [] }),
+    );
+    expect(deltas).toEqual(["答"]);
+    expect(summary).toMatchObject({ outcome: "partial", text: "答" });
+  });
+
+  it("首 token 超时 → outcome=timeout，且上游 generator 被 return()（级联 cancel）", async () => {
+    let returned = false;
+    const hanging = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next: () => new Promise(() => {}), // 永不 resolve
+      return: async () => {
+        returned = true;
+        return { done: true, value: undefined };
+      },
+    } as unknown as AsyncIterableIterator<{ delta?: string }>;
+    const chatStream = jest.fn(() => hanging);
+    const svc = makeService(jest.fn(), chatStream);
+    jest.useFakeTimers();
+    const gen = svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, { citations: [] });
+    const p = gen.next();
+    await jest.advanceTimersByTimeAsync(20_000);
+    const r = await p;
+    jest.useRealTimers();
+    expect(r.done).toBe(true);
+    expect((r.value as { outcome: string }).outcome).toBe("timeout");
+    expect(returned).toBe(true);
+  });
+
+  it("input 校验失败 → 不调 chatStream，outcome=fallback", async () => {
+    const chatStream = jest.fn();
+    const svc = makeService(jest.fn(), chatStream);
+    const { deltas, summary } = await drain(
+      svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "" } as never, { citations: [] }),
+    );
+    expect(chatStream).not.toHaveBeenCalled();
+    expect(deltas).toEqual([]);
+    expect(summary.outcome).toBe("fallback");
+  });
+
+  it("fallback 节点误调 → 防御性整段返回 promptBody，不调模型", async () => {
+    const chatStream = jest.fn();
+    const svc = makeService(jest.fn(), chatStream);
+    const { deltas, summary } = await drain(svc.streamTextChunks("fallback", 1, "抱歉，暂时无法回答。", "m1", {}, {}));
+    expect(chatStream).not.toHaveBeenCalled();
+    expect(summary).toMatchObject({ outcome: "fallback", text: "抱歉，暂时无法回答。" });
+    expect(deltas).toEqual([]);
+  });
+
+  // AC3：reply span 显式挂父到传入的 parentCtx（不靠活动上下文），且流末 end（跨多 yield 存活）。
+  // 用真实 InMemorySpanExporter 断言父子关系——@codecrush/otel 的 export* 产生不可配置 getter，
+  // jest.spyOn 会抛 "Cannot redefine property"，故不用 spy。
+  it("parentCtx → reply span 显式挂父到根、且流末 end（AC3）", async () => {
+    // parentCtx 显式传给 startManualSpan（tracer.startSpan 第三参），挂父不经活动上下文，
+    // 故本测试无需注册 ContextManager——只需 InMemorySpanExporter 读父子关系。
+    const exporter = new InMemorySpanExporter();
+    trace.disable();
+    trace.setGlobalTracerProvider(new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }));
+    try {
+      const { span: root, ctx: rootCtx } = startManualSpan("test.root", undefined);
+      const chatStream = jest.fn(() => replyStream([{ delta: "x" }, { done: true }])());
+      const svc = makeService(jest.fn(), chatStream);
+      await drain(
+        svc.streamTextChunks("reply", 1, "{query}", "m1", { query: "hi", history: "" }, { citations: [] }, undefined, rootCtx),
+      );
+      root.end();
+      const spans = exporter.getFinishedSpans() as Array<{
+        name: string;
+        spanContext(): { traceId: string; spanId: string };
+        parentSpanContext?: { spanId: string };
+        parentSpanId?: string;
+      }>;
+      const reply = spans.find((s) => s.name === "node_runtime.stream_text")!;
+      expect(reply).toBeDefined(); // 出现在 finished == 已 end（跨 yield 后流末 end）
+      const pid = reply.parentSpanContext?.spanId ?? reply.parentSpanId;
+      expect(pid).toBe(root.spanContext().spanId); // 显式挂父到根，不靠活动上下文
+      expect(reply.spanContext().traceId).toBe(root.spanContext().traceId);
+    } finally {
+      trace.disable();
+    }
   });
 });
 
