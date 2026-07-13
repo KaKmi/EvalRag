@@ -30,6 +30,7 @@ function cfg(overrides: Partial<ResolvedApplicationConfig> = {}): ResolvedApplic
   return {
     applicationId: "app1",
     slug: "aftersale",
+    name: "售后助手",
     configVersionId: "cv1",
     version: 1,
     kbIds: ["kb_a", "kb_b"],
