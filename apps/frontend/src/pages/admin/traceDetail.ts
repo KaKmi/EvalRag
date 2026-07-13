@@ -70,11 +70,18 @@ export interface WfRow {
 
 const KNOWN_CODES = ["Ok", "Error", "Unset", "STATUS_CODE_OK", "STATUS_CODE_ERROR", "STATUS_CODE_UNSET"];
 
+/** 轴宽 = 相对 root 起点的最大结束偏移（含 root，≥1）。瀑布行与轴刻度共用，避免两处各算一遍。 */
+export function traceSpanTotal(spans: TraceSpan[]): number {
+  const root = rootSpanOf(spans);
+  const t0 = root ? Date.parse(root.startTime) : 0;
+  return Math.max(...spans.map((s) => Date.parse(s.startTime) - t0 + s.durationMs), 1);
+}
+
 export function buildWaterfall(spans: TraceSpan[], selSid: string): WfRow[] {
   const root = rootSpanOf(spans);
   const t0 = root ? Date.parse(root.startTime) : 0;
   // total 用全部 span（含 root）算轴宽；行只渲染非 root 节点（root 单独作 TRACE 头行，避免重复）。
-  const total = Math.max(...spans.map((s) => Date.parse(s.startTime) - t0 + s.durationMs), 1);
+  const total = traceSpanTotal(spans);
   const byId = new Map(spans.map((s) => [s.spanId, s]));
   return spans
     .filter((s) => s.spanId !== root?.spanId)

@@ -10,6 +10,7 @@ import {
   buildWaterfall,
   KIND_LEGEND,
   rootSpanOf,
+  traceSpanTotal,
 } from "./traceDetail";
 
 /** Trace 详情：meta + 时间轴/树 + 数据驱动 span 面板 + OTLP JSON。M9 W2 接真实读模型。 */
@@ -53,10 +54,7 @@ export default function TraceDetailPage() {
   const root = useMemo(() => rootSpanOf(spans), [spans]);
   const effSid = useMemo(() => autoSelectSpan(spans, selSid), [spans, selSid]);
   const waterfall = useMemo(() => buildWaterfall(spans, effSid), [spans, effSid]);
-  const total = useMemo(
-    () => (root ? Math.max(...spans.map((s) => Date.parse(s.startTime) - Date.parse(root.startTime) + s.durationMs), 1) : 1),
-    [spans, root],
-  );
+  const total = useMemo(() => traceSpanTotal(spans), [spans]);
   const selSpan = useMemo(() => spans.find((s) => s.spanId === effSid), [spans, effSid]);
   const detail = useMemo(() => (selSpan && root ? buildSpanDetail(selSpan, root) : null), [selSpan, root]);
 
