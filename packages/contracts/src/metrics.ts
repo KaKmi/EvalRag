@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-// ISO 8601 字符串（前端传范围）；用 datetime 校验，宽松 offset。
 const isoString = z.string().datetime({ offset: true });
 
 export const MetricsQuerySchema = z.object({
@@ -11,7 +10,6 @@ export const MetricsQuerySchema = z.object({
 });
 export type MetricsQuery = z.infer<typeof MetricsQuerySchema>;
 
-// 窗口聚合值（率在后端由 count 计算后下发）。
 export const MetricsWindowSchema = z.object({
   qaCount: z.number(),
   failCount: z.number(),
@@ -30,7 +28,6 @@ export const MetricsWindowSchema = z.object({
 });
 export type MetricsWindow = z.infer<typeof MetricsWindowSchema>;
 
-// 趋势桶点（分钟粒度）。
 export const MetricsBucketSchema = z.object({
   bucket: z.string(),
   qaCount: z.number(),
@@ -50,6 +47,5 @@ export const MetricsOverviewResponseSchema = z.object({
 });
 export type MetricsOverviewResponse = z.infer<typeof MetricsOverviewResponseSchema>;
 
-// 单应用响应形状同 overview（限定 agentId）。
 export const MetricsAppResponseSchema = MetricsOverviewResponseSchema;
 export type MetricsAppResponse = z.infer<typeof MetricsAppResponseSchema>;

@@ -86,7 +86,7 @@ export interface NodeExecuteOptions {
    */
   spanEnrich?: (output: unknown) => Record<string, string | number | boolean>;
   /**
-   * D-metrics：流式末值可能因消费者 abort 不可达，故把已知模型与累计 usage 同步通知根 span 所有者。
+   * 流式末值可能因消费者 abort 不可达，故把已知模型与累计 usage 同步通知根 span 所有者。
    * 回调异常必须被吞，避免指标富化进入问答关键路径。
    */
   metricsObserver?: {

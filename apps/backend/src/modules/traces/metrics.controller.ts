@@ -1,6 +1,17 @@
 import { BadRequestException, Controller, Get, Param, Query } from "@nestjs/common";
-import { MetricsQuerySchema, type MetricsOverviewResponse } from "@codecrush/contracts";
+import {
+  MetricsQuerySchema,
+  type MetricsAppResponse,
+  type MetricsOverviewResponse,
+  type MetricsQuery,
+} from "@codecrush/contracts";
 import { ClickHouseMetricsRepository } from "./clickhouse-metrics.repository";
+
+function parseMetricsQuery(raw: unknown): MetricsQuery {
+  const result = MetricsQuerySchema.safeParse(raw);
+  if (!result.success) throw new BadRequestException(result.error.issues);
+  return result.data;
+}
 
 @Controller("metrics")
 export class MetricsController {
@@ -8,18 +19,14 @@ export class MetricsController {
 
   @Get("overview")
   async overview(@Query() raw: unknown): Promise<MetricsOverviewResponse> {
-    const q = MetricsQuerySchema.safeParse(raw);
-    if (!q.success) throw new BadRequestException(q.error.issues);
-    return this.repo.getOverview(q.data);
+    return this.repo.getOverview(parseMetricsQuery(raw));
   }
 
   @Get("apps/:id")
   async app(
     @Param("id") id: string,
     @Query() raw: unknown,
-  ): Promise<MetricsOverviewResponse> {
-    const q = MetricsQuerySchema.safeParse(raw);
-    if (!q.success) throw new BadRequestException(q.error.issues);
-    return this.repo.getAppMetrics(id, q.data);
+  ): Promise<MetricsAppResponse> {
+    return this.repo.getAppMetrics(id, parseMetricsQuery(raw));
   }
 }

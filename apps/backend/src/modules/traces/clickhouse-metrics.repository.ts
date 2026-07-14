@@ -1,8 +1,6 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import { Inject, Injectable, type OnModuleInit } from "@nestjs/common";
 import type {
+  MetricsAppResponse,
   MetricsBucket,
   MetricsOverviewResponse,
   MetricsQuery,
@@ -10,20 +8,9 @@ import type {
 } from "@codecrush/contracts";
 import { CLICKHOUSE } from "../../platform/clickhouse/clickhouse.constants";
 import type { CodeCrushClickHouseClient } from "../../platform/clickhouse/clickhouse.types";
-import { toIsoUtc } from "./clickhouse-traces.repository";
+import { loadSqlStatements, otelTracesTableExists, toIsoUtc } from "./clickhouse-view.utils";
 
-const METRICS_VIEW_SQL_RELPATH = join("infra", "clickhouse", "views", "002-metrics-views.sql");
-
-function resolveMetricsViewSqlPath(): string {
-  let dir = __dirname;
-  for (let i = 0; i < 10; i += 1) {
-    if (existsSync(join(dir, "pnpm-workspace.yaml"))) return join(dir, METRICS_VIEW_SQL_RELPATH);
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return join(process.cwd(), METRICS_VIEW_SQL_RELPATH);
-}
+const METRICS_VIEW_SQL_RELPATH = "infra/clickhouse/views/002-metrics-views.sql";
 
 const EMPTY_WINDOW: MetricsWindow = {
   qaCount: 0,
@@ -57,29 +44,14 @@ export class ClickHouseMetricsRepository implements OnModuleInit {
   }
 
   private async exporterTableExists(): Promise<boolean> {
-    const res = await this.clickhouse.query({
-      query: "EXISTS TABLE otel_traces",
-      format: "JSONEachRow",
-    });
-    const rows = await res.json<{ result: number }>();
-    return rows[0]?.result === 1;
+    return otelTracesTableExists(this.clickhouse);
   }
 
   async ensureMetricsViews(): Promise<boolean> {
     if (this.ready) return true;
     if (!(await this.exporterTableExists())) return false;
 
-    const sql = await readFile(resolveMetricsViewSqlPath(), "utf8");
-    const statements = sql
-      .split(";")
-      .map((s) =>
-        s
-          .split("\n")
-          .filter((line) => !line.trim().startsWith("--"))
-          .join("\n")
-          .trim(),
-      )
-      .filter((s) => s.length > 0);
+    const statements = await loadSqlStatements(METRICS_VIEW_SQL_RELPATH);
     for (const stmt of statements) {
       await this.clickhouse.command({ query: stmt });
     }
@@ -99,12 +71,14 @@ export class ClickHouseMetricsRepository implements OnModuleInit {
   async getOverview(q: MetricsQuery): Promise<MetricsOverviewResponse> {
     if (!(await this.ensureMetricsViews())) return { window: EMPTY_WINDOW, series: [] };
     const { where, params } = this.buildWhere(q);
-    const window = await this.queryWindow(where, params);
-    const series = await this.querySeries(where, params);
+    const [window, series] = await Promise.all([
+      this.queryWindow(where, params),
+      this.querySeries(where, params),
+    ]);
     return { window, series };
   }
 
-  async getAppMetrics(agentId: string, q: MetricsQuery): Promise<MetricsOverviewResponse> {
+  async getAppMetrics(agentId: string, q: MetricsQuery): Promise<MetricsAppResponse> {
     return this.getOverview({ ...q, agentId });
   }
 
