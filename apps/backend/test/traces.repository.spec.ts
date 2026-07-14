@@ -99,6 +99,33 @@ describe("ClickHouseTracesRepository", () => {
     expect(res.spans[0].statusMessage).toBeNull();
   });
 
+  it("reads the generation model from the D-metrics chain root without an LLM child", async () => {
+    const { client } = buildClient({
+      tableExists: true,
+      rows: [
+        {
+          trace_id: "a".repeat(32),
+          span_id: "root".padEnd(16, "0"),
+          parent_span_id: null,
+          name: "rag.pipeline",
+          kind: "chain",
+          start_time: "2026-07-13 09:11:00.000",
+          duration_ms: 2410,
+          status_code: "Ok",
+          status_message: "",
+          attributes: {
+            "gen_ai.request.model": "root-model",
+          },
+        },
+      ],
+    });
+    const repo = new ClickHouseTracesRepository(client);
+
+    const res = await repo.findByTraceId("a".repeat(32));
+
+    expect(res.meta.genModel).toBe("root-model");
+  });
+
   it("finds chain root via kind even when it has an HTTP-server parent (M9 fix)", async () => {
     const { client } = buildClient({
       tableExists: true,

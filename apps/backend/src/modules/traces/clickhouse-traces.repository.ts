@@ -126,8 +126,13 @@ function buildTraceMeta(spans: TraceSpan[]): TraceDetailMeta {
     (s) => s.kind === "llm" && (s.attributes as Record<string, unknown>)["rag.node.name"] === "reply",
   );
   const lastLlm = [...spans].reverse().find((s) => s.kind === "llm");
+  const rootGenModel = a["gen_ai.request.model"];
   const genModel =
-    ((reply ?? lastLlm)?.attributes as Record<string, unknown> | undefined)?.["gen_ai.request.model"];
+    typeof rootGenModel === "string" && rootGenModel.length > 0
+      ? rootGenModel
+      : ((reply ?? lastLlm)?.attributes as Record<string, unknown> | undefined)?.[
+          "gen_ai.request.model"
+        ];
   const traceTokens = (key: string): number => {
     const rootValue = a[key];
     if (rootValue !== undefined && rootValue !== null && rootValue !== "") {
