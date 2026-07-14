@@ -46,7 +46,6 @@ import {
   publishApplicationProduction,
   removeApplicationTag,
   startApplicationReleaseCheck,
-  tryApplicationVersionChat,
   unpublishApplicationProduction,
 } from "../../api/client";
 
@@ -206,9 +205,6 @@ export default function ApplicationDetailPage() {
     Record<PromptNode, PromptNodeVersionCandidate[]>
   >({ rewrite: [], intent: [], reply: [], fallback: [] });
   const [kbPickerOpen, setKbPickerOpen] = useState(false);
-
-  const [chatBusy, setChatBusy] = useState(false);
-  const [chatUnavailable, setChatUnavailable] = useState(false);
 
   // —— M7b：命名标签 +「管理标识」面板 + 上线核对（gate2）——
   const [tags, setTags] = useState<ApplicationTag[]>([]);
@@ -371,20 +367,6 @@ export default function ApplicationDetailPage() {
       setSaveErr(applicationErrorMessage(e, "保存失败，请稍后重试"));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const runChatTest = async (versionId: string) => {
-    if (!detail || !versionId) return;
-    setChatBusy(true);
-    try {
-      const result = await tryApplicationVersionChat(detail.id, versionId);
-      setChatUnavailable(result.mode === "unavailable");
-    } catch {
-      setChatUnavailable(false);
-      message.error("对话测试请求失败");
-    } finally {
-      setChatBusy(false);
     }
   };
 
@@ -569,7 +551,7 @@ export default function ApplicationDetailPage() {
                 const n = draft.nodes[node];
                 const locked = n.freedom !== "custom";
                 return (
-                  <div key={node} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div key={node} data-testid={`prompt-node-${node}`} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span
                         style={{
@@ -592,7 +574,7 @@ export default function ApplicationDetailPage() {
                       style={{ width: "100%" }}
                       options={promptOptions(candidatesByNode[node], n.promptVersionId)}
                     />
-                    <div
+                    {node !== "fallback" && <div
                       style={{
                         display: "flex",
                         alignItems: "center",
@@ -675,7 +657,7 @@ export default function ApplicationDetailPage() {
                           {n.topP}
                         </span>
                       </div>
-                    </div>
+                    </div>}
                   </div>
                 );
               })}
@@ -988,12 +970,9 @@ export default function ApplicationDetailPage() {
             }}
           >
             <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(0,0,0,.8)" }}>对话测试</div>
-            <Button block loading={chatBusy} onClick={() => void runChatTest(basedOnVersionId)}>
+            <Button block href={`/chat/${encodeURIComponent(detail.slug)}`} target="_blank" rel="noopener noreferrer">
               运行对话测试
             </Button>
-            {chatUnavailable && (
-              <Alert type="info" showIcon title="真实按版本对话测试将随 M8 编排上线" />
-            )}
           </div>
         </div>
       </div>
@@ -1071,11 +1050,9 @@ export default function ApplicationDetailPage() {
                   </Button>
                   <Button
                     size="small"
-                    onClick={() => {
-                      loadVersionIntoEditor(v);
-                      setHistoryOpen(false);
-                      void runChatTest(v.id);
-                    }}
+                    href={`/chat/${encodeURIComponent(detail.slug)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
                   >
                     对话测试
                   </Button>

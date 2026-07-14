@@ -169,7 +169,7 @@ export default function TraceDetailPage() {
 
       {/* 两栏：左调用链 + 右 span 面板 */}
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-        <div style={{ width: 430, flex: "none", background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "12px 10px" }}>
+        <div data-testid="trace-call-chain" style={{ width: "34vw", minWidth: 560, maxWidth: 680, flex: "none", background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "12px 10px" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px 10px" }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>调用链</div>
             <Segmented
@@ -195,7 +195,7 @@ export default function TraceDetailPage() {
 
           {view === "timeline" && (
             <>
-              <div style={{ position: "relative", height: 16, marginLeft: 150, marginBottom: 4, borderBottom: "1px solid #f0f0f0" }}>
+              <div style={{ position: "relative", height: 16, marginLeft: 184, marginRight: 92, marginBottom: 4, borderBottom: "1px solid #f0f0f0" }}>
                 {[0, 0.25, 0.5, 0.75, 1].map((f) => (
                   <span key={f} style={{ position: "absolute", top: 0, left: f * 100 + "%", transform: "translateX(-50%)", fontSize: 9.5, color: "rgba(0,0,0,.35)" }}>
                     {fmtMs(Math.round(total * f))}
@@ -203,8 +203,9 @@ export default function TraceDetailPage() {
                 ))}
               </div>
               {waterfall.map((s) => (
-                <div key={s.sid} onClick={() => setSelSid(s.sid)} style={{ display: "flex", alignItems: "center", height: 30, borderRadius: 5, cursor: "pointer", background: s.sel ? "#e6f4ff" : "transparent" }}>
-                  <div style={{ width: 150, flex: "none", display: "flex", alignItems: "center", gap: 6, paddingLeft: s.indent, minWidth: 0, boxSizing: "border-box" }}>
+                <div key={s.sid} onClick={() => setSelSid(s.sid)} style={{ display: "grid", gridTemplateColumns: "184px minmax(0, 1fr) 92px", alignItems: "center", height: 32, borderRadius: 5, cursor: "pointer", background: s.sel ? "#e6f4ff" : "transparent" }}>
+                  <div style={{ height: "100%", display: "flex", alignItems: "center", gap: 6, paddingLeft: s.indent + 6, paddingRight: 8, minWidth: 0, boxSizing: "border-box", position: "relative" }}>
+                    {s.indent > 0 && <span aria-hidden="true" style={{ position: "absolute", left: s.indent - 8, top: 0, width: 12, height: 16, borderLeft: "1px solid #d9d9d9", borderBottom: "1px solid #d9d9d9", borderBottomLeftRadius: 4 }} />}
                     <span style={{ width: 6, height: 6, flex: "none", borderRadius: 2, background: s.kindC }} />
                     <span style={{ fontSize: 12, color: s.isErr ? "#ff4d4f" : "rgba(0,0,0,.85)", fontWeight: s.sel ? 600 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
                   </div>
@@ -213,10 +214,8 @@ export default function TraceDetailPage() {
                       {s.isErr && <span style={{ fontSize: 10, color: "#fff", fontWeight: 700 }}>✕</span>}
                       {!s.isErr && s.isFallback && <span style={{ fontSize: 10, color: "#fff", fontWeight: 700 }}>⚠</span>}
                     </div>
-                    <span style={{ position: "absolute", top: 7, left: `calc(${s.leftPct} + ${s.widthPct} + 6px)`, fontSize: 10, color: "rgba(0,0,0,.4)", whiteSpace: "nowrap" }}>
-                      {s.isSkip ? "未执行" : `${fmtMs(s.durationMs)} · ${s.pctOfTotal}%`}
-                    </span>
                   </div>
+                  <span style={{ paddingRight: 6, fontSize: 10.5, color: "rgba(0,0,0,.45)", textAlign: "right", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{s.isSkip ? "未执行" : `${fmtMs(s.durationMs)} · ${s.pctOfTotal}%`}</span>
                 </div>
               ))}
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap", padding: "10px 6px 0", borderTop: "1px solid #f5f5f5", marginTop: 8 }}>

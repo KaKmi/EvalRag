@@ -60,7 +60,7 @@ describe("traceDetail", () => {
     const child = wf.find((w) => w.sid === "child")!;
     expect(child.offsetMs).toBe(400);
     expect(child.indent).toBe(0); // root 直接子 → 0
-    expect(wf.find((w) => w.sid === "grand")!.indent).toBe(20); // 孙节点 → 20
+    expect(wf.find((w) => w.sid === "grand")!.indent).toBe(24); // 孙节点 → 24
   });
 
   it("buildSpanDetail 解析 chunk.scores（doc + pass 阈值）", () => {
