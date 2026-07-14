@@ -29,6 +29,7 @@ export interface ExecuteStructuredResult<TOutput> {
   /** M7b S0：模型调用路径的 span traceId（供 ReleaseCheck OPEN_PROMPT_TRY_RUN 深链）。
    *  校验失败提前返回（无 span）路径为 undefined。 */
   traceId?: string;
+  usage?: { inputTokens: number; outputTokens: number };
 }
 
 export interface StreamTextResult {
@@ -44,10 +45,33 @@ export interface StreamTextResult {
  * timeout → 编排 yield error 事件、不发 done。
  */
 export type StreamChunksSummary =
-  | { outcome: "ok"; text: string; traceId?: string }
-  | { outcome: "partial"; text: string; traceId?: string }
-  | { outcome: "fallback"; text: string; traceId?: string }
-  | { outcome: "timeout"; traceId?: string };
+  | {
+      outcome: "ok";
+      text: string;
+      traceId?: string;
+      usage?: { inputTokens: number; outputTokens: number };
+      model?: string;
+    }
+  | {
+      outcome: "partial";
+      text: string;
+      traceId?: string;
+      usage?: { inputTokens: number; outputTokens: number };
+      model?: string;
+    }
+  | {
+      outcome: "fallback";
+      text: string;
+      traceId?: string;
+      usage?: { inputTokens: number; outputTokens: number };
+      model?: string;
+    }
+  | {
+      outcome: "timeout";
+      traceId?: string;
+      usage?: { inputTokens: number; outputTokens: number };
+      model?: string;
+    };
 
 /** 首 token 超时熔断的内部信号（仅 streamTextChunks 内部 race 用，不外泄）。 */
 class FirstTokenTimeoutError extends Error {}
@@ -159,6 +183,7 @@ export class NodeRuntimeService {
         output: contract.fallback(input, reserved),
         fallbackUsed: true,
         validateSteps: [...steps, { step: "fallback", ok: true }],
+        usage: { inputTokens: 0, outputTokens: 0 },
       };
     }
 
@@ -173,6 +198,7 @@ export class NodeRuntimeService {
         output: contract.fallback(input, reserved),
         fallbackUsed: true,
         validateSteps: [...steps, { step: "fallback", ok: true }],
+        usage: { inputTokens: 0, outputTokens: 0 },
       };
     }
     // 后续统一用校验/归一后的值（含 Zod default，如 REPLY_CONTRACT.citations 缺省 []），
@@ -269,6 +295,7 @@ export class NodeRuntimeService {
             fallbackUsed: false,
             validateSteps: steps,
             traceId: span.spanContext().traceId,
+            usage: { inputTokens: uin, outputTokens: uout },
           };
         }
         steps.push({ step: first.step, ok: false, issues: first.issues });
@@ -293,6 +320,7 @@ export class NodeRuntimeService {
             fallbackUsed: false,
             validateSteps: steps,
             traceId: span.spanContext().traceId,
+            usage: { inputTokens: uin, outputTokens: uout },
           };
         }
         steps.push({ step: "repair", ok: false, issues: second.issues });
@@ -307,6 +335,7 @@ export class NodeRuntimeService {
           fallbackUsed: true,
           validateSteps: steps,
           traceId: span.spanContext().traceId,
+          usage: { inputTokens: uin, outputTokens: uout },
         };
       },
     );
@@ -513,18 +542,35 @@ export class NodeRuntimeService {
           // it.return() 由 finally 统一级联；此处只定状态并返回 outcome
           span.setStatus({ code: SpanStatusCode.ERROR, message: "first token timeout" });
           span.setAttribute(RAG.FALLBACK_USED, false);
-          return { outcome: "timeout", traceId };
+          return {
+            outcome: "timeout",
+            traceId,
+            usage: { ...usageAcc },
+            model: model.deploymentId ?? model.name,
+          };
         }
         interrupted = true; // 网络层异常：只看已产出（text 非空保留为 partial，空则下方 fallback）
       }
 
       if (text.length === 0) {
         span.setAttribute(RAG.FALLBACK_USED, true);
-        return { outcome: "fallback", text: contract.fallback(validInput, validReserved).text, traceId };
+        return {
+          outcome: "fallback",
+          text: contract.fallback(validInput, validReserved).text,
+          traceId,
+          usage: { ...usageAcc },
+          model: model.deploymentId ?? model.name,
+        };
       }
       span.setStatus({ code: SpanStatusCode.OK });
       span.setAttribute(RAG.FALLBACK_USED, false);
-      return { outcome: interrupted ? "partial" : "ok", text, traceId };
+      return {
+        outcome: interrupted ? "partial" : "ok",
+        text,
+        traceId,
+        usage: { ...usageAcc },
+        model: model.deploymentId ?? model.name,
+      };
     } finally {
       if (timer) clearTimeout(timer);
       // M8 T3：所有结束路径（ok/partial/fallback/timeout/abort）统一落 usage span 属性
