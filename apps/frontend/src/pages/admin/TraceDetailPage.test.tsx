@@ -70,6 +70,10 @@ function renderAt(id: string) {
 beforeEach(() => mocked.getTrace.mockResolvedValue(detail));
 
 describe("TraceDetailPage (M9 W2)", () => {
+  it("uses a wider responsive call-chain column", async () => {
+    renderAt("a".repeat(32));
+    expect(await screen.findByTestId("trace-call-chain")).toHaveStyle({ width: "34vw", minWidth: "560px", maxWidth: "680px" });
+  });
   it("renders head meta from real detail", async () => {
     renderAt("a".repeat(32));
     expect(await screen.findByText("退款助手")).toBeInTheDocument(); // Agent cell（唯一）

@@ -307,6 +307,17 @@ describe("应用详情骨架", () => {
     expect(screen.getByText("还没上线")).toBeInTheDocument();
   });
 
+  it("兜底话术节点只展示 Prompt，不展示模型及生成参数", async () => {
+    renderRoutes("/admin/applications/app1");
+    await screen.findByText("售后助手");
+    const fallbackNode = screen.getByTestId("prompt-node-fallback");
+    expect(within(fallbackNode).getByRole("combobox")).toBeInTheDocument();
+    expect(within(fallbackNode).queryByText("模型")).not.toBeInTheDocument();
+    expect(within(fallbackNode).queryByText("自由度")).not.toBeInTheDocument();
+    expect(within(fallbackNode).queryByText("温度")).not.toBeInTheDocument();
+    expect(within(fallbackNode).queryByText("Top P")).not.toBeInTheDocument();
+  });
+
   it("「上线这个版本」启用并触发上线核对（M7b）", async () => {
     mocked.startApplicationReleaseCheck.mockResolvedValue({
       id: "rc1",
@@ -425,10 +436,10 @@ describe("应用详情骨架", () => {
     await waitFor(() => expect(screen.getByText(/正在编辑/)).toHaveTextContent("v2"));
   });
 
-  it("对话测试骨架返回 unavailable → 渲染 M8 占位", async () => {
+  it("运行对话测试生成公开聊天链接并在新页面打开", async () => {
     renderRoutes("/admin/applications/app1");
-    fireEvent.click(await screen.findByRole("button", { name: /运行对话测试/ }));
-    expect(await screen.findByText("真实按版本对话测试将随 M8 编排上线")).toBeInTheDocument();
-    expect(mocked.tryApplicationVersionChat).toHaveBeenCalledWith("app1", "appv1");
+    const link = await screen.findByRole("link", { name: /运行对话测试/ });
+    expect(link).toHaveAttribute("href", "/chat/aftersale-bot");
+    expect(link).toHaveAttribute("target", "_blank");
   });
 });

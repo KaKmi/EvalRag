@@ -129,7 +129,7 @@ export function buildWaterfall(spans: TraceSpan[], selSid: string): WfRow[] {
     .map((s) => {
       const offsetMs = Date.parse(s.startTime) - t0;
       // 显示缩进 = 相对 chain 根深度 − 1（root 直接子 = 0，孙节点 = 20，对齐原型层级）。
-      const indent = Math.max(0, depthFromRoot(s, root!.spanId, byId) - 1) * 20;
+      const indent = Math.max(0, depthFromRoot(s, root!.spanId, byId) - 1) * 24;
       const isErr = isErrorCode(s.statusCode);
       return {
         sid: s.spanId,
