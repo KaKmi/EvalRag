@@ -79,6 +79,7 @@ export interface EvaluationMinuteAggregate extends EvaluationAggregate {
 
 export interface EvaluationAgentAggregate extends EvaluationAggregate {
   agentId: string;
+  agentName: string;
 }
 
 export interface LatestEvaluationSuccess {
@@ -329,22 +330,39 @@ export class ClickHouseEvaluationsRepository {
     if (!(await this.ensureEvalViews())) return [];
     const result = await this.clickhouse.query({
       query: `
-        SELECT agent_id, count() AS sample_count,
-          avg(faithfulness) AS faithfulness,
-          avg(answer_relevancy) AS answer_relevancy,
-          avg(context_precision) AS context_precision
-        FROM (${LATEST_EVAL_SQL})
-        WHERE judge_version = {judgeVersion:String}
-          AND evaluated_at >= {from:DateTime64(9)} AND evaluated_at < {to:DateTime64(9)}
-          AND ({agentId:String} = '' OR agent_id = {agentId:String})
-        GROUP BY agent_id
+        SELECT eligible.agent_id, eligible.agent_name,
+          coalesce(evaluated.sample_count, 0) AS sample_count,
+          evaluated.faithfulness, evaluated.answer_relevancy, evaluated.context_precision
+        FROM (
+          SELECT agent_id, argMax(agent_name, start_time) AS agent_name
+          FROM codecrush_traces
+          WHERE preview = 0
+            AND start_time >= {from:DateTime64(9)} AND start_time < {to:DateTime64(9)}
+            AND ({agentId:String} = '' OR agent_id = {agentId:String})
+          GROUP BY agent_id
+        ) AS eligible
+        LEFT JOIN (
+          SELECT agent_id, count() AS sample_count,
+            avg(faithfulness) AS faithfulness,
+            avg(answer_relevancy) AS answer_relevancy,
+            avg(context_precision) AS context_precision
+          FROM (${LATEST_EVAL_SQL})
+          WHERE judge_version = {judgeVersion:String}
+            AND evaluated_at >= {from:DateTime64(9)} AND evaluated_at < {to:DateTime64(9)}
+            AND ({agentId:String} = '' OR agent_id = {agentId:String})
+          GROUP BY agent_id
+        ) AS evaluated USING (agent_id)
         ORDER BY sample_count DESC, agent_id
       `,
       query_params: this.windowParams(window),
       format: "JSONEachRow",
     });
-    const rows = await result.json<AggregateRow & { agent_id: string }>();
-    return rows.map((row) => ({ agentId: row.agent_id, ...toAggregate(row) }));
+    const rows = await result.json<AggregateRow & { agent_id: string; agent_name: string }>();
+    return rows.map((row) => ({
+      agentId: row.agent_id,
+      agentName: row.agent_name || row.agent_id,
+      ...toAggregate(row),
+    }));
   }
 
   async countEligible(from: Date, to: Date, agentId?: string): Promise<number> {

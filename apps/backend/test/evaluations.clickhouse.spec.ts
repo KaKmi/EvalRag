@@ -67,6 +67,42 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
     expect(sql).toContain("SpanAttributes['error.message']");
     expect(sql).not.toContain("rag.eval.error");
   });
+
+  it("keeps eligible agents with no successful evaluations", async () => {
+    const clickhouse = {
+      command: jest.fn().mockResolvedValue(undefined),
+      query: jest
+        .fn()
+        .mockResolvedValueOnce(jsonResult([{ result: 1 }]))
+        .mockResolvedValueOnce(jsonResult([{ count: "1" }]))
+        .mockResolvedValueOnce(
+          jsonResult([
+            {
+              agent_id: "agent-empty",
+              agent_name: "Empty Agent",
+              sample_count: "0",
+              faithfulness: null,
+              answer_relevancy: null,
+              context_precision: null,
+            },
+          ]),
+        ),
+    };
+    const repo = new ClickHouseEvaluationsRepository(clickhouse as never);
+    await expect(repo.getByAgent({ from, to, judgeVersion: "online-v1" })).resolves.toEqual([
+      {
+        agentId: "agent-empty",
+        agentName: "Empty Agent",
+        sampleCount: 0,
+        faithfulness: null,
+        answerRelevancy: null,
+        contextPrecision: null,
+      },
+    ]);
+    const sql = clickhouse.query.mock.calls.at(-1)?.[0].query as string;
+    expect(sql).toContain("FROM codecrush_traces");
+    expect(sql).toContain("LEFT JOIN");
+  });
 });
 
 const enabled = process.env.RUN_CLICKHOUSE_TESTS === "1";

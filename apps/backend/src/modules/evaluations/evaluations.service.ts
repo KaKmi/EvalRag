@@ -113,11 +113,15 @@ export class EvaluationsService {
       })),
       byAgent: byAgent.map((item) => ({
         agentId: item.agentId,
-        agentName: item.agentId,
+        agentName: item.agentName,
         scores: aggregateScores(item),
         sampleCount: item.sampleCount,
       })),
-      lowSamples: lowSamples.map((item) => {
+      lowSamples: lowSamples.filter((item) =>
+        item.faithfulness < settings.faithfulnessThreshold ||
+        item.answerRelevancy < settings.answerRelevancyThreshold ||
+        item.contextPrecision < settings.contextPrecisionThreshold,
+      ).map((item) => {
         const scores = {
           faithfulness: score(item.faithfulness) ?? 0,
           answerRelevancy: score(item.answerRelevancy) ?? 0,

@@ -102,4 +102,21 @@ describe("EvaluationsService", () => {
     const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
     expect(result.metrics.faithfulness).toMatchObject({ value: 90, previousDelta: null });
   });
+
+  it("does not label fully passing rows as low samples", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getLowSamples.mockResolvedValue([
+      {
+        targetTraceId: "b".repeat(32),
+        question: "high quality answer",
+        faithfulness: 100,
+        answerRelevancy: 100,
+        contextPrecision: 100,
+        evidence: "{}",
+      },
+    ]);
+
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.lowSamples).toEqual([]);
+  });
 });
