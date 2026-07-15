@@ -409,7 +409,7 @@
 <table>
 <tr><th style="width:200px">位置</th><th>变化</th></tr>
 <tr><td>Trace 列表</td><td>新增「质量」列(三分最低值,低于阈值红字;未抽评显示「—」);快筛条新增「低质量」;支持深链参数 <code>evalMetric/evalMax/evalVerdict</code>(接屏1下钻,复用现有 URL 水合机制)</td></tr>
-<tr><td>详情·质量面板</td><td>该条被评过 → 显示三分 + 裁判/时间 + 「判分依据」抽屉;未评过 → 面板折叠为一行「未抽样评测 · [立即评测]」(手动触发单条评测,30s 内出分)</td></tr>
+<tr><td>详情·质量面板</td><td><b>E-W1 只读:</b>该条被评过 → 显示三分 + 裁判/时间 + 「判分依据」抽屉;未评过 → 面板折叠为一行「未抽样评测」。手动「立即评测」延期到 E-W2,不属于 E-W1。</td></tr>
 <tr><td>详情·span 标注</td><td>retrieval span 挂精确率、generation span 挂忠实度;分数低的 span 自动高亮(复用「失败自动定位」机制,扩展为「低质量自动定位」)</td></tr>
 <tr><td>+ 加入评测集</td><td>弹窗:目标集(可新建)+ gold 答案编辑框(默认空,提示「留空则进集后为待补 gold」);成功后按钮变「已在评测集 · 查看」</td></tr>
 <tr><td>+ 加入问题池</td><td>手动入池(自动收集的补充);若已归属某簇 → toast「已在缺口 ×23 中 · 查看」</td></tr>
@@ -504,7 +504,7 @@ eval_watermark(worker_name pk, last_ts)   -- 水位线
 <tr><th>端点</th><th>用途</th></tr>
 <tr><td><code>GET /eval/quality/overview?from&to&agentId</code></td><td>屏1:三分窗口值+趋势+分应用(读 eval_1m state-merge)</td></tr>
 <tr><td><code>GET /eval/quality/traces/:traceId</code></td><td>单条 trace 的评分+判分依据(详情质量面板)</td></tr>
-<tr><td><code>POST /eval/quality/traces/:traceId/score</code></td><td>手动触发单条评测(「立即评测」)</td></tr>
+<tr><td><code>POST /eval/quality/traces/:traceId/score</code></td><td><b>E-W2:</b>手动触发单条评测(「立即评测」);E-W1 不实现此端点</td></tr>
 <tr><td><code>GET/POST /eval/sets · /eval/sets/:id/cases · POST /eval/sets/:id/import</code></td><td>屏2 CRUD/导入/从坏样本生成</td></tr>
 <tr><td><code>POST /eval/runs · GET /eval/runs/:id · POST /eval/runs/:id/stop</code></td><td>§6/§7 发起、进度、停止</td></tr>
 <tr><td><code>GET /eval/compare?a=&b=</code></td><td>屏4:校验可比性 + 逐指标/逐用例 Δ</td></tr>
@@ -642,7 +642,7 @@ eval_watermark(worker_name pk, last_ts)   -- 水位线
 <table>
 <tr><th style="width:150px">组件</th><th>状态</th><th>事件 → 反馈</th></tr>
 <tr><td>列表「质量」列</td><td>已评:三分最低值(低于阈值红字);未评:「—」;评分中:蓝点</td><td>列头可按质量升序;快筛条新增「低质量」chip</td></tr>
-<tr><td>详情·质量面板</td><td>四态:未评(折叠一行+[立即评测])/ 评分中(Spin,轮询 5s×6 次)/ 已评(三分+裁判+时间+[判分依据])/ 评失败(橙「裁判调用失败」+[重试])</td><td>[立即评测] → 评分中;超时未出 → 转评失败态</td></tr>
+<tr><td>详情·质量面板</td><td><b>E-W1:</b>只读三态:未评/已评/评失败,不显示操作按钮。<b>E-W2:</b>再增加立即评测、评分中轮询与重试</td><td>E-W1 只随异步 worker 结果更新;手动事件延期到 E-W2</td></tr>
 <tr><td>span 质量标注</td><td>retrieval 挂精确率 tag、generation 挂忠实度 tag;任一 &lt;70 该 span 高亮(同失败定位样式,颜色橙)</td><td>点 tag → 打开判分依据对应段</td></tr>
 <tr><td>[+ 加入评测集]</td><td>已在集:按钮变「已在评测集·查看」</td><td>弹窗:目标集 Select(+新建)+ gold 要点编辑(可留空→入集为待补 gold);成功 toast + 按钮态切换</td></tr>
 <tr><td>[+ 加入问题池]</td><td>已在池:toast「已在缺口「×23」中 · 查看」</td><td>成功 → toast「已加入问题池」</td></tr>
@@ -655,9 +655,9 @@ eval_watermark(worker_name pk, last_ts)   -- 水位线
 <div class="mock"><div class="mtitle">原型 · 补充状态示例:质量面板四态 / 判分依据抽屉</div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
 <div>
-<div class="mcard" style="margin-bottom:6px;font-size:12px"><span class="muted">未评:</span> 质量评分 — 未抽样评测 <span class="btns" style="font-size:11px">立即评测</span></div>
-<div class="mcard" style="margin-bottom:6px;font-size:12px"><span class="muted">评分中:</span> 质量评分 — <span style="color:#1677ff">● 裁判评分中…(约 30s)</span></div>
-<div class="mcard" style="font-size:12px;border-color:#ffd591"><span class="muted">评失败:</span> 质量评分 — <span style="color:#d46b08">裁判调用失败</span> <span class="btns" style="font-size:11px">重试</span></div>
+<div class="mcard" style="margin-bottom:6px;font-size:12px"><span class="muted">E-W1 未评:</span> 质量评分 — 未抽样评测（只读）</div>
+<div class="mcard" style="margin-bottom:6px;font-size:12px"><span class="muted">E-W2 扩展:</span> 质量评分 — <span style="color:#1677ff">● 裁判评分中…(约 30s)</span></div>
+<div class="mcard" style="font-size:12px;border-color:#ffd591"><span class="muted">E-W1 评失败:</span> 质量评分 — <span style="color:#d46b08">裁判调用失败</span>（只读;重试操作延期到 E-W2）</div>
 </div>
 <div class="mcard"><div style="font-size:12px;font-weight:600;margin-bottom:6px">判分依据 · 忠实度 41</div>
 <div style="font-size:11.5px;line-height:1.9">
@@ -709,7 +709,7 @@ eval_watermark(worker_name pk, last_ts)   -- 水位线
 <tr><td>open</td><td>[修检索参数](用户)</td><td>—</td><td>ticketed</td><td>跳应用配置携带 fromGap</td></tr>
 <tr><td colspan="5" class="muted">「已进评测集」为叠加标志位(可与任意状态共存),不是排他状态。</td></tr>
 </table>
-<h4>D. 单条 trace 评分(质量面板视角)</h4>
+<h4>D. 单条 trace 评分(质量面板视角;以下手动事件与 scoring 交互属于 E-W2,E-W1 仅只读展示 worker 终态)</h4>
 <table>
 <tr><th>当前态</th><th>事件</th><th>次态</th><th>UI</th></tr>
 <tr><td>unscored</td><td>worker 抽中 / 用户[立即评测]</td><td>scoring</td><td>面板「评分中」;轮询 5s×6</td></tr>

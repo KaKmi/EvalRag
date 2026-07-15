@@ -54,6 +54,7 @@ describe("online quality contracts", () => {
   });
 
   it("limits the requested window", () => {
+    expect(QualityOverviewQuerySchema.safeParse({}).success).toBe(true);
     expect(
       QualityOverviewQuerySchema.safeParse({
         from: "2026-07-01T00:00:00.000Z",
@@ -67,6 +68,66 @@ describe("online quality contracts", () => {
         to: "2026-07-15T00:00:00.000Z",
       }).success,
     ).toBe(false);
+  });
+
+  it("accepts the trend and low-sample shapes consumed by the quality page", () => {
+    const base = {
+      meta: {
+        enabled: true,
+        sampleRate: 0.1,
+        evaluatedCount: 1,
+        eligibleCount: 10,
+        judgeModel: "qwen-plus",
+        judgeVersion: "online-v1",
+        status: "healthy",
+        lagSeconds: 10,
+        backlog: 0,
+      },
+      metrics: {
+        faithfulness: { value: 70, previousDelta: null, sampleCount: 1, threshold: 85, low: true },
+        answerRelevancy: {
+          value: 80,
+          previousDelta: null,
+          sampleCount: 1,
+          threshold: 80,
+          low: false,
+        },
+        contextPrecision: {
+          value: 90,
+          previousDelta: null,
+          sampleCount: 1,
+          threshold: 80,
+          low: false,
+        },
+      },
+      trend: [
+        {
+          bucket: "2026-07-15T01:00:00.000Z",
+          faithfulness: 70,
+          answerRelevancy: 80,
+          contextPrecision: 90,
+          sampleCount: 9,
+          insufficientSample: true,
+        },
+      ],
+      byAgent: [],
+      lowSamples: [
+        {
+          targetTraceId: "a".repeat(32),
+          question: "退款多久",
+          minMetric: "faithfulness",
+          minScore: 70,
+          evidenceSummary: "第二条主张缺少依据",
+        },
+      ],
+    };
+    expect(QualityOverviewResponseSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("rejects a daily cap above the operational limit", () => {
+    expect(UpdateOnlineEvalSettingsRequestSchema.safeParse({ dailyCap: 10_001 }).success).toBe(
+      false,
+    );
   });
 
   it("requires both model ids before enabling", () => {

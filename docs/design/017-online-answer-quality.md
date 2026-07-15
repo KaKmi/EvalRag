@@ -47,10 +47,12 @@ online_eval_settings(
   daily_cap, judge_version, updated_at
 )
 
-online_eval_watermarks(
-  id primary key, watermark_time, watermark_trace_id,
-  lease_owner, lease_expires_at, consecutive_failures,
-  last_cycle_status, last_error, updated_at
+eval_watermarks(
+  worker_name primary key, last_ts, last_trace_id,
+  daily_date, daily_count,
+  lease_owner, lease_until,
+  last_run_at, last_success_at,
+  consecutive_failures, last_error, updated_at
 )
 ```
 

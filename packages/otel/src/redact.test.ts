@@ -154,6 +154,7 @@ describe("RedactingSpanExporter", () => {
       spanProcessors: [new SimpleSpanProcessor(new RedactingSpanExporter(inner))],
     });
     const span = provider.getTracer("t").startSpan("rag.pipeline");
+    span.setAttribute(RAG.EVAL_STATUS, "success");
     span.setAttribute(CODECRUSH_IO.INPUT, "我的邮箱 alice@example.com");
     span.setAttribute(CODECRUSH_IO.OUTPUT, "已记录");
     span.end();
@@ -162,5 +163,23 @@ describe("RedactingSpanExporter", () => {
     expect(got.attributes[CODECRUSH_IO.INPUT]).toBe("我的邮箱 [REDACTED_EMAIL]");
     expect(got.attributes[CODECRUSH_IO.OUTPUT]).toBe("已记录");
     expect(got.attributes[CODECRUSH_REDACTED]).toBe(true);
+  });
+
+  it("真实 SDK 管线脱敏 rag.eval evidence", async () => {
+    const inner = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(new RedactingSpanExporter(inner))],
+    });
+    const span = provider.getTracer("eval").startSpan("rag.eval");
+    span.setAttribute(RAG.EVAL_STATUS, "success");
+    span.setAttribute(
+      CODECRUSH_IO.OUTPUT,
+      JSON.stringify({ evidence: ["alice@example.com", "13800001111"] }),
+    );
+    span.end();
+    await provider.forceFlush();
+    const exported = String(inner.getFinishedSpans()[0]?.attributes[CODECRUSH_IO.OUTPUT]);
+    expect(exported).toContain("[REDACTED_EMAIL]");
+    expect(exported).toContain("[REDACTED_PHONE]");
   });
 });

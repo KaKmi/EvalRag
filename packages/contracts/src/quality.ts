@@ -63,11 +63,12 @@ export type TraceEvaluationSummary = z.infer<typeof TraceEvaluationSummarySchema
 
 export const QualityOverviewQuerySchema = z
   .object({
-    from: isoString,
-    to: isoString,
+    from: isoString.optional(),
+    to: isoString.optional(),
     agentId: z.string().min(1).optional(),
   })
   .superRefine(({ from, to }, ctx) => {
+    if (!from || !to) return;
     const start = Date.parse(from);
     const end = Date.parse(to);
     if (end <= start) {
@@ -93,7 +94,7 @@ const qualityPoint = z.object({
   answerRelevancy: QualityScoreSchema.nullable(),
   contextPrecision: QualityScoreSchema.nullable(),
   sampleCount: count,
-  judgeVersion: z.string().min(1),
+  insufficientSample: z.boolean(),
 });
 
 const qualityAgent = z.object({
@@ -104,13 +105,11 @@ const qualityAgent = z.object({
 });
 
 const qualityLowSample = z.object({
-  traceId: z.string().regex(/^[a-f0-9]{32}$/i),
-  agentId: z.string().min(1),
-  agentName: z.string().min(1),
-  userInput: z.string(),
+  targetTraceId: z.string().regex(/^[a-f0-9]{32}$/i),
+  question: z.string(),
   minMetric: QualityMetricSchema,
   minScore: QualityScoreSchema,
-  evaluatedAt: isoString,
+  evidenceSummary: z.string().max(300),
 });
 
 export const QualityOverviewResponseSchema = z.object({
@@ -145,7 +144,7 @@ export const OnlineEvalSettingsSchema = z.object({
   faithfulnessThreshold: QualityScoreSchema,
   answerRelevancyThreshold: QualityScoreSchema,
   contextPrecisionThreshold: QualityScoreSchema,
-  dailyCap: z.number().int().positive(),
+  dailyCap: z.number().int().min(1).max(10_000),
   judgeVersion: z.string().min(1),
   updatedAt: isoString,
 });
