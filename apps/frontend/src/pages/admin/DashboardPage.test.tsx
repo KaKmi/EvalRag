@@ -13,17 +13,53 @@ vi.mock("../../api/client", () => ({
 const mocked = vi.mocked(client);
 function LocationProbe() {
   const location = useLocation();
-  return <div data-testid="location">{location.pathname}{location.search}</div>;
+  return (
+    <div data-testid="location">
+      {location.pathname}
+      {location.search}
+    </div>
+  );
 }
 const metrics: MetricsOverviewResponse = {
   window: {
-    qaCount: 1284, failCount: 64, failRate: 0.05, fallbackCount: 103, fallbackRate: 0.08,
-    lowRecallCount: 4, noCiteCount: 3, refusalCount: 2, timeoutCount: 1,
-    p50Ms: 2100, p95Ms: 4800, inputTokens: 12000, outputTokens: 3000, costUsd: 0,
+    qaCount: 1284,
+    failCount: 64,
+    failRate: 0.05,
+    fallbackCount: 103,
+    fallbackRate: 0.08,
+    lowRecallCount: 4,
+    noCiteCount: 3,
+    refusalCount: 2,
+    timeoutCount: 1,
+    p50Ms: 2100,
+    p95Ms: 4800,
+    inputTokens: 12000,
+    outputTokens: 3000,
+    costUsd: 0,
   },
   series: [
-    { bucket: "2026-07-13T00:00:00.000Z", qaCount: 500, failCount: 10, fallbackCount: 20, p50Ms: 2000, p95Ms: 4000, inputTokens: 5000, outputTokens: 1000, costUsd: 0 },
-    { bucket: "2026-07-14T00:00:00.000Z", qaCount: 784, failCount: 54, fallbackCount: 83, p50Ms: 2200, p95Ms: 4800, inputTokens: 7000, outputTokens: 2000, costUsd: 0 },
+    {
+      bucket: "2026-07-13T00:00:00.000Z",
+      qaCount: 500,
+      failCount: 10,
+      fallbackCount: 20,
+      p50Ms: 2000,
+      p95Ms: 4000,
+      inputTokens: 5000,
+      outputTokens: 1000,
+      costUsd: 0,
+    },
+    {
+      bucket: "2026-07-14T00:00:00.000Z",
+      qaCount: 784,
+      failCount: 54,
+      fallbackCount: 83,
+      p50Ms: 2200,
+      p95Ms: 4800,
+      inputTokens: 7000,
+      outputTokens: 2000,
+      costUsd: 0,
+    },
   ],
 };
 const appMetrics = {
@@ -44,14 +80,27 @@ const appMetrics = {
       keyword: { count: 1, eligibleCount: 8, rate: 0.125 },
       rerank: { count: 1, eligibleCount: 5, rate: 0.2 },
     },
-    confidence: { sampleCount: 8, p50: 0.75, buckets: [
-      { key: "very_low" as const, count: 1 }, { key: "low" as const, count: 2 },
-      { key: "medium" as const, count: 3 }, { key: "high" as const, count: 2 },
-    ] },
-    citations: { sampleCount: 10, averageCount: 1.8, countBuckets: [
-      { key: "none" as const, count: 2 }, { key: "one" as const, count: 3 },
-      { key: "two_three" as const, count: 4 }, { key: "four_plus" as const, count: 1 },
-    ], coverage: { full: 6, partial: 3, unknown: 1 } },
+    confidence: {
+      sampleCount: 8,
+      p50: 0.75,
+      buckets: [
+        { key: "very_low" as const, count: 1 },
+        { key: "low" as const, count: 2 },
+        { key: "medium" as const, count: 3 },
+        { key: "high" as const, count: 2 },
+      ],
+    },
+    citations: {
+      sampleCount: 10,
+      averageCount: 1.8,
+      countBuckets: [
+        { key: "none" as const, count: 2 },
+        { key: "one" as const, count: 3 },
+        { key: "two_three" as const, count: 4 },
+        { key: "four_plus" as const, count: 1 },
+      ],
+      coverage: { full: 6, partial: 3, unknown: 1 },
+    },
   },
 };
 
@@ -62,7 +111,11 @@ beforeEach(() => {
 });
 
 it("loads real metrics and does not present reserved zero cost as actual spend", async () => {
-  render(<MemoryRouter><DashboardPage /></MemoryRouter>);
+  render(
+    <MemoryRouter>
+      <DashboardPage />
+    </MemoryRouter>,
+  );
   expect(await screen.findByText("1,284")).toBeInTheDocument();
   expect(screen.getByText("8.0%")).toHaveStyle({ color: "#ff4d4f" });
   expect(screen.getByText("真实计价尚未启用")).toBeInTheDocument();
@@ -72,23 +125,34 @@ it("loads real metrics and does not present reserved zero cost as actual spend",
 
 it("uses the application metrics endpoint after selecting an application", async () => {
   mocked.getApplications.mockResolvedValueOnce([{ id: "app-1", name: "退款助手" } as never]);
-  render(<MemoryRouter><DashboardPage /></MemoryRouter>);
+  render(
+    <MemoryRouter>
+      <DashboardPage />
+    </MemoryRouter>,
+  );
   await screen.findByText("1,284");
   fireEvent.mouseDown(screen.getByLabelText("应用筛选"));
   fireEvent.click(await screen.findByText("退款助手"));
-  await waitFor(() => expect(mocked.getApplicationMetrics).toHaveBeenCalledWith("app-1", expect.any(Object)));
+  await waitFor(() =>
+    expect(mocked.getApplicationMetrics).toHaveBeenCalledWith("app-1", expect.any(Object)),
+  );
   expect(await screen.findByText("退款助手 · 分阶段耗时")).toBeInTheDocument();
   expect(screen.getByText("检索总段")).toBeInTheDocument();
   expect(screen.getByText("重排")).toBeInTheDocument();
   expect(screen.getAllByText("—").length).toBeGreaterThan(0);
-  expect(screen.getByText("TTFT P95")).toBeInTheDocument();
+  expect(screen.getByText("首字延迟 P95")).toBeInTheDocument();
   expect(screen.getByText("480ms")).toBeInTheDocument();
-  expect(screen.getByText("生成 token/s（首 token 后）")).toBeInTheDocument();
+  expect(screen.getByText("生成速度 P50")).toBeInTheDocument();
+  expect(screen.getByText("24.0 token/s")).toBeInTheDocument();
 });
 
 it("renders a visible API error instead of stale mock data", async () => {
   mocked.getMetricsOverview.mockRejectedValueOnce(new Error("ClickHouse unavailable"));
-  render(<MemoryRouter><DashboardPage /></MemoryRouter>);
+  render(
+    <MemoryRouter>
+      <DashboardPage />
+    </MemoryRouter>,
+  );
   expect(await screen.findByText("运行指标加载失败")).toBeInTheDocument();
   expect(screen.getByText("ClickHouse unavailable")).toBeInTheDocument();
 });
@@ -98,7 +162,15 @@ it("drills repair metrics into the exact signal/model trace filter", async () =>
   render(
     <MemoryRouter initialEntries={["/admin/dashboard"]}>
       <Routes>
-        <Route path="*" element={<><DashboardPage /><LocationProbe /></>} />
+        <Route
+          path="*"
+          element={
+            <>
+              <DashboardPage />
+              <LocationProbe />
+            </>
+          }
+        />
       </Routes>
     </MemoryRouter>,
   );

@@ -29,8 +29,9 @@ describe("ClickHouseEvaluationsRepository", () => {
       expect.objectContaining({
         query: expect.stringContaining("t.preview = 0"),
         query_params: expect.objectContaining({
-          lastTs: cursor.lastTs.toISOString(),
+          lastTs: "2026-07-15 01:00:00.000",
           lastTraceId: cursor.lastTraceId,
+          upperBound: "2026-07-15 01:55:00.000",
           limit: 500,
         }),
       }),
