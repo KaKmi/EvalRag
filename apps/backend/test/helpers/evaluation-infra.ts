@@ -21,7 +21,7 @@ export interface EvaluationInfraHarness {
   db: ReturnType<typeof drizzle>;
   clickhouse: ClickHouseClient;
   resetAndMigrate(): Promise<void>;
-  seedPgInput(traceId: string): Promise<{ chunkId: string }>;
+  seedPgInput(traceId: string, agentId: string): Promise<{ chunkId: string }>;
   insertSpan(row: OtelSpanFixture): Promise<void>;
   cleanup(traceIds: string[]): Promise<void>;
   close(): Promise<void>;
@@ -52,7 +52,7 @@ export async function createEvaluationInfraHarness(): Promise<EvaluationInfraHar
         }
       }
     },
-    async seedPgInput(traceId) {
+    async seedPgInput(traceId, agentId) {
       await pool.query(
         `INSERT INTO model_providers
           (id,type,protocol,name,base_url,api_key_enc,params,enabled) VALUES
@@ -79,7 +79,8 @@ export async function createEvaluationInfraHarness(): Promise<EvaluationInfraHar
         [doc.rows[0].id, kb.rows[0].id, `[${Array(1024).fill(0).join(",")}]`],
       );
       const conversation = await pool.query<{ id: string }>(
-        "INSERT INTO conversations(agent_id,title) VALUES ('agent-e2e','refund') RETURNING id",
+        "INSERT INTO conversations(agent_id,title) VALUES ($1,'refund') RETURNING id",
+        [agentId],
       );
       await pool.query(
         `INSERT INTO messages(conv_id,role,content,trace_id) VALUES
@@ -137,7 +138,7 @@ export async function createEvaluationInfraHarness(): Promise<EvaluationInfraHar
       );
       await pool.query("DELETE FROM eval_watermarks WHERE worker_name='online-quality-v1'");
       await pool.query("DELETE FROM messages");
-      await pool.query("DELETE FROM conversations WHERE agent_id='agent-e2e'");
+      await pool.query("DELETE FROM conversations WHERE title='refund'");
       await pool.query("DELETE FROM chunks WHERE section='policy'");
       await pool.query("DELETE FROM documents WHERE blob_key='e2e'");
       await pool.query("DELETE FROM knowledge_bases WHERE name LIKE 'e2e-%'");

@@ -188,6 +188,7 @@ describeInfra("E-W1 infrastructure flow", () => {
   const targetTraceId = randomUUID().replaceAll("-", "");
   const previewTraceId = randomUUID().replaceAll("-", "");
   const evaluationTraceId = randomUUID().replaceAll("-", "");
+  const agentId = `agent-e2e-${targetTraceId.slice(0, 12)}`;
   const from = "2026-07-15T01:00:00.000Z";
   const to = "2026-07-15T03:00:00.000Z";
   const fakeModels = {
@@ -249,7 +250,7 @@ describeInfra("E-W1 infrastructure flow", () => {
     "rag.eval.answer_relevancy": String(score),
     "rag.eval.context_precision": String(score),
     "rag.eval.judge_model": "judge-1",
-    "gen_ai.agent.id": "agent-e2e",
+    "gen_ai.agent.id": agentId,
     "gen_ai.request.model": "generation-1",
   });
 
@@ -344,7 +345,7 @@ describeInfra("E-W1 infrastructure flow", () => {
       "UPDATE eval_watermarks SET last_ts=$1,last_trace_id='' WHERE worker_name=$2",
       ["2026-07-15T01:00:00.000Z", "online-quality-v1"],
     );
-    const { chunkId } = await harness.seedPgInput(targetTraceId);
+    const { chunkId } = await harness.seedPgInput(targetTraceId, agentId);
     await harness.insertSpan({
       traceId: targetTraceId,
       spanId: "1".repeat(16),
@@ -355,7 +356,7 @@ describeInfra("E-W1 infrastructure flow", () => {
         "rag.preview": "false",
         "codecrush.io.input": "退款期限多久",
         "codecrush.io.output": "七天内可以退款",
-        "gen_ai.agent.id": "agent-e2e",
+        "gen_ai.agent.id": agentId,
         "gen_ai.agent.name": "退款助手",
         "gen_ai.request.model": "generation-1",
         "rag.fallback.used": "true",
@@ -381,7 +382,7 @@ describeInfra("E-W1 infrastructure flow", () => {
       attributes: {
         "codecrush.span.kind": "chain",
         "rag.preview": "true",
-        "gen_ai.agent.id": "agent-e2e",
+        "gen_ai.agent.id": agentId,
       },
     });
 
@@ -401,8 +402,13 @@ describeInfra("E-W1 infrastructure flow", () => {
       scores: { faithfulness: 100, answerRelevancy: 100, contextPrecision: 0 },
       thresholds: { faithfulness: 85, answerRelevancy: 80, contextPrecision: 80 },
     });
-    const overview = await service.getOverview({ from, to });
-    const list = await traces.listTraces({ page: 1, pageSize: 20, evalVerdict: "low" });
+    const overview = await service.getOverview({ from, to, agentId });
+    const list = await traces.listTraces({
+      page: 1,
+      pageSize: 20,
+      agentId,
+      evalVerdict: "low",
+    });
     expect(overview.meta.evaluatedCount).toBe(1);
     expect(overview.metrics).toMatchObject({
       faithfulness: { value: 100, threshold: 85, low: false },
@@ -423,7 +429,7 @@ describeInfra("E-W1 infrastructure flow", () => {
 
     await request(app.getHttpServer())
       .get("/api/eval/quality/overview")
-      .query({ from, to })
+      .query({ from, to, agentId })
       .expect(200)
       .expect((response) => expect(response.body.meta.evaluatedCount).toBe(1));
     await request(app.getHttpServer())
@@ -456,7 +462,7 @@ describeInfra("E-W1 infrastructure flow", () => {
       .expect(200);
     await request(app.getHttpServer())
       .get("/api/traces")
-      .query({ evalVerdict: "low", page: 1, pageSize: 20 })
+      .query({ evalVerdict: "low", agentId, page: 1, pageSize: 20 })
       .expect(200)
       .expect((response) =>
         expect(response.body.items).toEqual([
@@ -477,7 +483,7 @@ describeInfra("E-W1 infrastructure flow", () => {
   });
 
   it("deduplicates cross-minute retry spans in the API", async () => {
-    await harness.seedPgInput(targetTraceId);
+    await harness.seedPgInput(targetTraceId, agentId);
     await evaluationsRepo.updateSettings(settingsUpdate);
     await harness.insertSpan({
       traceId: evaluationTraceId,
@@ -493,13 +499,13 @@ describeInfra("E-W1 infrastructure flow", () => {
       name: "rag.eval",
       attributes: evalAttributes(targetTraceId, "online-v1", 90),
     });
-    const overview = await service.getOverview({ from, to });
+    const overview = await service.getOverview({ from, to, agentId });
     expect(overview.meta.evaluatedCount).toBe(1);
     expect(overview.metrics.faithfulness.value).toBe(90);
   });
 
   it("never evaluates a preview-only trace", async () => {
-    await harness.seedPgInput(targetTraceId);
+    await harness.seedPgInput(targetTraceId, agentId);
     await evaluationsRepo.updateSettings(settingsUpdate);
     await evaluationsRepo.getOrCreateWatermark("online-quality-v1", fixedNow);
     await harness.pool.query(
@@ -514,7 +520,7 @@ describeInfra("E-W1 infrastructure flow", () => {
       attributes: {
         "codecrush.span.kind": "chain",
         "rag.preview": "true",
-        "gen_ai.agent.id": "agent-e2e",
+        "gen_ai.agent.id": agentId,
       },
     });
     const result = await processor.processCycle("online-quality-v1", fixedNow);
@@ -525,7 +531,7 @@ describeInfra("E-W1 infrastructure flow", () => {
   });
 
   it("falls back to an older successful version and marks it non-current", async () => {
-    await harness.seedPgInput(targetTraceId);
+    await harness.seedPgInput(targetTraceId, agentId);
     await evaluationsRepo.updateSettings(settingsUpdate);
     await harness.insertSpan({
       traceId: evaluationTraceId,
