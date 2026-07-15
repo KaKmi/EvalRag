@@ -11,9 +11,12 @@ import { EvaluationSpanEmitter } from "./evaluation-span.emitter";
 import { EvaluationWorkerProcessor } from "./evaluation-worker.processor";
 import { EvaluationsRepository } from "./evaluations.repository";
 import { FaithfulnessEvaluator } from "./faithfulness.evaluator";
+import { EvaluationsController } from "./evaluations.controller";
+import { EvaluationsService } from "./evaluations.service";
 
 @Module({
   imports: [ConversationsModule, ChunksModule, ModelsModule],
+  controllers: [EvaluationsController],
   providers: [
     EvaluationsRepository,
     ClickHouseEvaluationsRepository,
@@ -24,6 +27,7 @@ import { FaithfulnessEvaluator } from "./faithfulness.evaluator";
     EvaluationJudgeService,
     EvaluationSpanEmitter,
     EvaluationWorkerProcessor,
+    EvaluationsService,
   ],
   exports: [EvaluationsRepository],
 })
