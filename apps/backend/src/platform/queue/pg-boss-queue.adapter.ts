@@ -3,7 +3,7 @@ import { Injectable } from "@nestjs/common";
 // 实测 `import PgBoss from "pg-boss"` 在本仓库 CommonJS 编译下会拿到 undefined，
 // 故此处用 named type-only import，偏离 brief 里的默认导入写法。
 import type { PgBoss } from "pg-boss";
-import type { JobOptions, Queue } from "./queue.port";
+import type { JobOptions, Queue, ScheduleOptions } from "./queue.port";
 
 @Injectable()
 export class PgBossQueueAdapter implements Queue {
@@ -42,5 +42,15 @@ export class PgBossQueueAdapter implements Queue {
         await handler(job.data);
       }
     });
+  }
+
+  async schedule(
+    jobName: string,
+    cron: string,
+    data: unknown,
+    opts: ScheduleOptions = {},
+  ): Promise<void> {
+    await this.ensureQueue(jobName);
+    await this.boss.schedule(jobName, cron, data as object, opts);
   }
 }

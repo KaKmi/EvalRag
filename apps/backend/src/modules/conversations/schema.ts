@@ -1,5 +1,15 @@
 import type { FallbackInfo } from "@codecrush/contracts";
-import { boolean, index, jsonb, pgTable, real, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  bigserial,
+  boolean,
+  index,
+  jsonb,
+  pgTable,
+  real,
+  text,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
 
 // 域内 schema：零 service 引用（003 不变量 8）。对齐 013 Design「会话持久化」。
 // agentId/userId 落 text 不 FK：agentId 语义上指向 applications，但 M8 阶段会话按逻辑标识隔离，
@@ -17,6 +27,7 @@ export const messages = pgTable(
   "messages",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    sequence: bigserial("sequence", { mode: "number" }).notNull().unique(),
     convId: uuid("conv_id")
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
@@ -32,6 +43,7 @@ export const messages = pgTable(
   },
   (t) => ({
     convIdIndex: index("messages_conv_id_idx").on(t.convId),
+    convIdSequenceIndex: index("messages_conv_id_sequence_idx").on(t.convId, t.sequence),
   }),
 );
 

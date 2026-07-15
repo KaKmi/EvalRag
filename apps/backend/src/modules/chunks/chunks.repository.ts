@@ -37,6 +37,14 @@ const DELETE_BATCH_SIZE = 1000;
 export class ChunksRepository {
   constructor(@Inject(DRIZZLE) private readonly db: DB) {}
 
+  async findByIds(ids: string[]): Promise<Array<{ id: string; text: string }>> {
+    if (ids.length === 0) return [];
+    return await this.db
+      .select({ id: chunks.id, text: chunks.text })
+      .from(chunks)
+      .where(inArray(chunks.id, ids));
+  }
+
   async findPage(
     docId: string,
     version: number,

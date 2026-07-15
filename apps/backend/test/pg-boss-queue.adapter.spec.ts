@@ -22,6 +22,9 @@ function makeFakeBoss() {
       }
       return undefined;
     }),
+    schedule: jest.fn(async (name: string) => {
+      if (!createdQueues.has(name)) throw new Error(`Queue ${name} does not exist`);
+    }),
     start: jest.fn(async () => undefined),
     stop: jest.fn(async () => undefined),
   };
@@ -86,5 +89,23 @@ describe("PgBossQueueAdapter", () => {
     await adapter.publish("ingest-document", { documentId: "d1" });
     expect(boss.createQueue).toHaveBeenCalledTimes(2);
     expect(boss.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("schedule ensures the queue then forwards cron, payload and stable key", async () => {
+    const boss = makeFakeBoss();
+    const adapter = new PgBossQueueAdapter(boss as never);
+    await adapter.schedule(
+      "online-quality-evaluation",
+      "*/15 * * * *",
+      { workerName: "online-quality-v1" },
+      { tz: "UTC", key: "online-quality-v1", retryLimit: 1 },
+    );
+    expect(boss.createQueue).toHaveBeenCalledWith("online-quality-evaluation");
+    expect(boss.schedule).toHaveBeenCalledWith(
+      "online-quality-evaluation",
+      "*/15 * * * *",
+      { workerName: "online-quality-v1" },
+      { tz: "UTC", key: "online-quality-v1", retryLimit: 1 },
+    );
   });
 });

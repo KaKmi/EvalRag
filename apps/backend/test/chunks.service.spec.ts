@@ -15,7 +15,11 @@ describe("ChunksService.listPage", () => {
       docsRepo as unknown as DocumentsRepository,
     );
     await svc.listPage("d1", { offset: 0, limit: 20 });
-    expect(chunksRepo.findPage).toHaveBeenCalledWith("d1", 3, { offset: 0, limit: 20, q: undefined });
+    expect(chunksRepo.findPage).toHaveBeenCalledWith("d1", 3, {
+      offset: 0,
+      limit: 20,
+      q: undefined,
+    });
   });
 
   it("按查询关键字透传给 repository", async () => {
@@ -106,5 +110,37 @@ describe("ChunksService.batchDelete", () => {
     const result = await svc.batchDelete(["c1", "c2"]);
     expect(chunksRepo.batchDelete).toHaveBeenCalledWith(["c1", "c2"]);
     expect(result).toEqual({ deletedCount: 2 });
+  });
+});
+
+describe("ChunksService.findByIds", () => {
+  it("按请求顺序返回找到的切片并跳过缺失 id", async () => {
+    const chunksRepo = {
+      findByIds: jest.fn(async () => [
+        { id: "c1", text: "第一段" },
+        { id: "c3", text: "第三段" },
+      ]),
+    };
+    const svc = new ChunksService(
+      chunksRepo as unknown as ChunksRepository,
+      { findById: jest.fn() } as unknown as DocumentsRepository,
+    );
+
+    await expect(svc.findByIds(["c3", "missing", "c1"])).resolves.toEqual([
+      { id: "c3", text: "第三段" },
+      { id: "c1", text: "第一段" },
+    ]);
+    expect(chunksRepo.findByIds).toHaveBeenCalledWith(["c3", "missing", "c1"]);
+  });
+
+  it("空 id 列表不访问 repository", async () => {
+    const chunksRepo = { findByIds: jest.fn() };
+    const svc = new ChunksService(
+      chunksRepo as unknown as ChunksRepository,
+      { findById: jest.fn() } as unknown as DocumentsRepository,
+    );
+
+    await expect(svc.findByIds([])).resolves.toEqual([]);
+    expect(chunksRepo.findByIds).not.toHaveBeenCalled();
   });
 });

@@ -54,6 +54,14 @@ export const RAG = {
   QUALITY_NO_CITATIONS: "rag.quality.no_citations",
   QUALITY_REFUSAL: "rag.quality.refusal",
   QUALITY_TIMEOUT: "rag.quality.timeout",
+  EVAL_TARGET_TRACE_ID: "rag.eval.target_trace_id",
+  EVAL_FAITHFULNESS: "rag.eval.faithfulness",
+  EVAL_ANSWER_RELEVANCY: "rag.eval.answer_relevancy",
+  EVAL_CONTEXT_PRECISION: "rag.eval.context_precision",
+  EVAL_JUDGE_MODEL: "rag.eval.judge_model",
+  EVAL_VERSION: "rag.eval.version",
+  EVAL_DEDUPE_KEY: "rag.eval.dedupe_key",
+  EVAL_STATUS: "rag.eval.status",
 } as const;
 
 export const OTEL_OPERATIONS = {

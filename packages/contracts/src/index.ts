@@ -1,6 +1,7 @@
 export * from "./health";
 export * from "./traces";
 export * from "./metrics";
+export * from "./quality";
 export * from "./users";
 export * from "./auth";
 export * from "./models";

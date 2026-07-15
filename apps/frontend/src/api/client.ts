@@ -131,6 +131,15 @@ import {
   type SessionDetailResponse,
   TraceDetailResponseSchema,
   type TraceDetailResponse,
+  TraceQualityDetailSchema,
+  type TraceQualityDetail,
+  OnlineEvalSettingsResponseSchema,
+  type OnlineEvalSettingsResponse,
+  QualityOverviewResponseSchema,
+  type QualityOverviewQuery,
+  type QualityOverviewResponse,
+  UpdateOnlineEvalSettingsRequestSchema,
+  type UpdateOnlineEvalSettingsRequest,
   MetricsOverviewResponseSchema,
   MetricsAppResponseSchema,
   type MetricsOverviewResponse,
@@ -295,6 +304,10 @@ export const getTraces = (q: TraceListQuery): Promise<TraceListResponse> => {
   if (q.stage) p.set("stage", q.stage);
   if (q.model) p.set("model", q.model);
   if (q.signal) p.set("signal", q.signal);
+  if (q.evalMetric) p.set("evalMetric", q.evalMetric);
+  if (q.evalMax !== undefined) p.set("evalMax", String(q.evalMax));
+  if (q.evalVerdict) p.set("evalVerdict", q.evalVerdict);
+  if (q.evalSort) p.set("evalSort", q.evalSort);
   if (q.from) p.set("from", q.from);
   if (q.to) p.set("to", q.to);
   p.set("page", String(q.page ?? 1));
@@ -333,6 +346,33 @@ export const getSession = (sessionId: string): Promise<SessionDetailResponse> =>
 // M9 W2：Trace 详情（meta + 规范化 spans）
 export const getTrace = (traceId: string): Promise<TraceDetailResponse> =>
   getJson(`/api/traces/${encodeURIComponent(traceId)}`, TraceDetailResponseSchema);
+
+export const getTraceQuality = (traceId: string): Promise<TraceQualityDetail> =>
+  getJson(`/api/eval/quality/traces/${encodeURIComponent(traceId)}`, TraceQualityDetailSchema);
+
+export const getOnlineEvalSettings = (): Promise<OnlineEvalSettingsResponse> =>
+  getJson("/api/eval/quality/settings", OnlineEvalSettingsResponseSchema);
+
+export const getQualityOverview = (
+  query: QualityOverviewQuery,
+): Promise<QualityOverviewResponse> => {
+  const params = new URLSearchParams();
+  if (query.from) params.set("from", query.from);
+  if (query.to) params.set("to", query.to);
+  if (query.agentId) params.set("agentId", query.agentId);
+  return getJson(`/api/eval/quality/overview?${params.toString()}`, QualityOverviewResponseSchema);
+};
+
+export async function updateOnlineEvalSettings(
+  update: UpdateOnlineEvalSettingsRequest,
+): Promise<OnlineEvalSettingsResponse> {
+  const response = await apiFetch("/api/eval/quality/settings", {
+    method: "PUT",
+    body: JSON.stringify(UpdateOnlineEvalSettingsRequestSchema.parse(update)),
+  });
+  if (!response.ok) throw new Error(`update online evaluation settings failed: ${response.status}`);
+  return OnlineEvalSettingsResponseSchema.parse(await response.json());
+}
 
 function metricsParams(q: MetricsQuery): string {
   const params = new URLSearchParams();

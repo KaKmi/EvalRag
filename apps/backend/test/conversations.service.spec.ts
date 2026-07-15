@@ -40,12 +40,23 @@ function makeFakeRepo() {
         .filter((c) => (!agentId || c.agentId === agentId) && (!userId || c.userId === userId))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     ),
-    getById: jest.fn(
-      async (id: string): Promise<Conversation | undefined> => convs.find((c) => c.id === id),
+    getById: jest.fn(async (id: string): Promise<Conversation | undefined> =>
+      convs.find((c) => c.id === id),
     ),
-    listMessages: jest.fn(
-      async (convId: string): Promise<Message[]> => msgs.filter((m) => m.convId === convId),
+    listMessages: jest.fn(async (convId: string): Promise<Message[]> =>
+      msgs.filter((m) => m.convId === convId),
     ),
+    findEvaluationTurnByTraceId: jest.fn(async (traceId: string) => {
+      const answerIndex = msgs.findIndex(
+        (message) => message.role === "assistant" && message.traceId === traceId,
+      );
+      if (answerIndex <= 0) return undefined;
+      const answer = msgs[answerIndex];
+      const question = msgs[answerIndex - 1];
+      const conv = convs.find((item) => item.id === answer.convId);
+      if (!conv || question.convId !== answer.convId || question.role !== "user") return undefined;
+      return { agentId: conv.agentId, question: question.content, answer: answer.content };
+    }),
   };
   return repo as typeof repo & ConversationsRepository;
 }
@@ -125,5 +136,23 @@ describe("ConversationsService（真实读写）", () => {
   it("listMessages 校验会话存在，不存在抛 NotFound", async () => {
     const svc = new ConversationsService(makeFakeRepo());
     await expect(svc.listMessages("missing")).rejects.toThrow(NotFoundException);
+  });
+
+  it("findEvaluationTurnByTraceId 通过公开 service 返回原始问答", async () => {
+    const svc = new ConversationsService(makeFakeRepo());
+    const conv = await svc.createConversation({ agentId: "app1", title: "退货" });
+    await svc.appendMessage({ convId: conv.id, role: "user", content: "怎么退货" });
+    await svc.appendMessage({
+      convId: conv.id,
+      role: "assistant",
+      content: "七天内申请",
+      traceId: "a".repeat(32),
+    });
+
+    await expect(svc.findEvaluationTurnByTraceId("a".repeat(32))).resolves.toEqual({
+      agentId: "app1",
+      question: "怎么退货",
+      answer: "七天内申请",
+    });
   });
 });

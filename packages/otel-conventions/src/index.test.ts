@@ -17,6 +17,17 @@ describe("otel conventions", () => {
     expect(RAG.RETRIEVAL_TOP_K).toBe("rag.retrieval.top_k");
   });
 
+  it("E-W1 eval attribute keys stay stable", () => {
+    expect(RAG.EVAL_TARGET_TRACE_ID).toBe("rag.eval.target_trace_id");
+    expect(RAG.EVAL_FAITHFULNESS).toBe("rag.eval.faithfulness");
+    expect(RAG.EVAL_ANSWER_RELEVANCY).toBe("rag.eval.answer_relevancy");
+    expect(RAG.EVAL_CONTEXT_PRECISION).toBe("rag.eval.context_precision");
+    expect(RAG.EVAL_JUDGE_MODEL).toBe("rag.eval.judge_model");
+    expect(RAG.EVAL_VERSION).toBe("rag.eval.version");
+    expect(RAG.EVAL_DEDUPE_KEY).toBe("rag.eval.dedupe_key");
+    expect(RAG.EVAL_STATUS).toBe("rag.eval.status");
+  });
+
   it("exposes generic operation and span kind names", () => {
     expect(OTEL_OPERATIONS.CHAT).toBe("chat");
     expect(OTEL_OPERATIONS.RETRIEVE).toBe("retrieve");

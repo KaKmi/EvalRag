@@ -111,11 +111,15 @@ describe("M9 W2 详情契约", () => {
   });
 
   it("TraceDetailResponse 带 meta + spans", () => {
-    expect(TraceDetailResponseSchema.safeParse({ traceId: "a".repeat(32), meta, spans: [span] }).success).toBe(true);
+    expect(
+      TraceDetailResponseSchema.safeParse({ traceId: "a".repeat(32), meta, spans: [span] }).success,
+    ).toBe(true);
   });
 
   it("缺 meta 拒绝", () => {
-    expect(TraceDetailResponseSchema.safeParse({ traceId: "a".repeat(32), spans: [span] }).success).toBe(false);
+    expect(
+      TraceDetailResponseSchema.safeParse({ traceId: "a".repeat(32), spans: [span] }).success,
+    ).toBe(false);
   });
 });
 
@@ -126,7 +130,14 @@ describe("M9 W3 Session 详情契约", () => {
     agentId: "app1",
     agentName: "退款助手",
     rounds: [
-      { traceId: "a".repeat(32), userInput: "怎么退款", output: "答", status: "success", durationMs: 2410, startTime: "2026-07-13T09:11:00.000Z" },
+      {
+        traceId: "a".repeat(32),
+        userInput: "怎么退款",
+        output: "答",
+        status: "success",
+        durationMs: 2410,
+        startTime: "2026-07-13T09:11:00.000Z",
+      },
     ],
   };
 
@@ -135,11 +146,18 @@ describe("M9 W3 Session 详情契约", () => {
   });
 
   it("userId 可空 + rounds 可空数组", () => {
-    expect(SessionDetailResponseSchema.safeParse({ ...base, userId: null, rounds: [] }).success).toBe(true);
+    expect(
+      SessionDetailResponseSchema.safeParse({ ...base, userId: null, rounds: [] }).success,
+    ).toBe(true);
   });
 
   it("round.traceId 非 32-hex 拒绝", () => {
-    expect(SessionDetailResponseSchema.safeParse({ ...base, rounds: [{ ...base.rounds[0], traceId: "bad" }] }).success).toBe(false);
+    expect(
+      SessionDetailResponseSchema.safeParse({
+        ...base,
+        rounds: [{ ...base.rounds[0], traceId: "bad" }],
+      }).success,
+    ).toBe(false);
   });
 });
 
@@ -158,6 +176,7 @@ describe("M9 W1 trace 列表契约", () => {
     outputTokens: 200,
     qualitySignals: ["no_citations"],
     promptVersionId: null,
+    evaluation: { status: "unscored" },
   };
 
   it("accepts a valid TraceListRow", () => {
@@ -183,7 +202,12 @@ describe("M9 W1 trace 列表契约", () => {
   });
 
   it("query uses chinese enums and coerces pagination", () => {
-    const p = TraceListQuerySchema.safeParse({ status: "失败", quick: "慢请求", page: "2", pageSize: "50" });
+    const p = TraceListQuerySchema.safeParse({
+      status: "失败",
+      quick: "慢请求",
+      page: "2",
+      pageSize: "50",
+    });
     expect(p.success).toBe(true);
     if (p.success) {
       expect(p.data.page).toBe(2);
@@ -198,6 +222,21 @@ describe("M9 W1 trace 列表契约", () => {
   it("query accepts a fixed stage and rejects an unknown stage", () => {
     expect(TraceListQuerySchema.parse({ stage: "rerank" }).stage).toBe("rerank");
     expect(TraceListQuerySchema.safeParse({ stage: "made_up" }).success).toBe(false);
+  });
+
+  it("parses eval filter and server-side sort", () => {
+    const parsed = TraceListQuerySchema.parse({
+      evalMetric: "precision",
+      evalMax: "70",
+      evalVerdict: "low",
+      evalSort: "asc",
+    });
+    expect(parsed.evalMax).toBe(70);
+    expect(parsed.evalSort).toBe("asc");
+  });
+
+  it("rejects an eval score above 100", () => {
+    expect(TraceListQuerySchema.safeParse({ evalMax: "101" }).success).toBe(false);
   });
 
   it("accepts a valid SessionListRow", () => {

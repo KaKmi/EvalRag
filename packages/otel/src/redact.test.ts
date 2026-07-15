@@ -4,7 +4,7 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { CODECRUSH_IO, CODECRUSH_REDACTED } from "@codecrush/otel-conventions";
+import { CODECRUSH_IO, CODECRUSH_REDACTED, RAG } from "@codecrush/otel-conventions";
 import { redactPii, redactAttributes, RedactingSpanExporter } from "./redact";
 
 describe("redactPii", () => {
@@ -82,6 +82,22 @@ describe("redactAttributes", () => {
 describe("RedactingSpanExporter", () => {
   const fakeSpan = (attrs: Record<string, unknown>) => ({ attributes: attrs }) as never;
 
+  it("redacts PII inside rag.eval evidence stored in the standard output key", () => {
+    const inner = { export: vi.fn((_spans, cb) => cb({ code: 0 })), shutdown: vi.fn() };
+    const exporter = new RedactingSpanExporter(inner as never);
+    const attributes: Record<string, unknown> = {
+      [RAG.EVAL_STATUS]: "success",
+      [CODECRUSH_IO.OUTPUT]: JSON.stringify({
+        faithfulness: ["claim mentions alice@example.com"],
+        contextPrecision: ["source contains 13800001111"],
+      }),
+    };
+    exporter.export([fakeSpan(attributes)], vi.fn());
+    expect(attributes[CODECRUSH_IO.OUTPUT]).toContain("[REDACTED_EMAIL]");
+    expect(attributes[CODECRUSH_IO.OUTPUT]).toContain("[REDACTED_PHONE]");
+    expect(attributes[CODECRUSH_REDACTED]).toBe(true);
+  });
+
   it("export 前脱敏内容 key + 置 codecrush.redacted，再调 inner.export", () => {
     const inner = { export: vi.fn((_s, cb) => cb({ code: 0 })), shutdown: vi.fn() };
     const exp = new RedactingSpanExporter(inner as never, [CODECRUSH_IO.INPUT]);
@@ -138,6 +154,7 @@ describe("RedactingSpanExporter", () => {
       spanProcessors: [new SimpleSpanProcessor(new RedactingSpanExporter(inner))],
     });
     const span = provider.getTracer("t").startSpan("rag.pipeline");
+    span.setAttribute(RAG.EVAL_STATUS, "success");
     span.setAttribute(CODECRUSH_IO.INPUT, "我的邮箱 alice@example.com");
     span.setAttribute(CODECRUSH_IO.OUTPUT, "已记录");
     span.end();
@@ -146,5 +163,23 @@ describe("RedactingSpanExporter", () => {
     expect(got.attributes[CODECRUSH_IO.INPUT]).toBe("我的邮箱 [REDACTED_EMAIL]");
     expect(got.attributes[CODECRUSH_IO.OUTPUT]).toBe("已记录");
     expect(got.attributes[CODECRUSH_REDACTED]).toBe(true);
+  });
+
+  it("真实 SDK 管线脱敏 rag.eval evidence", async () => {
+    const inner = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(new RedactingSpanExporter(inner))],
+    });
+    const span = provider.getTracer("eval").startSpan("rag.eval");
+    span.setAttribute(RAG.EVAL_STATUS, "success");
+    span.setAttribute(
+      CODECRUSH_IO.OUTPUT,
+      JSON.stringify({ evidence: ["alice@example.com", "13800001111"] }),
+    );
+    span.end();
+    await provider.forceFlush();
+    const exported = String(inner.getFinishedSpans()[0]?.attributes[CODECRUSH_IO.OUTPUT]);
+    expect(exported).toContain("[REDACTED_EMAIL]");
+    expect(exported).toContain("[REDACTED_PHONE]");
   });
 });
