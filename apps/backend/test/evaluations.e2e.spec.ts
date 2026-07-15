@@ -119,4 +119,22 @@ describe("EvaluationsService", () => {
     const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
     expect(result.lowSamples).toEqual([]);
   });
+
+  it("maps a zero-sample agent to null scores even if ClickHouse supplies zero defaults", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getByAgent.mockResolvedValue([
+      {
+        agentId: "agent-empty",
+        agentName: "Empty Agent",
+        sampleCount: 0,
+        faithfulness: 0,
+        answerRelevancy: 0,
+        contextPrecision: 0,
+      },
+    ]);
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.byAgent).toEqual([
+      { agentId: "agent-empty", agentName: "Empty Agent", sampleCount: 0, scores: null },
+    ]);
+  });
 });

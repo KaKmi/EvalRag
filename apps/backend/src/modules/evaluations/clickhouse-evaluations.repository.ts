@@ -108,6 +108,12 @@ export interface EvaluationLowSample {
   evidence: string;
 }
 
+export interface EvaluationThresholds {
+  faithfulness: number;
+  answerRelevancy: number;
+  contextPrecision: number;
+}
+
 type CandidateRow = {
   trace_id: string;
   start_time: string;
@@ -332,7 +338,9 @@ export class ClickHouseEvaluationsRepository {
       query: `
         SELECT eligible.agent_id, eligible.agent_name,
           coalesce(evaluated.sample_count, 0) AS sample_count,
-          evaluated.faithfulness, evaluated.answer_relevancy, evaluated.context_precision
+          if(coalesce(evaluated.sample_count, 0) = 0, NULL, evaluated.faithfulness) AS faithfulness,
+          if(coalesce(evaluated.sample_count, 0) = 0, NULL, evaluated.answer_relevancy) AS answer_relevancy,
+          if(coalesce(evaluated.sample_count, 0) = 0, NULL, evaluated.context_precision) AS context_precision
         FROM (
           SELECT agent_id, argMax(agent_name, start_time) AS agent_name
           FROM codecrush_traces
@@ -443,7 +451,11 @@ export class ClickHouseEvaluationsRepository {
     return { judgeVersion: row.judge_version, failedAt: toIsoUtc(row.failed_at), reason };
   }
 
-  async getLowSamples(window: EvaluationReadWindow, limit = 10): Promise<EvaluationLowSample[]> {
+  async getLowSamples(
+    window: EvaluationReadWindow,
+    thresholds: EvaluationThresholds,
+    limit = 10,
+  ): Promise<EvaluationLowSample[]> {
     if (!(await this.ensureEvalViews())) return [];
     const result = await this.clickhouse.query({
       query: `
@@ -463,10 +475,21 @@ export class ClickHouseEvaluationsRepository {
         WHERE latest.judge_version = {judgeVersion:String}
           AND latest.evaluated_at >= {from:DateTime64(9)} AND latest.evaluated_at < {to:DateTime64(9)}
           AND ({agentId:String} = '' OR latest.agent_id = {agentId:String})
+          AND (
+            latest.faithfulness < {faithfulnessThreshold:Float64}
+            OR latest.answer_relevancy < {answerRelevancyThreshold:Float64}
+            OR latest.context_precision < {contextPrecisionThreshold:Float64}
+          )
         ORDER BY least(latest.faithfulness, latest.answer_relevancy, latest.context_precision), latest.evaluated_at DESC
         LIMIT {limit:UInt32}
       `,
-      query_params: { ...this.windowParams(window), limit },
+      query_params: {
+        ...this.windowParams(window),
+        faithfulnessThreshold: thresholds.faithfulness,
+        answerRelevancyThreshold: thresholds.answerRelevancy,
+        contextPrecisionThreshold: thresholds.contextPrecision,
+        limit,
+      },
       format: "JSONEachRow",
     });
     const rows = await result.json<LowSampleRow>();

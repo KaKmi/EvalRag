@@ -57,7 +57,7 @@ export class EvaluationsService {
         this.clickhouseRepo.getOverview(previous),
         this.clickhouseRepo.getMinuteAggregates(current),
         this.clickhouseRepo.getByAgent(current),
-        this.clickhouseRepo.getLowSamples(current),
+        this.clickhouseRepo.getLowSamples(current, thresholds(settings)),
         this.clickhouseRepo.countEligible(from, to, query.agentId),
         watermark.lastTs < backlogTo
           ? this.clickhouseRepo.countBacklog(watermark.lastTs, backlogTo)
@@ -250,6 +250,7 @@ function metricValue(
 }
 
 function aggregateScores(aggregate: EvaluationAggregate): QualityScores | null {
+  if (aggregate.sampleCount === 0) return null;
   const faithfulness = score(aggregate.faithfulness);
   const answerRelevancy = score(aggregate.answerRelevancy);
   const contextPrecision = score(aggregate.contextPrecision);

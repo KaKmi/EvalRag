@@ -103,12 +103,39 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
     expect(sql).toContain("FROM codecrush_traces");
     expect(sql).toContain("LEFT JOIN");
   });
+
+  it("applies each low-score threshold before limiting rows", async () => {
+    const clickhouse = {
+      command: jest.fn().mockResolvedValue(undefined),
+      query: jest
+        .fn()
+        .mockResolvedValueOnce(jsonResult([{ result: 1 }]))
+        .mockResolvedValueOnce(jsonResult([{ count: "1" }]))
+        .mockResolvedValueOnce(jsonResult([])),
+    };
+    const repo = new ClickHouseEvaluationsRepository(clickhouse as never);
+    await repo.getLowSamples(
+      { from, to, judgeVersion: "online-v1" },
+      { faithfulness: 85, answerRelevancy: 80, contextPrecision: 75 },
+    );
+    const call = clickhouse.query.mock.calls.at(-1)?.[0];
+    const sql = call.query as string;
+    expect(sql.indexOf("latest.faithfulness < {faithfulnessThreshold:Float64}")).toBeLessThan(
+      sql.indexOf("LIMIT {limit:UInt32}"),
+    );
+    expect(call.query_params).toMatchObject({
+      faithfulnessThreshold: 85,
+      answerRelevancyThreshold: 80,
+      contextPrecisionThreshold: 75,
+    });
+  });
 });
 
 const enabled = process.env.RUN_CLICKHOUSE_TESTS === "1";
 const describeClickHouse = enabled ? describe : describe.skip;
 const target = "a".repeat(32);
 const failedTarget = "f".repeat(32);
+const emptyTarget = "e".repeat(32);
 
 async function insertEvalSpan(
   client: ClickHouseClient,
@@ -171,6 +198,40 @@ async function insertEvalSpan(
   });
 }
 
+async function insertTraceRoot(client: ClickHouseClient) {
+  await client.insert({
+    table: "otel_traces",
+    format: "JSONEachRow",
+    values: [
+      {
+        Timestamp: "2026-07-15 02:02:00.000000000",
+        TraceId: emptyTarget,
+        SpanId: emptyTarget.slice(0, 16),
+        ParentSpanId: "",
+        TraceState: "",
+        SpanName: "rag.pipeline",
+        SpanKind: "SPAN_KIND_INTERNAL",
+        ServiceName: "codecrush-backend",
+        ResourceAttributes: {},
+        ScopeName: "rag-chat",
+        ScopeVersion: "1",
+        SpanAttributes: {
+          "codecrush.span.kind": "chain",
+          "gen_ai.agent.id": "agent-empty",
+          "gen_ai.agent.name": "Empty Agent",
+          "codecrush.io.input": "hello",
+        },
+        Duration: 0,
+        StatusCode: "STATUS_CODE_OK",
+        StatusMessage: "",
+        Events: [],
+        Links: [],
+      },
+    ],
+    clickhouse_settings: { input_format_defaults_for_omitted_fields: 1 },
+  });
+}
+
 describeClickHouse("evaluation read model", () => {
   let client: ClickHouseClient;
   let repository: ClickHouseEvaluationsRepository;
@@ -187,8 +248,9 @@ describeClickHouse("evaluation read model", () => {
 
   afterEach(async () => {
     await client.command({
-      query: "ALTER TABLE otel_traces DELETE WHERE TraceId IN ({target:String},{failed:String})",
-      query_params: { target, failed: failedTarget },
+      query:
+        "ALTER TABLE otel_traces DELETE WHERE TraceId IN ({target:String},{failed:String},{empty:String})",
+      query_params: { target, failed: failedTarget, empty: emptyTarget },
       clickhouse_settings: { mutations_sync: 2 },
     });
     await client.command({
@@ -262,5 +324,26 @@ describeClickHouse("evaluation read model", () => {
       judgeVersion: "online-v1",
       reason: "JudgeUnavailable: judge unavailable",
     });
+  });
+
+  it("returns null scores for an eligible agent with no successful evaluation", async () => {
+    await insertTraceRoot(client);
+    await expect(
+      repository.getByAgent({
+        from: "2026-07-15T02:00:00.000Z",
+        to: "2026-07-15T03:00:00.000Z",
+        judgeVersion: "online-v1",
+        agentId: "agent-empty",
+      }),
+    ).resolves.toEqual([
+      {
+        agentId: "agent-empty",
+        agentName: "Empty Agent",
+        sampleCount: 0,
+        faithfulness: null,
+        answerRelevancy: null,
+        contextPrecision: null,
+      },
+    ]);
   });
 });
