@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
@@ -102,7 +102,7 @@ export class EvaluationsRepository {
           eq(evalWatermarks.workerName, workerName),
           or(
             isNull(evalWatermarks.leaseUntil),
-            lte(evalWatermarks.leaseUntil, now),
+            lt(evalWatermarks.leaseUntil, now),
             eq(evalWatermarks.leaseOwner, owner),
           ),
         ),

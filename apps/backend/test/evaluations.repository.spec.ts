@@ -75,4 +75,49 @@ describeDb("EvaluationsRepository", () => {
     expect(saved.dailyDate).toBe("2026-07-16");
     expect(saved.dailyCount).toBe(3);
   });
+
+  it("lets a new owner take an expired lease and rejects stale-owner finish and release", async () => {
+    const workerName = "takeover-worker";
+    const startedAt = new Date("2026-07-15T03:00:00.000Z");
+    await repo.getOrCreateWatermark(workerName, startedAt);
+    expect(await repo.tryAcquireLease(workerName, "old-owner", startedAt, 1_000)).toBe(true);
+    expect(
+      await repo.tryAcquireLease(
+        workerName,
+        "new-owner",
+        new Date("2026-07-15T03:00:01.000Z"),
+        1_000,
+      ),
+    ).toBe(false);
+    const takeoverAt = new Date("2026-07-15T03:00:01.001Z");
+    expect(await repo.tryAcquireLease(workerName, "new-owner", takeoverAt, 20 * 60_000)).toBe(true);
+
+    await repo.finishCycle(workerName, "old-owner", {
+      lastTs: new Date("2026-07-15T02:30:00.000Z"),
+      lastTraceId: "a".repeat(32),
+      evaluatedIncrement: 99,
+      now: takeoverAt,
+    });
+    await repo.releaseLease(workerName, "old-owner", takeoverAt);
+    const stillOwned = await repo.getOrCreateWatermark(workerName, takeoverAt);
+    expect(stillOwned.leaseOwner).toBe("new-owner");
+    expect(stillOwned.lastTraceId).toBe("");
+    expect(stillOwned.dailyCount).toBe(0);
+  });
+
+  it("records bounded failure state and releases only the current owner", async () => {
+    const workerName = "failure-worker";
+    const startedAt = new Date("2026-07-15T04:00:00.000Z");
+    await repo.getOrCreateWatermark(workerName, startedAt);
+    await repo.tryAcquireLease(workerName, "worker-a", startedAt, 20 * 60_000);
+    await repo.recordFailure(workerName, "ClickHouseError", "down");
+    let saved = await repo.getOrCreateWatermark(workerName, startedAt);
+    expect(saved.consecutiveFailures).toBe(1);
+    expect(saved.lastError).toBe("ClickHouseError: down");
+    expect(saved.leaseOwner).toBe("worker-a");
+    await repo.releaseLease(workerName, "worker-a", startedAt);
+    saved = await repo.getOrCreateWatermark(workerName, startedAt);
+    expect(saved.leaseOwner).toBeNull();
+    expect(saved.leaseUntil).toBeNull();
+  });
 });
