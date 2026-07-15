@@ -4,6 +4,7 @@ import {
   ConversationsRepository,
   type AppendMessageInput,
   type CreateConversationInput,
+  type EvaluationTurn,
 } from "./conversations.repository";
 
 @Injectable()
@@ -35,5 +36,9 @@ export class ConversationsService {
 
   async appendMessage(input: AppendMessageInput): Promise<Message> {
     return await this.repo.appendMessage(input);
+  }
+
+  async findEvaluationTurnByTraceId(traceId: string): Promise<EvaluationTurn | undefined> {
+    return await this.repo.findEvaluationTurnByTraceId(traceId);
   }
 }

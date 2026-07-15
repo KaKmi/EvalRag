@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, lt } from "drizzle-orm";
 import type { Conversation, Message, MessageRole } from "@codecrush/contracts";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
@@ -21,6 +21,12 @@ export interface AppendMessageInput {
   isFallback?: boolean;
   fallbackInfo?: Message["fallbackInfo"];
   citations?: string[];
+}
+
+export interface EvaluationTurn {
+  agentId: string;
+  question: string;
+  answer: string;
 }
 
 function toConversation(row: ConversationRow): Conversation {
@@ -98,7 +104,11 @@ export class ConversationsRepository {
   }
 
   async getById(id: string): Promise<Conversation | undefined> {
-    const rows = await this.db.select().from(conversations).where(eq(conversations.id, id)).limit(1);
+    const rows = await this.db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, id))
+      .limit(1);
     return rows[0] ? toConversation(rows[0]) : undefined;
   }
 
@@ -107,7 +117,39 @@ export class ConversationsRepository {
       .select()
       .from(messages)
       .where(eq(messages.convId, convId))
-      .orderBy(asc(messages.createdAt));
+      .orderBy(asc(messages.sequence));
     return rows.map(toMessage);
+  }
+
+  async findEvaluationTurnByTraceId(traceId: string): Promise<EvaluationTurn | undefined> {
+    const targetRows = await this.db
+      .select({
+        convId: messages.convId,
+        sequence: messages.sequence,
+        answer: messages.content,
+        agentId: conversations.agentId,
+      })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.convId, conversations.id))
+      .where(and(eq(messages.traceId, traceId), eq(messages.role, "assistant")))
+      .orderBy(desc(messages.sequence))
+      .limit(1);
+    const target = targetRows[0];
+    if (!target) return undefined;
+
+    const predecessorRows = await this.db
+      .select({ role: messages.role, content: messages.content })
+      .from(messages)
+      .where(and(eq(messages.convId, target.convId), lt(messages.sequence, target.sequence)))
+      .orderBy(desc(messages.sequence))
+      .limit(1);
+    const predecessor = predecessorRows[0];
+    if (!predecessor || predecessor.role !== "user") return undefined;
+
+    return {
+      agentId: target.agentId,
+      question: predecessor.content,
+      answer: target.answer,
+    };
   }
 }
