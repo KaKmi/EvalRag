@@ -215,6 +215,8 @@ M9 按 015 拆三波（见 015「建议分波」），逐波闭环：
 
 ## 变更记录
 
+- **2026-07-15**：冻结 E-W1 在线答案质量评测实施基线（017）。交付顺序为共享契约与语义 → PG 控制面/周期调度 → 原文输入与三指标 Judge → worker/抽样/`rag.eval` → ClickHouse/API → Trace 联动 → 质量总览与设置；每一阶段保持 chat 零改动、可独立验证与回滚。
+
 - **2026-07-14**：**016 W-b 前端看板已实现（PR #28 待合）**——DashboardPage 接 `/metrics/overview|apps`（6 指标卡/双线趋势/质量信号/应用分布/坏样本下钻/阈值染色，删 M2 mock），TracesPage URL 水合支持看板深链下钻预选筛选；后端单应用响应补六阶段 P50/P95/样本数（现算 `codecrush_trace_spans`）+ 检索降级信号埋点。lint 绿、后端/契约测试绿；**4 前端测试待收尾**（CSV/Session 文案、单应用 TTFT 范围、SessionDetail 引用气泡疑似回归），owner 本波判为次要、随 PR 带出。cost 真算仍延后。
 - **2026-07-14**：**016 指标读模型 W-a 后端已交付**——`otel_traces` 上新增 `AggregatingMergeTree` 汇总层（物化视图只读根 chain span）+ **D-metrics 写侧**（trace 级 token 总和 + 生成模型标签落根 span）+ 守卫历史回填 + `/metrics/*` 只读 API。D2′ 使用单 `dur_tdigest` state 并由仓库直接 `xxxMerge`，不建 finalize VIEW。运行时 QA 修复 series 别名与旧数据回填，随后 review 补齐 trace 详情防重复计数及失败/中断 usage 汇总。**前端看板仍待 `metrics-dashboard-frontend` plan；cost 真算继续独立延后**。
 - **2026-07-13**：M9 设计（015）+ W1/W2 交付（分支 m9-trace-read-model-w1，未合并）。M9 拆三波：W1 读模型地基（根 span 身份 delta + traces/sessions VIEW + list/summary/sessions API + 前端双列表）、W2 详情下钻（detail meta + StatusMessage + 写侧 chunk.scores doc/citation.ids + 前端 TraceDetailPage 真数据 + e2e）。决策：读模型单一事实源=ClickHouse（决策 A，不 join Postgres，doc 名/引用走写侧富化）；OTLP JSON 前端构建不建端点（收敛 015 决策 C）；cost/Session 详情延后 W3；评测集/重放/Badcase 出口延后 M11。完整对抗档全程（peer 调查+diff+drill+per-story review）。运行时 QA 待人工起 docker。**下一步 W3**。

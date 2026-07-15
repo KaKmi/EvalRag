@@ -316,6 +316,13 @@ SDK **不以 RAG 阶段名（改写/意图/召回…）为基元**，而以 Open
 - 出现第二个 Node 部署物（如 ingestion worker 拆进程）→ `@codecrush/otel` 包价值进一步凸显。
 - VIEW 投影演进为 worker 后，抽 `packages/trace-normalizer` 复用 raw span → Observation/Trace 的转换，但仍不并入 `@codecrush/otel`。
 
+### E-W1 evaluations 域边界
+
+- `apps/backend/src/modules/evaluations` 拥有在线评测设置、水位、租约、抽样、Judge 编排和质量 API；仅通过公开 service/port 读取 conversations、chunks、models。
+- evaluations 与 traces 不直接 import；写侧通过 OTLP `rag.eval` 解耦，读侧分别查询 ClickHouse VIEW。
+- 共享 API 形状放在 `@codecrush/contracts/quality`，属性 key 放在 `@codecrush/otel-conventions`；evidence 只使用 `CODECRUSH_IO.OUTPUT`，由 `@codecrush/otel` 统一脱敏。
+- 周期任务注册在 platform queue，但业务状态机留在 evaluations；schedule adapter 不感知领域 schema。
+
 ## References
 
 - 系统架构:`001-rag-platform-architecture`

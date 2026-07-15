@@ -474,11 +474,13 @@ rag.eval span(worker 发出,SpanName='rag.eval')属性:
   rag.eval.answer_relevancy    0-100
   rag.eval.context_precision   0-100
   rag.eval.judge_model / rag.eval.version(裁判算法版本,便于口径升级后区分)
+  rag.eval.dedupe_key / rag.eval.status(target+version 幂等键与 success/failed 状态)
   gen_ai.agent.id / gen_ai.request.model(复制自原 trace,便于分组)
 
 codecrush_eval_1m(AggregatingMergeTree,同 016 模式):
-  bucket × agent_id → avgState(三分) + count + low_count(任一分<70)
-  MV 只读 SpanName='rag.eval' 行;读侧直接 xxxMerge(D2′ 同款,不建 finalize VIEW)
+  target_trace_id × judge_version → argMaxState(最新一次结果)
+  查询先按 target+version 去重,再按 bucket × agent_id 聚合三分/count/low_count
+  MV 只读 SpanName='rag.eval' 行;避免重试 span 重复计数
 </pre>
 <h4>12.2 Postgres(控制面,Drizzle 迁移)</h4>
 <pre>
