@@ -1,6 +1,13 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { CLICKHOUSE } from "../../platform/clickhouse/clickhouse.constants";
 import type { CodeCrushClickHouseClient } from "../../platform/clickhouse/clickhouse.types";
+import {
+  loadSqlStatements,
+  otelTracesTableExists,
+  toIsoUtc,
+} from "../../platform/clickhouse/clickhouse-view.utils";
+
+const TRACE_VIEW_SQL_RELPATH = "infra/clickhouse/views/001-trace-views.sql";
 
 export interface EvaluationCursor {
   lastTs: Date;
@@ -57,13 +64,27 @@ function parseRetrievalChunks(payloads: string[]): EvaluationCandidate["retrieva
 
 @Injectable()
 export class ClickHouseEvaluationsRepository {
+  private traceViewsReady = false;
+
   constructor(@Inject(CLICKHOUSE) private readonly clickhouse: CodeCrushClickHouseClient) {}
+
+  private async ensureCandidateViews(): Promise<boolean> {
+    if (this.traceViewsReady) return true;
+    if (!(await otelTracesTableExists(this.clickhouse))) return false;
+    const statements = await loadSqlStatements(TRACE_VIEW_SQL_RELPATH);
+    for (const statement of statements) {
+      await this.clickhouse.command({ query: statement });
+    }
+    this.traceViewsReady = true;
+    return true;
+  }
 
   async listCandidates(
     cursor: EvaluationCursor,
     upperBound: Date,
     limit: number,
   ): Promise<EvaluationCandidate[]> {
+    if (!(await this.ensureCandidateViews())) return [];
     const result = await this.clickhouse.query({
       query: `
         SELECT
@@ -109,7 +130,7 @@ export class ClickHouseEvaluationsRepository {
     const rows = await result.json<CandidateRow>();
     return rows.map((row) => ({
       traceId: row.trace_id,
-      startTime: new Date(row.start_time.endsWith("Z") ? row.start_time : `${row.start_time}Z`),
+      startTime: new Date(toIsoUtc(row.start_time)),
       agentId: row.agent_id ?? "",
       generationModel: row.generation_model ?? "",
       status: row.status,
