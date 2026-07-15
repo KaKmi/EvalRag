@@ -1,5 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
-import { Button, Drawer, InputNumber, message, Spin, Switch } from "antd";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Divider,
+  Drawer,
+  Empty,
+  Flex,
+  Form,
+  InputNumber,
+  Select,
+  Space,
+  Spin,
+  Statistic,
+  Switch,
+  Typography,
+  message,
+} from "antd";
+import type { EChartsCoreOption } from "echarts/core";
 import type {
   OnlineEvalSettingsResponse,
   QualityMetric,
@@ -12,7 +30,18 @@ import {
   getQualityOverview,
   updateOnlineEvalSettings,
 } from "../../api/client";
+import { MetricChart } from "../../components/MetricChart";
 import { buildMetricTraceLink, toOverviewQuery, type QualityRange } from "./qualityViewModel";
+
+type TrendTooltipParam = {
+  axisValue?: string;
+  dataIndex?: number;
+  marker?: string;
+  seriesName?: string;
+  value?: number | null;
+};
+
+const { Title, Text } = Typography;
 
 const RANGES: Array<{ value: QualityRange; label: string }> = [
   { value: "today", label: "今日" },
@@ -31,6 +60,17 @@ const STATUS_LABEL: Record<QualityOverviewResponse["meta"]["status"], string> = 
   budget_reduced: "预算降采样",
   model_unavailable: "评测模型不可用",
 };
+// Alert 语义色：healthy=success，disabled=info，其余（滞后/降采样/不可用）=warning——保留历史分数不报错
+const STATUS_ALERT: Record<
+  QualityOverviewResponse["meta"]["status"],
+  "success" | "info" | "warning"
+> = {
+  disabled: "info",
+  healthy: "success",
+  lagging: "warning",
+  budget_reduced: "warning",
+  model_unavailable: "warning",
+};
 const TREND_SERIES = [
   { key: "faithfulness", label: "事实一致性", color: "#1677ff" },
   { key: "answerRelevancy", label: "答案相关性", color: "#722ed1" },
@@ -38,58 +78,60 @@ const TREND_SERIES = [
 ] as const;
 
 function TrendChart({ points }: { points: QualityOverviewResponse["trend"] }) {
+  const option = useMemo<EChartsCoreOption>(() => {
+    const counts = points.map((point) => point.sampleCount);
+    return {
+      color: TREND_SERIES.map((series) => series.color),
+      tooltip: {
+        trigger: "axis",
+        formatter: (params: TrendTooltipParam[]) => {
+          const index = params[0]?.dataIndex ?? 0;
+          const sampleCount = counts[index] ?? 0;
+          const lines = params
+            .map((param) => `${param.marker}${param.seriesName}：${param.value ?? "—"}`)
+            .join("<br/>");
+          const note = sampleCount < 10 ? "（样本不足）" : "";
+          return `${params[0]?.axisValue ?? ""}<br/>${lines}<br/>样本数 ${sampleCount}${note}`;
+        },
+      },
+      legend: { top: 0, right: 0, textStyle: { color: "#64748b" } },
+      grid: { left: 36, right: 16, top: 38, bottom: 28 },
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: points.map((point) =>
+          new Date(point.bucket).toLocaleString([], {
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        ),
+        axisLabel: { color: "#94a3b8", hideOverlap: true },
+        axisLine: { lineStyle: { color: "#e2e8f0" } },
+      },
+      yAxis: {
+        type: "value",
+        min: 0,
+        max: 100,
+        axisLabel: { color: "#94a3b8" },
+        splitLine: { lineStyle: { color: "#f1f5f9" } },
+      },
+      series: TREND_SERIES.map((series) => ({
+        name: series.label,
+        type: "line",
+        smooth: true,
+        symbolSize: 7,
+        connectNulls: true,
+        data: points.map((point) => point[series.key]),
+      })),
+    };
+  }, [points]);
+
   if (points.length === 0) {
-    return <span style={{ color: "rgba(0,0,0,.35)" }}>暂无趋势数据</span>;
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无趋势数据" />;
   }
-  const x = (index: number) =>
-    points.length === 1 ? 300 : 20 + (index * 560) / (points.length - 1);
-  const y = (value: number | null) => 120 - (value ?? 0);
-  return (
-    <>
-      <div style={{ display: "flex", gap: 16, marginBottom: 8 }}>
-        {TREND_SERIES.map((series) => (
-          <span key={series.key} style={{ color: series.color, fontSize: 12 }}>
-            ● {series.label}
-          </span>
-        ))}
-      </div>
-      <svg
-        aria-label="三项质量指标趋势"
-        viewBox="0 0 600 140"
-        role="img"
-        style={{ display: "block", width: "100%", height: 140 }}
-      >
-        {TREND_SERIES.map((series) => (
-          <polyline
-            key={series.key}
-            data-testid={`trend-series-${series.key}`}
-            points={points.map((point, index) => `${x(index)},${y(point[series.key])}`).join(" ")}
-            fill="none"
-            stroke={series.color}
-            strokeWidth="3"
-          />
-        ))}
-        {points.map((point, index) => (
-          <g
-            key={point.bucket}
-            data-testid={point.insufficientSample ? "trend-point-insufficient" : "trend-point"}
-            style={{ opacity: point.insufficientSample ? 0.35 : 1 }}
-          >
-            <title>{`${point.bucket} · n=${point.sampleCount}`}</title>
-            {TREND_SERIES.map((series) => (
-              <circle
-                key={series.key}
-                cx={x(index)}
-                cy={y(point[series.key])}
-                r="4"
-                fill={series.color}
-              />
-            ))}
-          </g>
-        ))}
-      </svg>
-    </>
-  );
+  return <MetricChart ariaLabel="三项质量指标趋势" option={option} height={240} />;
 }
 
 export default function QualityPage() {
@@ -208,212 +250,170 @@ export default function QualityPage() {
 
   if (loading && !overview) {
     return (
-      <div style={{ padding: 64, textAlign: "center" }}>
+      <Flex justify="center" style={{ padding: 64 }}>
         <Spin />
-      </div>
+      </Flex>
     );
   }
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 700 }}>答案质量</div>
-          <div style={{ color: "rgba(0,0,0,.45)", fontSize: 12 }}>
+      <Flex align="center" gap={12} wrap style={{ marginBottom: 16 }}>
+        <div style={{ marginRight: "auto" }}>
+          <Title level={4} style={{ margin: 0 }}>
+            答案质量
+          </Title>
+          <Text type="secondary" style={{ fontSize: 12 }}>
             持续观测线上回答，并把低质量样本送回优化闭环
-          </div>
+          </Text>
         </div>
-        <div style={{ flex: 1 }} />
-        {RANGES.map((item) => (
-          <Button
-            key={item.value}
-            type={range === item.value ? "primary" : "default"}
-            onClick={() => updateUrl("range", item.value)}
-          >
-            {item.label}
+        <Space wrap>
+          <Space.Compact>
+            {RANGES.map((item) => (
+              <Button
+                key={item.value}
+                type={range === item.value ? "primary" : "default"}
+                onClick={() => updateUrl("range", item.value)}
+              >
+                {item.label}
+              </Button>
+            ))}
+          </Space.Compact>
+          <Select
+            data-testid="agent-filter"
+            aria-label="应用"
+            style={{ minWidth: 160 }}
+            value={agentId || undefined}
+            placeholder="全部应用"
+            allowClear
+            onChange={(value?: string) => updateUrl("agentId", value || undefined)}
+            options={agents.map((agent) => ({ value: agent.agentId, label: agent.agentName }))}
+          />
+          <Button aria-label="设置" onClick={openSettings}>
+            设置
           </Button>
-        ))}
-        <select
-          aria-label="应用"
-          value={agentId}
-          onChange={(event) => updateUrl("agentId", event.target.value || undefined)}
-          style={{ height: 32, minWidth: 140 }}
-        >
-          <option value="">全部应用</option>
-          {agents.map((agent) => (
-            <option key={agent.agentId} value={agent.agentId}>
-              {agent.agentName}
-            </option>
-          ))}
-        </select>
-        <Button aria-label="设置" onClick={openSettings}>
-          设置
-        </Button>
-      </div>
+        </Space>
+      </Flex>
 
       {overview && (
         <>
-          <div
-            style={{
-              padding: 14,
-              borderRadius: 8,
-              marginBottom: 16,
-              background: overview.meta.status === "healthy" ? "#f6ffed" : "#fffbe6",
-              border: "1px solid #d9d9d9",
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-            }}
-          >
-            <strong>{STATUS_LABEL[overview.meta.status]}</strong>
-            <span style={{ color: "rgba(0,0,0,.55)" }}>
-              已评测 {overview.meta.evaluatedCount} / 可评测 {overview.meta.eligibleCount} · 待处理{" "}
-              {overview.meta.backlog}
-            </span>
-            <div style={{ flex: 1 }} />
-            {overview.meta.status === "disabled" && <Button onClick={openSettings}>去设置</Button>}
-          </div>
+          <Alert
+            type={STATUS_ALERT[overview.meta.status]}
+            showIcon
+            style={{ marginBottom: 16 }}
+            title={
+              <Space size={12} wrap>
+                <strong>{STATUS_LABEL[overview.meta.status]}</strong>
+                <Text type="secondary">
+                  已评测 {overview.meta.evaluatedCount} / 可评测 {overview.meta.eligibleCount} ·
+                  待处理 {overview.meta.backlog}
+                </Text>
+              </Space>
+            }
+            action={
+              overview.meta.status === "disabled" ? (
+                <Button size="small" onClick={openSettings}>
+                  去设置
+                </Button>
+              ) : undefined
+            }
+          />
 
           {overview.meta.evaluatedCount === 0 ? (
-            <div
-              style={{
-                padding: 64,
-                textAlign: "center",
-                background: "#fff",
-                borderRadius: 8,
-                color: "rgba(0,0,0,.4)",
-              }}
-            >
-              暂无评测样本
-            </div>
+            <Card>
+              <Empty description="暂无评测样本" />
+            </Card>
           ) : (
             <>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(3, 1fr)",
-                  gap: 12,
-                  marginBottom: 16,
-                }}
-              >
+              <Flex gap={12} wrap style={{ marginBottom: 16 }}>
                 {METRICS.map(({ key, label }) => {
                   const metric = overview.metrics[key];
                   return (
-                    <button
+                    <Card
                       key={key}
-                      type="button"
+                      hoverable
+                      role="button"
+                      data-testid={`metric-${key}`}
                       aria-label={`${label} ${metric.value ?? "暂无"}`}
                       onClick={() =>
                         navigate(buildMetricTraceLink(key, metric.threshold, activeQuery.from!))
                       }
-                      style={{
-                        textAlign: "left",
-                        padding: 18,
-                        background: "#fff",
-                        border: `1px solid ${metric.low ? "#ffccc7" : "#f0f0f0"}`,
-                        borderRadius: 8,
-                        cursor: "pointer",
-                      }}
+                      style={{ flex: "1 1 200px", borderColor: metric.low ? "#ffccc7" : undefined }}
+                      styles={{ body: { padding: 18 } }}
                     >
-                      <div style={{ color: "rgba(0,0,0,.45)", fontSize: 12 }}>{label}</div>
-                      <div
-                        style={{
-                          fontSize: 30,
-                          fontWeight: 700,
-                          color: metric.low ? "#cf1322" : "#1677ff",
-                        }}
-                      >
-                        {metric.value ?? "—"}
-                      </div>
+                      <Statistic
+                        title={label}
+                        value={metric.value ?? "—"}
+                        styles={{ content: { color: metric.low ? "#cf1322" : "#1677ff" } }}
+                      />
                       {metric.sampleCount < 20 ? (
-                        <div style={{ color: "#d48806" }}>样本不足</div>
+                        <Text style={{ color: "#d48806" }}>样本不足</Text>
                       ) : metric.previousDelta !== null ? (
-                        <div>
+                        <Text type={metric.previousDelta >= 0 ? "success" : "danger"}>
                           {metric.previousDelta >= 0 ? "▲" : "▼"} {Math.abs(metric.previousDelta)}
-                        </div>
+                        </Text>
                       ) : null}
-                    </button>
+                    </Card>
                   );
                 })}
-              </div>
+              </Flex>
 
-              <div
-                style={{
-                  background: "#fff",
-                  border: "1px solid #f0f0f0",
-                  borderRadius: 8,
-                  padding: 16,
-                  marginBottom: 16,
-                }}
-              >
-                <div style={{ fontWeight: 600, marginBottom: 12 }}>质量趋势</div>
+              <Card title="质量趋势" style={{ marginBottom: 16 }}>
                 <TrendChart points={overview.trend} />
-              </div>
+              </Card>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <div
-                  style={{
-                    background: "#fff",
-                    border: "1px solid #f0f0f0",
-                    borderRadius: 8,
-                    padding: 16,
-                  }}
-                >
-                  <div style={{ fontWeight: 600, marginBottom: 12 }}>分应用质量</div>
-                  {overview.byAgent.map((agent) => (
-                    <div
-                      key={agent.agentId}
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        padding: "8px 0",
-                        borderBottom: "1px solid #f5f5f5",
-                      }}
-                    >
-                      <span>{agent.agentName}</span>
-                      <span>
-                        {agent.scores ? Math.min(...Object.values(agent.scores)) : "—"} · n=
-                        {agent.sampleCount}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-                <div
-                  style={{
-                    background: "#fff",
-                    border: "1px solid #f0f0f0",
-                    borderRadius: 8,
-                    padding: 16,
-                  }}
-                >
-                  <div style={{ fontWeight: 600, marginBottom: 12 }}>低质量样本</div>
-                  {overview.lowSamples.map((sample) => (
-                    <button
-                      key={sample.targetTraceId}
-                      type="button"
-                      onClick={() =>
-                        navigate(`/admin/traces/${sample.targetTraceId}?panel=quality`)
-                      }
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        textAlign: "left",
-                        padding: 10,
-                        border: 0,
-                        borderBottom: "1px solid #f5f5f5",
-                        background: "transparent",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <strong>{sample.question}</strong>
-                      <div style={{ color: "#cf1322" }}>
-                        {sample.minMetric} · {sample.minScore}
-                      </div>
-                      <div style={{ color: "rgba(0,0,0,.45)" }}>{sample.evidenceSummary}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <Flex gap={12} align="stretch" wrap>
+                <Card title="分应用质量" style={{ flex: "1 1 320px" }}>
+                  {overview.byAgent.length === 0 ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  ) : (
+                    overview.byAgent.map((agent, index) => (
+                      <Fragment key={agent.agentId}>
+                        {index > 0 && <Divider style={{ margin: "8px 0" }} />}
+                        <Flex justify="space-between" gap={12}>
+                          <Text>{agent.agentName}</Text>
+                          <Text>
+                            {agent.scores ? Math.min(...Object.values(agent.scores)) : "—"} · n=
+                            {agent.sampleCount}
+                          </Text>
+                        </Flex>
+                      </Fragment>
+                    ))
+                  )}
+                </Card>
+                <Card title="低质量样本" style={{ flex: "1 1 320px" }}>
+                  {overview.lowSamples.length === 0 ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  ) : (
+                    overview.lowSamples.map((sample, index) => {
+                      const open = () =>
+                        navigate(`/admin/traces/${sample.targetTraceId}?panel=quality`);
+                      return (
+                        <Fragment key={sample.targetTraceId}>
+                          {index > 0 && <Divider style={{ margin: "8px 0" }} />}
+                          <Flex
+                            vertical
+                            gap={2}
+                            role="button"
+                            tabIndex={0}
+                            onClick={open}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") open();
+                            }}
+                            style={{ cursor: "pointer", padding: "4px 0" }}
+                          >
+                            <Text strong>{sample.question}</Text>
+                            <Text type="danger">
+                              {sample.minMetric} · {sample.minScore}
+                            </Text>
+                            <Text type="secondary">{sample.evidenceSummary}</Text>
+                          </Flex>
+                        </Fragment>
+                      );
+                    })
+                  )}
+                </Card>
+              </Flex>
             </>
           )}
         </>
@@ -428,65 +428,62 @@ export default function QualityPage() {
         {settingsLoading || !settingsData ? (
           <Spin />
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <label>
-              开启在线评测{" "}
+          <Form layout="vertical">
+            <Form.Item label="开启在线评测">
               <Switch
                 checked={draft.enabled ?? settingsData.settings.enabled}
                 onChange={(enabled) => setDraft((value) => ({ ...value, enabled }))}
               />
-            </label>
-            <label>
-              抽样率{" "}
+            </Form.Item>
+            <Form.Item label="抽样率">
               <InputNumber
                 min={0}
                 max={1}
                 step={0.05}
+                style={{ width: "100%" }}
                 value={draft.sampleRate ?? settingsData.settings.sampleRate}
                 onChange={(value) => setDraft((state) => ({ ...state, sampleRate: value ?? 0 }))}
               />
-            </label>
-            <label>
-              Judge 模型{" "}
-              <select
+            </Form.Item>
+            <Form.Item label="Judge 模型">
+              <Select
                 aria-label="Judge 模型"
-                value={draft.judgeModelId ?? ""}
-                onChange={(event) =>
-                  setDraft((value) => ({ ...value, judgeModelId: event.target.value || null }))
+                data-testid="judge-select"
+                style={{ width: "100%" }}
+                placeholder="请选择 Judge 模型"
+                value={draft.judgeModelId ?? undefined}
+                onChange={(value?: string) =>
+                  setDraft((state) => ({ ...state, judgeModelId: value ?? null }))
                 }
-              >
-                <option value="" disabled>
-                  请选择 Judge 模型
-                </option>
-                {settingsData.models.judges.map((model) => (
-                  <option key={model.id} value={model.id} disabled={!model.available}>
-                    {model.name}
-                    {model.available ? "" : "（不可用）"}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Embedding 模型{" "}
-              <select
+                options={settingsData.models.judges.map((model) => ({
+                  value: model.id,
+                  disabled: !model.available,
+                  label: `${model.name}${model.available ? "" : "（不可用）"}`,
+                }))}
+              />
+            </Form.Item>
+            <Form.Item label="Embedding 模型">
+              <Select
                 aria-label="Embedding 模型"
-                value={draft.embeddingModelId ?? ""}
-                onChange={(event) =>
-                  setDraft((value) => ({ ...value, embeddingModelId: event.target.value || null }))
+                data-testid="embed-select"
+                style={{ width: "100%" }}
+                placeholder="请选择 Embedding 模型"
+                value={draft.embeddingModelId ?? undefined}
+                onChange={(value?: string) =>
+                  setDraft((state) => ({ ...state, embeddingModelId: value ?? null }))
                 }
-              >
-                <option value="" disabled>
-                  请选择 Embedding 模型
-                </option>
-                {settingsData.models.embeddings.map((model) => (
-                  <option key={model.id} value={model.id} disabled={!model.available}>
-                    {model.name}
-                    {model.available ? "" : "（不可用）"}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {modelError && <div style={{ color: "#cf1322" }}>{modelError}</div>}
+                options={settingsData.models.embeddings.map((model) => ({
+                  value: model.id,
+                  disabled: !model.available,
+                  label: `${model.name}${model.available ? "" : "（不可用）"}`,
+                }))}
+              />
+            </Form.Item>
+            {modelError && (
+              <Form.Item>
+                <Text type="danger">{modelError}</Text>
+              </Form.Item>
+            )}
             <ThresholdInput
               label="事实一致性阈值"
               value={draft.faithfulnessThreshold ?? settingsData.settings.faithfulnessThreshold}
@@ -512,20 +509,24 @@ export default function QualityPage() {
                 setDraft((value) => ({ ...value, contextPrecisionThreshold }))
               }
             />
-            {thresholdError && <div style={{ color: "#cf1322" }}>请输入 0–100 的整数</div>}
-            <label>
-              每日上限{" "}
+            {thresholdError && (
+              <Form.Item>
+                <Text type="danger">请输入 0–100 的整数</Text>
+              </Form.Item>
+            )}
+            <Form.Item label="每日上限">
               <InputNumber
                 min={1}
                 max={10_000}
+                style={{ width: "100%" }}
                 value={draft.dailyCap ?? settingsData.settings.dailyCap}
                 onChange={(value) => setDraft((state) => ({ ...state, dailyCap: value ?? 1 }))}
               />
-            </label>
-            <Button type="primary" onClick={saveSettings}>
+            </Form.Item>
+            <Button type="primary" block onClick={saveSettings}>
               保存
             </Button>
-          </div>
+          </Form>
         )}
       </Drawer>
     </div>
@@ -542,14 +543,13 @@ function ThresholdInput({
   onChange: (value: number) => void;
 }) {
   return (
-    <label>
-      {label}
-      <input
+    <Form.Item label={label}>
+      <InputNumber
         aria-label={label}
-        type="number"
+        style={{ width: "100%" }}
         value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
+        onChange={(next) => onChange(Number(next ?? 0))}
       />
-    </label>
+    </Form.Item>
   );
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { message } from "antd";
 import * as api from "../../api/client";
@@ -77,6 +77,13 @@ function renderQuality(entry = "/admin/quality?range=7d") {
   );
 }
 
+// antd Select 不是原生 <select>：mouseDown 打开下拉后，需等下拉门户渲染再点选项文本
+async function chooseAntdOption(testId: string, optionText: string) {
+  const combo = within(screen.getByTestId(testId)).getByRole("combobox");
+  fireEvent.mouseDown(combo);
+  fireEvent.click(await screen.findByText(optionText));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.getQualityOverview).mockResolvedValue(baseOverview);
@@ -92,7 +99,7 @@ it("renders disabled state and opens settings without hiding navigation", async 
   renderQuality();
   expect(await screen.findByText("在线评测未开启")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "去设置" }));
-  expect(await screen.findByRole("dialog", { name: "在线评测设置" })).toBeInTheDocument();
+  expect(await screen.findByText("在线评测设置")).toBeInTheDocument();
 });
 
 it("marks n<20 as insufficient and hides deltas", async () => {
@@ -159,7 +166,7 @@ it("hydrates range and agent from URL and sends the translated query", async () 
       }),
     ),
   );
-  expect(screen.getByRole("combobox", { name: "应用" })).toHaveValue("agent-2");
+  expect(screen.getByTestId("agent-filter")).toHaveTextContent("agent-2");
 });
 
 it("opens shareable Trace filters and low-sample quality detail", async () => {
@@ -186,15 +193,12 @@ it("opens shareable Trace filters and low-sample quality detail", async () => {
     ],
   });
   renderQuality();
-  fireEvent.click(await screen.findByRole("button", { name: /事实一致性/ }));
+  fireEvent.click(await screen.findByTestId("metric-faithfulness"));
   expect(screen.getByTestId("location")).toHaveTextContent("evalMetric=faithfulness");
   expect(screen.getByTestId("location")).toHaveTextContent("evalMax=80");
 
   renderQuality();
-  expect(await screen.findByTestId("trend-point-insufficient")).toHaveStyle({ opacity: "0.35" });
-  expect(screen.getAllByTestId("trend-series-faithfulness").length).toBeGreaterThan(0);
-  expect(screen.getAllByTestId("trend-series-answerRelevancy").length).toBeGreaterThan(0);
-  expect(screen.getAllByTestId("trend-series-contextPrecision").length).toBeGreaterThan(0);
+  expect(await screen.findByRole("img", { name: "三项质量指标趋势" })).toBeInTheDocument();
   fireEvent.click(screen.getAllByText("退款多久")[0]);
   expect(
     screen
@@ -222,9 +226,7 @@ it("shows unavailable models, validates thresholds, saves, and refreshes", async
   expect(await screen.findByText("请输入 0–100 的整数")).toBeInTheDocument();
   expect(api.updateOnlineEvalSettings).not.toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText("事实一致性阈值"), { target: { value: "85" } });
-  fireEvent.change(screen.getByRole("combobox", { name: "Judge 模型" }), {
-    target: { value: "judge-new" },
-  });
+  await chooseAntdOption("judge-select", "新 Judge");
   fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
   await waitFor(() => expect(api.updateOnlineEvalSettings).toHaveBeenCalled());
   await waitFor(() => expect(api.getQualityOverview).toHaveBeenCalledTimes(2));
@@ -242,8 +244,8 @@ it("requires explicit available models before enabling online evaluation", async
   });
   renderQuality();
   fireEvent.click(await screen.findByRole("button", { name: "设置" }));
-  expect(await screen.findByRole("combobox", { name: "Judge 模型" })).toHaveValue("");
-  expect(screen.getByRole("combobox", { name: "Embedding 模型" })).toHaveValue("");
+  expect(await screen.findByTestId("judge-select")).toHaveTextContent("请选择 Judge 模型");
+  expect(screen.getByTestId("embed-select")).toHaveTextContent("请选择 Embedding 模型");
   fireEvent.click(screen.getByRole("switch"));
   fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
   expect(
