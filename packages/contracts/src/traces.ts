@@ -75,7 +75,9 @@ export const TraceListRowSchema = z.object({
   outputTokens: z.number().int().nonnegative(),
   qualitySignals: z.array(QualitySignalSchema),
   promptVersionId: z.string().nullable(),
-  evaluation: TraceEvaluationSummarySchema,
+  // E-W1 contract is introduced before the read model lands in Task 7. Keep it
+  // additive during the rollout; Task 7 makes every returned row populate it.
+  evaluation: TraceEvaluationSummarySchema.optional(),
 });
 export type TraceListRow = z.infer<typeof TraceListRowSchema>;
 
