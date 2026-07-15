@@ -133,6 +133,8 @@ import {
   type TraceDetailResponse,
   TraceQualityDetailSchema,
   type TraceQualityDetail,
+  OnlineEvalSettingsResponseSchema,
+  type OnlineEvalSettingsResponse,
   MetricsOverviewResponseSchema,
   MetricsAppResponseSchema,
   type MetricsOverviewResponse,
@@ -342,6 +344,9 @@ export const getTrace = (traceId: string): Promise<TraceDetailResponse> =>
 
 export const getTraceQuality = (traceId: string): Promise<TraceQualityDetail> =>
   getJson(`/api/eval/quality/traces/${encodeURIComponent(traceId)}`, TraceQualityDetailSchema);
+
+export const getOnlineEvalSettings = (): Promise<OnlineEvalSettingsResponse> =>
+  getJson("/api/eval/quality/settings", OnlineEvalSettingsResponseSchema);
 
 function metricsParams(q: MetricsQuery): string {
   const params = new URLSearchParams();

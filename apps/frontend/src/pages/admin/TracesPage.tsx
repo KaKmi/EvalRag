@@ -12,7 +12,13 @@ import type {
   MetricsStageKey,
   TraceListQuery,
 } from "@codecrush/contracts";
-import { downloadTraceCandidates, getApplications, getTraces, getTraceSessions } from "../../api/client";
+import {
+  downloadTraceCandidates,
+  getApplications,
+  getOnlineEvalSettings,
+  getTraces,
+  getTraceSessions,
+} from "../../api/client";
 import dayjs from "dayjs";
 
 /** Trace 追踪：Trace/Session 双列表接真实读模型（ClickHouse VIEW）。M9 W1。 */
@@ -115,7 +121,8 @@ export default function TracesPage() {
     ? (rawEvalMetric as EvalMetricFilter)
     : undefined;
   const rawEvalMax = searchParams.get("evalMax");
-  const evalMax = rawEvalMax !== null && /^\d+$/.test(rawEvalMax) ? Number(rawEvalMax) : undefined;
+  const parsedEvalMax = rawEvalMax !== null && /^\d+$/.test(rawEvalMax) ? Number(rawEvalMax) : undefined;
+  const evalMax = parsedEvalMax !== undefined && parsedEvalMax <= 100 ? parsedEvalMax : undefined;
   const evalSort = searchParams.get("evalSort") === "desc" ? "desc" : evalMetric ? "asc" : undefined;
   const evalVerdict = searchParams.get("evalVerdict") === "low" ? "low" : undefined;
   const [range, setRange] = useState<RangeFilter>("今日");
@@ -144,6 +151,11 @@ export default function TracesPage() {
   }, [searchParams]);
 
   const [apps, setApps] = useState<Application[]>([]);
+  const [qualityThresholds, setQualityThresholds] = useState({
+    faithfulness: 85,
+    answerRelevancy: 80,
+    contextPrecision: 80,
+  });
   const [data, setData] = useState<TraceListResponse | null>(null);
   const [tracePage, setTracePage] = useState(1);
   const [sessions, setSessions] = useState<SessionListRow[] | null>(null);
@@ -161,6 +173,20 @@ export default function TracesPage() {
       .then(setApps)
       .catch(() => {
         /* 下拉降级为仅「全部」，不阻塞列表 */
+      });
+  }, []);
+
+  useEffect(() => {
+    getOnlineEvalSettings()
+      .then(({ settings }) =>
+        setQualityThresholds({
+          faithfulness: settings.faithfulnessThreshold,
+          answerRelevancy: settings.answerRelevancyThreshold,
+          contextPrecision: settings.contextPrecisionThreshold,
+        }),
+      )
+      .catch(() => {
+        /* Keep documented defaults when settings are temporarily unavailable. */
       });
   }, []);
 
@@ -546,7 +572,7 @@ export default function TracesPage() {
                       <div style={{ color: "rgba(0,0,0,.45)" }}>{(r.inputTokens + r.outputTokens).toLocaleString()}</div>
                       <div>
                         {r.evaluation?.status === "scored" ? (
-                          <span style={{ color: r.evaluation.minScore < 70 ? "#cf1322" : "#1677ff", fontWeight: 600 }}>
+                          <span style={{ color: r.evaluation.minScore < qualityThresholds[r.evaluation.minMetric] ? "#cf1322" : "#1677ff", fontWeight: 600 }}>
                             {r.evaluation.minScore} · {r.evaluation.judgeVersion}
                           </span>
                         ) : (

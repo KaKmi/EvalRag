@@ -8,6 +8,7 @@ vi.mock("../../api/client", () => ({
   getTraces: vi.fn(),
   getTraceSessions: vi.fn(),
   getApplications: vi.fn(),
+  getOnlineEvalSettings: vi.fn(),
   downloadTraceCandidates: vi.fn(),
 }));
 
@@ -50,6 +51,22 @@ const sessionRow: SessionListRow = {
 
 beforeEach(() => {
   mocked.getApplications.mockResolvedValue([]);
+  mocked.getOnlineEvalSettings.mockResolvedValue({
+    settings: {
+      id: "default",
+      enabled: true,
+      sampleRate: 0.1,
+      judgeModelId: null,
+      embeddingModelId: null,
+      faithfulnessThreshold: 85,
+      answerRelevancyThreshold: 80,
+      contextPrecisionThreshold: 80,
+      dailyCap: 500,
+      judgeVersion: "online-v1",
+      updatedAt: "2026-07-15T02:00:00.000Z",
+    },
+    models: { judges: [], embeddings: [] },
+  });
   mocked.getTraces.mockResolvedValue(resp([traceRow()]));
   mocked.getTraceSessions.mockResolvedValue([sessionRow]);
 });
@@ -109,6 +126,33 @@ describe("TracesPage (M9 W1)", () => {
       expect.objectContaining({ evalMetric: "faithfulness", evalMax: 70, evalSort: "asc" }),
     );
     expect(screen.getByRole("combobox", { name: "评测指标" })).toHaveValue("faithfulness");
+  });
+
+  it("silently ignores an out-of-range quality maximum", async () => {
+    renderPage("/admin/traces?evalMetric=faithfulness&evalMax=999&evalSort=asc");
+    await screen.findByText("怎么退款");
+    expect(mocked.getTraces).toHaveBeenCalledWith(
+      expect.objectContaining({ evalMetric: "faithfulness", evalMax: undefined }),
+    );
+  });
+
+  it("colors scores using the configured metric threshold", async () => {
+    mocked.getTraces.mockResolvedValueOnce(
+      resp([
+        traceRow({
+          evaluation: {
+            status: "scored",
+            scores: { faithfulness: 80, answerRelevancy: 90, contextPrecision: 90 },
+            minMetric: "faithfulness",
+            minScore: 80,
+            judgeVersion: "online-v1",
+            evaluatedAt: "2026-07-15T02:00:00.000Z",
+          },
+        }),
+      ]),
+    );
+    renderPage();
+    expect(await screen.findByText(/80 · online-v1/)).toHaveStyle({ color: "rgb(207, 19, 34)" });
   });
 
   it("updates URL and request when the quality sort changes", async () => {

@@ -6,6 +6,7 @@ const enabled = process.env.RUN_CLICKHOUSE_TESTS === "1";
 const describeClickHouse = enabled ? describe : describe.skip;
 const marker = "ew1-task7-pagination";
 const targetIds = Array.from({ length: 45 }, (_, index) => `c0de${index.toString(16).padStart(28, "0")}`);
+const unscoredTraceId = "cafe" + "0".repeat(28);
 
 function rawSpan(
   traceId: string,
@@ -52,6 +53,14 @@ describeClickHouse("Trace quality pagination", () => {
         "gen_ai.agent.id": "ew1-task7-agent",
         "gen_ai.agent.name": "E-W1 Task 7 Agent",
         "codecrush.io.input": `question-${index}`,
+      }),
+    );
+    roots.push(
+      rawSpan(unscoredTraceId, unscoredTraceId.slice(0, 16), "2026-07-15 01:00:00.000000000", "rag.pipeline", {
+        "codecrush.span.kind": "chain",
+        "gen_ai.agent.id": "ew1-task7-agent",
+        "gen_ai.agent.name": "E-W1 Task 7 Agent",
+        "codecrush.io.input": "unscored question",
       }),
     );
     const evaluationSpans = targetIds.flatMap((targetTraceId, index) => {
@@ -125,6 +134,7 @@ describeClickHouse("Trace quality pagination", () => {
     expect(pages.map((page) => page.items.length)).toEqual([20, 20, 5]);
     expect(pages.every((page) => page.total === 45)).toBe(true);
     expect(new Set(rows.map((row) => row.traceId)).size).toBe(45);
+    expect(rows.some((row) => row.traceId === unscoredTraceId)).toBe(false);
     expect(rows.find((row) => row.traceId === targetIds[0])?.evaluation).toMatchObject({
       status: "scored",
       judgeVersion: "online-v2",

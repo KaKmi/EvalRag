@@ -433,11 +433,13 @@ export class ClickHouseTracesRepository {
     const metricColumn = q.evalMetric
       ? ({ faithfulness: "faithfulness", relevancy: "answer_relevancy", precision: "context_precision" } as const)[q.evalMetric]
       : undefined;
+    if (metricColumn) conds.push("notEmpty(ifNull(judge_version, ''))");
     if (metricColumn && q.evalMax !== undefined) {
       conds.push(`${metricColumn} <= {evalMax:Float64}`);
       params.evalMax = q.evalMax;
     }
     if (q.evalVerdict === "low") {
+      if (!metricColumn) conds.push("notEmpty(ifNull(judge_version, ''))");
       conds.push("least(faithfulness, answer_relevancy, context_precision) < 70");
     }
     return { where: `WHERE ${conds.join(" AND ")}`, params };
