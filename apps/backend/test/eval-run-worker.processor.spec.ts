@@ -48,6 +48,8 @@ interface SetupOptions {
   scores?: Partial<OfflineEvaluationScores>;
   runStatus?: EvalRunRow["status"];
   recorded?: string[];
+  /** 注入的 `AppConfigService.evalRunCaseTimeoutMs`（默认取离线默认值 120s）。 */
+  caseTimeoutMs?: number;
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -135,7 +137,10 @@ function setup(opts: SetupOptions = {}) {
   };
 
   const orchestration = {
-    runForEvaluation: jest.fn(async (_cfg: unknown, question: string) => {
+    // 第 3 参（`{ runId, timeoutMs }`）显式入签名：超时预算是注入配置而非常量后，
+    // 「worker 到底把哪个值传下去了」本身就是要断言的行为。
+    runForEvaluation: jest.fn(
+      async (_cfg: unknown, question: string, _opts: { runId: string; timeoutMs: number }) => {
       const seq = Number(question.replace("问题 ", ""));
       const timedOut = (opts.timeoutOn ?? []).includes(seq);
       return {
@@ -147,7 +152,8 @@ function setup(opts: SetupOptions = {}) {
         isFallback: false,
         timedOut,
       };
-    }),
+      },
+    ),
   };
 
   const judge = { scoreOffline: jest.fn(async () => scores(opts.scores)) };
@@ -159,12 +165,14 @@ function setup(opts: SetupOptions = {}) {
   };
   const queue = { publish: jest.fn(async () => undefined), subscribe: jest.fn(), schedule: jest.fn() };
 
+  const config = { evalRunCaseTimeoutMs: opts.caseTimeoutMs ?? 120_000 };
   const processor = new EvalRunWorkerProcessor(
     queue as never,
     repo as never,
     orchestration as never,
     judge as never,
     applications as never,
+    config as never,
   );
   return {
     processor,
@@ -257,6 +265,25 @@ describe("EvalRunWorkerProcessor", () => {
     const { processor, results } = setup({ snapshot: [c(1)], timeoutOn: [1] });
     await processor.processRun("r1");
     expect(results[0].previewTraceId).toBe("trace-1");
+  });
+
+  // QA P1：30s 硬编码常量让 4 次真实 run 100% 判超时、一个分都出不来。超时预算改为
+  // 注入的配置项——这两条钉死「worker 用的是配置值，不是任何硬编码常量」。
+  it("单用例超时预算取自 AppConfigService（离线默认 120s，非在线熔断的 30s）", async () => {
+    const { processor, orchestration } = setup({ snapshot: [c(1)] });
+    await processor.processRun("r1");
+    expect(orchestration.runForEvaluation.mock.calls[0][2]).toMatchObject({ timeoutMs: 120_000 });
+  });
+
+  it("env 覆盖后 worker 用覆盖值，超时文案也报同一个值", async () => {
+    const { processor, orchestration, results } = setup({
+      snapshot: [c(1)],
+      caseTimeoutMs: 45_000,
+      timeoutOn: [1],
+    });
+    await processor.processRun("r1");
+    expect(orchestration.runForEvaluation.mock.calls[0][2]).toMatchObject({ timeoutMs: 45_000 });
+    expect(results[0].error).toBe("编排超时（判定阈值 45000ms）");
   });
 
   it("配置版本不可用 → run failed", async () => {

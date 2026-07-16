@@ -24,7 +24,7 @@ import type {
   EvalRunStatus,
   EvalVerdict,
 } from "@codecrush/contracts";
-import { getEvalRunReport, stopEvalRun } from "../../api/client";
+import { ApiError, getEvalRunReport, stopEvalRun } from "../../api/client";
 
 const { Title, Text } = Typography;
 
@@ -109,10 +109,18 @@ function ScoreCell({ score, metric }: { score: number | null; metric: EvalMetric
 
 type Row = EvalRunResult & { skipped: boolean };
 
+/**
+ * 加载失败的**两种**性质（QA P3-4）：
+ *  · `not_found` —— 服务器明确答 404，「不存在」是它说的，可以照直转述；
+ *  · `load_failed` —— 网络故障 / 响应不满足契约（Zod 抛错）。报告很可能**在**，是我们没读回来。
+ */
+type LoadError = { kind: "not_found" } | { kind: "load_failed"; detail: string };
+
 export default function EvalRunDetailPage() {
   const { runId = "" } = useParams();
   const [report, setReport] = useState<EvalRunReport | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<LoadError | null>(null);
   const [sortKey, setSortKey] = useState<EvalMetricKey | "min">("min");
   const [evidenceOf, setEvidenceOf] = useState<Row | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -120,9 +128,17 @@ export default function EvalRunDetailPage() {
   const load = useCallback(async () => {
     try {
       setReport(await getEvalRunReport(runId));
+      setLoadError(null);
     } catch (error) {
       // §17：失败保留上次数据，不清空不白屏（轮询期间尤其重要）
       message.error(error instanceof Error ? error.message : "评测报告加载失败");
+      // 「服务器说没有这条」≠「没读回来」。只有 404 才是前者；Zod 解析失败/网络故障
+      // 若也说「报告不存在」，就是在**断言一件没被证实的事**（QA P3-4：实际误导了排查）。
+      setLoadError(
+        error instanceof ApiError && error.status === 404
+          ? { kind: "not_found" }
+          : { kind: "load_failed", detail: error instanceof Error ? error.message : String(error) },
+      );
     } finally {
       setLoading(false);
     }
@@ -193,7 +209,32 @@ export default function EvalRunDetailPage() {
       </Flex>
     );
   }
-  if (!report) return <Empty description="评测报告不存在" />;
+  if (!report) {
+    // 404 之外的失败**不许**说「不存在」——它是本地故障，报告可能好端端在服务器上。
+    if (loadError?.kind === "load_failed") {
+      return (
+        <Alert
+          type="error"
+          showIcon
+          message="评测报告加载失败"
+          description={
+            <>
+              <div>未能读取报告，这不代表它不存在（可能是网络故障或响应格式不符）。</div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {loadError.detail}
+              </Text>
+              <div style={{ marginTop: 12 }}>
+                <Button size="small" onClick={() => void load()}>
+                  重试
+                </Button>
+              </div>
+            </>
+          }
+        />
+      );
+    }
+    return <Empty description="评测报告不存在" />;
+  }
 
   const { run, scorecard } = report;
   const percent = run.totalCases > 0 ? Math.round((run.doneCases / run.totalCases) * 100) : 0;
@@ -531,7 +572,8 @@ const POINT_STATUS: Record<string, { label: string; color: string }> = {
 /** §17.3「判分依据抽屉 Drawer 560px · eval_results.judge_evidence」。 */
 function EvidenceDrawer({ row, onClose }: { row: Row | null; onClose: () => void }) {
   return (
-    <Drawer title={`判分依据 · #${row?.seq ?? ""}`} width={560} open={row !== null} onClose={onClose}>
+    // antd v6：`width` 已废弃 → `size`（数值语义不变）。§17.3 的 560px 不变。
+    <Drawer title={`判分依据 · #${row?.seq ?? ""}`} size={560} open={row !== null} onClose={onClose}>
       {row && (
         <>
           <Text strong>{row.question}</Text>

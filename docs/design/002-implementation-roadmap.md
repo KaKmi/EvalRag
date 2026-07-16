@@ -42,7 +42,7 @@ last_modified: "2026-07-13"
 | **M8** | 问答 / RAG 编排 | ✅ | 四波全交付：**T1**（PR #16）/ **T2**（PR #18）/ **T3**（PR #19）/ **T4**（PR #20，C 端问答页真实化 + markdown）——见附录 A | 013 / 014 |
 | **M9** | Trace 追踪（完整版） | 🔄 | W1+W2（#21）/P1 修复（#22）/每节点面板（#23）已合并；**W3a Session 详情**（#25）+ 路线图回写（#24）待合；**cost 真算按用户决策移出首期**（先算 token）——见附录 A | 015 |
 | **M10** | 运行看板 | 🔄 | **W-a 后端 + W-b 前端已实现（PR #28 待合）**：读模型汇总层 + D-metrics + `/metrics/*` + 看板前端（6 卡/趋势/质量信号/下钻）。4 前端测试待收尾（见 PR #28）；cost 真算延后 | 016 |
-| **M11** | 评测集 / 管理 / 报告 | ⬜ | 里程碑 2（首期不做） | — |
+| **M11** | 评测集 / 管理 / 报告 | 🔄 | 原列「里程碑 2 不做」，实际已按**评测飞轮 E-W 波次**推进：**E-W1 在线质量**（PR #31）+ **E-W2a 离线 run/评测集**（`ship/eval-w2a`，含运行时 QA 修复）已交付；**E-W2b**（重放/对比屏4/检索层指标）+ **E-W2c 思考 token 治理**待做——见附录 A「评测飞轮（E-W）分波交付进度」 | 017 / 018 |
 | **M12** | RBAC 权限 | ⬜ | 里程碑 2（首期不做） | — |
 
 **当前下一步**：**M9 首期基本收口**——W1+W2（#21）/P1（#22）/每节点面板（#23）已合并，W3a Session 详情（#25）+ 路线图回写（#24）待合。cost 真算（W3b）按用户决策移出首期（先算 token，需从零建定价体系，延后单独拆）。M9 之后即进里程碑 2（M10 运行看板等，首期不做）。
@@ -181,6 +181,19 @@ M9 按 015 拆三波（见 015「建议分波」），逐波闭环：
 
 > 提示（给后续会话）：M9 **W1+W2（#21）+ P1（#22）+ 每节点面板（#23）已合并 main；W3a Session 详情（#25）+ 本回写（#24）待合**。**M9 首期到此基本收口**——余下仅 cost 真算，已按用户决策移出首期（先算 token）。运行时 QA（真 ClickHouse trace）需起 docker + `pnpm start`/`dev`（dev 现也落 trace）；本地测试全绿但运行时验收待人工。
 
+### 评测飞轮（E-W）分波交付进度
+
+设计见 017（在线）/ 018（离线）。产品权威 `docs/design/assets/eval-flywheel-product-design.html`。
+
+| 波 | 范围 | 状态 |
+|---|---|---|
+| **E-W1** | 在线答案质量评测：PG 控制面 + 周期抽样 + reference-free 三指标 Judge + `rag.eval` → ClickHouse 读模型 + `/eval/quality/*` + Trace 质量列 + `/admin/quality` 总览。全程 chat 零改动 | **已交付**（PR #31） |
+| **E-W2a** | 离线评测：gold 题库 CRUD（软删/不可变版本/CSV 逐行回执）+ `eval-runs` 顶点模块 + run 引擎（发起/停止/预算熔断/租约 + 僵尸回收）+ 屏3 报告。**核心不变量：离线分数只落 Postgres，绝不发 `rag.eval` span**；指标 4/8 | **已交付**（分支 `ship/eval-w2a`，待 PR）；运行时 QA 抓 1×P1 + 1×P2 + 4×P3，**已修**（见下方「E-W2a QA 修复」） |
+| **E-W2b** | 重放、版本对比屏4、检索层 gold-docs 指标（Recall/NDCG/命中率）、Citation、每题重复聚合、配置版本引用保护、`timeoutMs` 硬中断（需 plumb AbortSignal）、doc→chunk 级 gold 选择器 | **待做**（范围见 018 §12） |
+| **E-W2c 思考 token 治理** | **慢的真正根因，实测驱动、独立成波**（018 §12 缺口 17）：`qwen3.6-flash` 是 hybrid thinking 且**默认开**，全仓**零** thinking 控制（`enable_thinking`/`reasoning_effort`/`no_think` 全无命中），adapter 只发 `response_format`。实测 `rewrite` 均 **8.4s / 637 out-tok**、`intent` 均 **7.3s / 745 out-tok**（30 天全量、**线上真实用户**，非评测专属）⇒ **每次提问干等 ~15.7s**；单 trace 更达 rewrite 16.06s/1759 tok + intent 11.65s/1322 tok（应为 ~30 / ~5 tok）。叠加 ~20% 结构化调用因必填字段缺失而重试一次（供应商 `json_schema` **未真正强制 schema**）。收益：单用例 ~36s → ~10s，**线上问答快 3 倍以上** | **待做**（用户 2026-07-16 决策独立成波）。**动 models adapter + 四节点 params = chat 关键路径 + 行为性变更**，故需自己的 design→dev 闭环与回归证据，不搭车 QA 修复 |
+
+> 提示（给后续会话）：**E-W2a 的 30s→120s 超时修复是安全网、不是解药**——根因是 E-W2c 的思考 token（即便无重试，8.4+7.3+8 ≈ 24s 也已贴着原 30s 阈值）。**E-W2c 的收益主要在线上问答（快 3×+），评测只是第一个把它照出来的场景**，不要因为它记在评测波次里就以为只影响评测。
+
 ### M4.1 需求记录与暂停点
 
 **状态：第一波（Rollout 1–4）已落地，Docling/OCR 待 M4.1b。** 2026-07-10 经 `/ship:design`+`/ship:dev` 实现：Profile 注册表、`document_processing_runs` + 冻结快照、Canonical Document（Markdown + paragraph blocks + 页码溯源）、三段质量门、Run 编排（含 retry/僵尸兜底/409）、双队列迁移窗口 + 特性开关、蓝绿重建 scope、REST 端点、前端 Profile 选择（创建/编辑/上传覆盖/处理历史/重解析）；现有 `general/qa/custom` golden 无损迁移。首期 auto 仅快速解析（`pdf-parse` 逐页）。**版面解析（Docling）、OCR、表格/图片结构块、资源归档（Rollout 5–6）留 M4.1b**；真实文档验收与真 pg-boss/迁移回放留 QA 波。详见 010 Status。
@@ -215,6 +228,7 @@ M9 按 015 拆三波（见 015「建议分波」），逐波闭环：
 
 ## 变更记录
 
+- **2026-07-16**：**E-W2a 运行时 QA 修复（分支 `ship/eval-w2a`）**——4 次真实 run（2 个应用）暴露 **P1：30s 单用例超时让本功能一个分都出不来**（100% `verdict=timeout`；`rewrite`+`intent` 在生成开始前即吃掉 27.7s/30s，整条用例 36~46s）。**非逻辑 bug**——超时处理符合设计（记 NULL 不记 0），错在 30s 是从**在线熔断**继承的：它约束的是「人在等」，而离线批跑无人等待。已按用户决策改为 `EVAL_RUN_CASE_TIMEOUT_MS` env 配置（**离线默认 120s**，走 `config.schema.ts` → `AppConfigService` 既有模式；在线口径未动），**主动偏离原型 §6 并记入 018 缺口 16**。另修：**P2** 屏2 对「跑过 5 次 run 但没出分」的集合显示「未运行」= **断言假事实**（契约加 `hasCompletedRun` 消歧位，两态分词「未运行」/「未出分」，NULL 仍绝不退化成 0——同 018 缺口 2 在屏3 解决过、屏2 漏掉的同类问题）；**P3-1** 发起 Modal 硬编码「3~6 分钟」而原型那句是**对 50 条说的** → 按用例数线性缩放（50 条仍逐字复现原型，§19.2 的固定 toast 未动）；**P3-3** antd v6 `Drawer width` → `size`（全仓仅此两处）；**P3-4** 任何加载失败都渲染「评测报告不存在」，与真 404 无法区分（QA 实际误诊）→ 新增带状态码的 `ApiError`，仅 404 才说「不存在」，其余报加载失败 + 透出原始错误 + 重试。**未改**：faithfulness 逐条「支持/不支持」（E-W1 在线代码，改 evidence 即改解析契约 → 触发 017 的 `judgeVersion` 升版要求 → 在线分数断代，属产品决策，记 018 缺口 18）。后端 881 绿（+5）、contracts 244、前端 203 绿（隔离；全量并行 flake 为既有，**基线 04f9926 实测同样 6 红**）、lint 0、build 5/5。**根因另案**：`rewrite`/`intent` 被思考 token 拖垮（018 缺口 17 / 002 附录 A「E-W2c」）——**超时调大只是安全网，不是解药**。
 - **2026-07-16**：**E-W2a 离线评测 run 与评测集交付（分支 `ship/eval-w2a`，待 PR）**——设计见 018，8 story / 6 波全绿。范围：gold 题库 CRUD（软删 + 不可变版本 + CSV 前端解析逐行回执）→ 新增 `eval-runs` 顶点模块（依赖 chat 编排 + evaluations 判分 + applications 版本解析，图无环）→ run 引擎（发起/停止/预算熔断/全局串行租约 + 续租心跳 + 僵尸回收）→ 屏3 报告（antd）。**核心不变量：离线分数只落 Postgres，绝不发 `rag.eval` span**（`codecrush_eval_targets_mv` 只按 `SpanName` 过滤、不看 preview → 发了即污染屏1；有 infra-gated 污染回归测试守，且反证「标 preview 救不了你」，推翻原型 §15 E2）。指标 **4/8**（Faithfulness/AnswerRelevancy/ContextPrecision 复用 + 新增 Correctness）；检索层 Recall/NDCG/命中率 + Citation 显式空态「—/未标 gold docs」，延 **W2b**。编排为**加性重构**（抽 `runWithConfig`、加 `runForEvaluation`，线上问答行为逐字节不变，既有 chat/evaluations 测试一个未改全绿）；`EvaluationJudgeService.score()` 一行未动、在线 `judgeVersion` 仍 `online-v1`、`003-eval-views.sql` 未改（E-W1 基线零回归）。完整对抗档：per-story peer review（fallback fresh-Agent，独立性弱于跨 provider 但均执行复现），累计抓 3 个 P1（correctness 空响应写 0 分、run 异常路径回收器失效致功能死锁、回收漏清 lease_owner）+ 多个 P2/P3 并全修，含新增真库租约测试（因租约语义活在 SQL 三值逻辑上、fake 复刻不出）。后端 875 测试绿（+9 DB 门控 +4 infra 门控）、前端 195 绿（隔离跑；全量并行是既有 JSDOM flake，与本波无关）、lint 0、build 5/5。**W2b 待做**（见 018 §12 已知取舍：重放、版本对比屏4、检索层 gold-docs 指标、Citation、每题重复聚合、配置版本引用保护、`timeoutMs` 硬中断需 plumb AbortSignal、faithfulness 空 claims→100 的离线口径裁决、failed run 屏2/屏3 得分口径裁决）。
 - **2026-07-16**：**E-W1 在线答案质量评测闭环交付（PR #31）**——契约/OTel 语义 → PG 控制面+周期调度 → 原文输入+三指标 reference-free Judge → worker 分层抽样+`rag.eval` → ClickHouse 去重读模型+`/eval/quality/*` → Trace 质量列/筛选/只读面板 → `/admin/quality` 总览，全程 chat 零改动，基线见 017。落地 QA 修三缺陷：`getLowSamples` 列名限定叠 USING 致 `targetTraceId` 恒 undefined 崩总览（列显式别名）、`getByAgent` 空 `agent_id` 幽灵行违 min(1) 契约（过滤空值）、chat 根 span 写原始 agentId 致分应用聚合按 slug/UUID 碎片化（改写规范 `cfg.applicationId`，行为中性、历史不回填）。答案质量页重构为 antd + 共享 echarts `MetricChart`。后端 792 测试绿、lint 0、build 绿。**applicationId 全统一（API 字段/旧 `agents` 表/历史回填）留作独立决策；下一步 E-W2（评测集/报告/重放）。**
 - **2026-07-15**：冻结 E-W1 在线答案质量评测实施基线（017）。交付顺序为共享契约与语义 → PG 控制面/周期调度 → 原文输入与三指标 Judge → worker/抽样/`rag.eval` → ClickHouse/API → Trace 联动 → 质量总览与设置；每一阶段保持 chat 零改动、可独立验证与回滚。

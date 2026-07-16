@@ -157,6 +157,7 @@ describeInfra("E-W2a 污染回归：离线 run 绝不进在线质量总览", () 
       orchestration as never,
       judge as never,
       applications as never,
+      { evalRunCaseTimeoutMs: 120_000 } as never,
     );
     return { processor, orchestration, judge };
   }

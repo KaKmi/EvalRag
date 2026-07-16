@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Inject, Injectable, Logger, type OnModuleInit } from "@nestjs/common";
 import { z } from "zod";
 import type { EvalMetricKey, EvalRunStatus, EvalVerdict } from "@codecrush/contracts";
+import { AppConfigService } from "../../platform/config/config.service";
 import { EVAL_RUN_JOB, EVAL_RUN_QUEUE, EVAL_RUN_WORKER } from "../../platform/queue/queue.constants";
 import type { Queue } from "../../platform/queue/queue.port";
 import { ApplicationsService } from "../applications/applications.service";
@@ -13,7 +14,6 @@ import type {
 } from "../evaluations/evaluation.types";
 import {
   EVAL_RUN_BASE_METRIC_KEYS,
-  EVAL_RUN_CASE_TIMEOUT_MS,
   EVAL_RUN_JOB_RETRY_LIMIT,
   EVAL_RUN_LEASE_MS,
   EVAL_RUN_LOW_THRESHOLD,
@@ -96,6 +96,7 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
     private readonly orchestration: OrchestrationService,
     private readonly judge: EvaluationJudgeService,
     private readonly applications: ApplicationsService,
+    private readonly config: AppConfigService,
   ) {}
 
   /**
@@ -221,11 +222,13 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
     modelIds: EvaluationModelIds,
   ): Promise<void> {
     const startedAt = Date.now();
+    // 离线口径：默认 120s，**不套用**在线熔断的 30s（config.schema.ts + 018 §12 缺口 16）。
+    const timeoutMs = this.config.evalRunCaseTimeoutMs;
     // 与线上**同一段编排代码**（persist=false + rag.eval.run_id 标在 rag.pipeline 根 span 上）。
     // 绝不在此复制一份编排逻辑（Global Constraints）。超时不抛，返回 timedOut=true。
     const outcome = await this.orchestration.runForEvaluation(cfg, content.question, {
       runId,
-      timeoutMs: EVAL_RUN_CASE_TIMEOUT_MS,
+      timeoutMs,
     });
     const orchestrationTokens = outcome.usage.inputTokens + outcome.usage.outputTokens;
 
@@ -249,7 +252,7 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
         answer: outcome.replyText,
         tokensUsed: orchestrationTokens,
         durationMs: Date.now() - startedAt,
-        error: `编排超时（判定阈值 ${EVAL_RUN_CASE_TIMEOUT_MS}ms）`,
+        error: `编排超时（判定阈值 ${timeoutMs}ms）`,
       });
       return;
     }

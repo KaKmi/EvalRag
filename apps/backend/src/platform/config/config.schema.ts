@@ -15,6 +15,24 @@ export const envSchema = z.object({
   MODEL_API_KEY_ENCRYPTION_KEY: z.string().min(44),
   BLOB_STORE_PATH: z.string().default("./.data/blobs"),
   INGESTION_EMBED_BATCH_SIZE: z.coerce.number().int().positive().default(10),
+  /**
+   * 离线评测**单用例编排超时**（`eval-runs` worker 专用；在线 chat 不读本项）。
+   *
+   * **默认 120s，刻意偏离原型 §6「单用例编排超时 30s(同线上熔断)」**（018 §12 缺口 16）：
+   * 那个 30s 继承自**在线**熔断，约束的是「人在等」的时长；离线批跑没有人在等。实测
+   * （E-W2a QA，4 次真实 run / 2 个应用）30s 下 **100% 用例判超时、一个分都出不来**——
+   * 仅 rewrite + intent 两次结构化调用就吃掉 27.7s，整条用例 36~46s。120s ≈ 实测最慢
+   * 46.2s 的 2.6 倍余量，保留原型「封顶防失控」的意图，只是不再把正常用例当失控。
+   *
+   * ⚠️ 这是**判定阈值**，不是墙钟上限（018 §12 缺口 9，peer review 实测）：
+   * `runForEvaluation` 的 `timeoutMs` 只决定何时判 `timedOut=true`，实际返回时刻由在途
+   * `next()` 自行结束决定（异步生成器 `return()` 无法抢占执行中的 `next()`）。
+   * 勿据此值假设一条用例最多耗时这么久——真正的硬中断要等 W2b 把 AbortSignal
+   * plumb 进 `ModelProviderPort`。
+   *
+   * 调大它是**安全网不是解药**：根因是模型的思考 token（018 §12 缺口 17）。
+   */
+  EVAL_RUN_CASE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   // M4.1 文档处理 Profile 特性开关：默认开；置 "false" 回退 legacy chunkTemplate 入库路径
   // （不建 Run、payload 无 processingRunId），供灰度/回滚。
   PROCESSING_PROFILES_ENABLED: z

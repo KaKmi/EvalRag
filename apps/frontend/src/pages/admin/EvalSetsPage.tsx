@@ -171,10 +171,31 @@ function downloadCsv(filename: string, table: string[][]): void {
   URL.revokeObjectURL(url);
 }
 
-/** 原型 §6 预估条：耗时/Token/preview trace 条数。裁判调用 ~3 次/条，token 粗估 3.6k/条。 */
+/**
+ * 原型 §6 预估条：耗时/Token/preview trace 条数。裁判调用 ~3 次/条，token 粗估 3.6k/条。
+ *
+ * 耗时**按用例数线性缩放**（QA P3-1）：原型那句「3~6 分钟」是**对 50 条说的**（§6 的示例
+ * 集就是「售后核心 50 题」），照抄成定值会让 5 条的集合也报 3~6 分钟。锚点即取原型的
+ * 50 条 ⇒ 3.6~7.2 s/条，故 50 条时仍逐字复现原型的「3~6 分钟」。
+ * （§19.2 发起后那条 toast「预计 3~6 分钟」是设计上的固定串，不在此列。）
+ */
+const ESTIMATE_ANCHOR_CASES = 50;
+const ESTIMATE_MIN_MINUTES_PER_ANCHOR = 3;
+const ESTIMATE_MAX_MINUTES_PER_ANCHOR = 6;
+
+/** 分钟数取一位小数，但整数不拖 `.0`（「3 分钟」而非「3.0 分钟」）。 */
+function minutes(caseCount: number, perAnchor: number): string {
+  const value = (caseCount * perAnchor) / ESTIMATE_ANCHOR_CASES;
+  // <0.1 分钟也不报「0」——最小报 0.1，「0 分钟」是假承诺。
+  const rounded = Math.max(0.1, Math.round(value * 10) / 10);
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
 function estimate(caseCount: number): string {
   const tokens = Math.round((caseCount * 3600) / 1000);
-  return `预估：${caseCount} 条 × (1 次编排 + ~3 次裁判调用) ≈ 耗时 3~6 分钟 · Token ~${tokens}k · 产出 ${caseCount} 条 preview trace（不入线上统计）`;
+  const low = minutes(caseCount, ESTIMATE_MIN_MINUTES_PER_ANCHOR);
+  const high = minutes(caseCount, ESTIMATE_MAX_MINUTES_PER_ANCHOR);
+  return `预估：${caseCount} 条 × (1 次编排 + ~3 次裁判调用) ≈ 耗时 ${low}~${high} 分钟 · Token ~${tokens}k · 产出 ${caseCount} 条 preview trace（不入线上统计）`;
 }
 
 export default function EvalSetsPage() {
@@ -353,10 +374,20 @@ function SetsTable({
       title: "上次得分",
       key: "lastRunScore",
       width: 110,
-      // 原型 §5 显示「82.0」（一位小数，非整数）；null → 灰字「未运行」，绝不显示 0。
+      // 原型 §5 显示「82.0」（一位小数，非整数）；null → 灰字，绝不显示 0。
+      // null 有**两种**成因，必须分词（018 §12 缺口 16 / QA P2）：跑过 5 次 run 的集合被
+      // 说成「未运行」是**断言假事实**——同 018 §12 缺口 2 在屏3 用 verdict+覆盖率解决的那类问题。
       render: (_: unknown, row) =>
         row.lastRunScore === null ? (
-          <Text type="secondary">未运行</Text>
+          row.hasCompletedRun ? (
+            <Tooltip title="最近一次评测已跑完，但没有评出任何分数（用例全部超时或裁判全部失败）。打开报告看 verdict 与覆盖率。">
+              <Text type="secondary" style={{ borderBottom: "1px dotted #d9d9d9" }}>
+                未出分
+              </Text>
+            </Tooltip>
+          ) : (
+            <Text type="secondary">未运行</Text>
+          )
         ) : (
           <span style={{ color: "#52c41a", fontWeight: 600 }}>{row.lastRunScore.toFixed(1)}</span>
         ),
@@ -713,7 +744,8 @@ function CaseDrawer({
   return (
     <Drawer
       title={value ? `编辑用例 · v${value.version}` : "新建用例"}
-      width={480}
+      // antd v6：`width` 已废弃 → `size`（数值语义不变，见 antd/es/drawer/Drawer.js 的 deprecated 映射）。
+      size={480}
       open
       onClose={onClose}
       extra={

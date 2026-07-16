@@ -36,6 +36,7 @@ function toEvalSet(row: EvalSetAggregate): EvalSet {
     // gold docs 仍显示 0/34（详见 contracts eval-sets.ts:40-46 的口径说明）。
     goldDocCoverage: { withGoldDocs: row.withGoldDocs, total: row.caseCount },
     lastRunScore: row.lastRunScore,
+    hasCompletedRun: row.hasCompletedRun,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -82,6 +83,7 @@ export class EvalSetsService {
       reviewedCaseCount: 0,
       withGoldDocs: 0,
       lastRunScore: null,
+      hasCompletedRun: false,
     });
   }
 

@@ -1,15 +1,9 @@
 /** 离线 run 引擎常量（018 §11 + 原型 §6/§18.A）。 */
 
-/**
- * 单用例编排超时（原型 §6「单用例编排超时 30s(同线上熔断)」）。
- *
- * ⚠️ 这是**判定阈值**，不是墙钟上限（018 已知缺口 9，peer review 实测）：
- * `runForEvaluation` 的 `timeoutMs` 只决定何时判 `timedOut=true`，实际返回时刻由在途
- * `next()` 自行结束决定（异步生成器 `return()` 无法抢占执行中的 `next()`）。
- * 勿据此常量假设一条用例最多耗时 30s —— 真正的硬中断要等 W2b 把 AbortSignal
- * plumb 进 `ModelProviderPort`。
- */
-export const EVAL_RUN_CASE_TIMEOUT_MS = 30_000;
+// 单用例编排超时**不在本文件**——它是 env 可覆盖的配置项，见
+// `platform/config/config.schema.ts` 的 `EVAL_RUN_CASE_TIMEOUT_MS`
+// （默认 120s，刻意偏离原型 §6 的 30s；理由与实测见那里 + 018 §12 缺口 16）。
+// worker 经 `AppConfigService.evalRunCaseTimeoutMs` 读取，勿在此重建一份常量。
 
 /** run 租约 TTL：worker 崩溃后 5 分钟内不会被另一个 worker 抢跑同一条 run。 */
 export const EVAL_RUN_LEASE_MS = 5 * 60_000;

@@ -198,12 +198,29 @@ function bodyMessage(body: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * 带 HTTP 状态码的错误：让调用方能把「服务器说没有这条」与「网络断了 / 响应不合契约」
+ * **分开**。前者是事实陈述，后者是本地故障——混成一句「XX 不存在」会让排查从第一步就走错
+ * （E-W2a QA 实测代价：屏3 对 Zod 解析失败照样渲染「评测报告不存在」，误导了真实排查时间）。
+ *
+ * 仍是 `Error` 子类且 `message` 不变 ⇒ 既有的 `error instanceof Error ? error.message : …`
+ * 调用点零改动。
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function responseError(resp: Response, fallback: string): Promise<Error> {
   try {
-    return new Error(bodyMessage(await resp.json()) ?? fallback);
+    return new ApiError(resp.status, bodyMessage(await resp.json()) ?? fallback);
   } catch {
     // 非 JSON 错误响应使用调用方提供的中文兜底文案。
-    return new Error(fallback);
+    return new ApiError(resp.status, fallback);
   }
 }
 

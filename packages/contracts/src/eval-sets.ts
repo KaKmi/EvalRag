@@ -50,6 +50,17 @@ export const EvalSetSchema = z.object({
   }),
   /** 原型 §5 显示「82.0」→ 一位小数，非整数。与 `EvalRunListItem.overallScore` 同一量，口径须一致。 */
   lastRunScore: z.number().min(0).max(100).nullable(),
+  /**
+   * 是否存在**有结果的终态 run**（`done|partial|budget_stop`——与 `lastRunScore` 取的是
+   * 同一个 run population；`failed` 不计入，见 018 §12 缺口 12）。
+   *
+   * **存在的唯一理由是给 `lastRunScore === null` 消歧**（018 §12 缺口 16 / QA P2）：NULL 有
+   * 两种成因——「从未跑过」与「跑过但一个分都没评出来」（裁判全挂 / 全部超时）。屏2 原先
+   * 对两者一律显示「未运行」，于是一个刚跑完 5 次 run 的集合被断言成「没跑过」——**词在说谎**。
+   * 这正是 018 §12 缺口 2 在屏3 用 `verdict` + 覆盖率解决过、却在屏2 漏掉的同一类问题。
+   * ⇒ `false` → 「未运行」；`true` + score NULL → 「未出分」。**绝不退化成 0**。
+   */
+  hasCompletedRun: z.boolean(),
   createdAt: isoString,
   updatedAt: isoString,
 });

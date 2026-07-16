@@ -333,6 +333,7 @@ describeInfra("E-W2a 离线评测闭环（HTTP e2e，真 PG + 真 ClickHouse）"
       orchestration as never,
       judge as never,
       applications as never,
+      { evalRunCaseTimeoutMs: 120_000 } as never,
     );
     return { processor, orchestration, judge };
   }

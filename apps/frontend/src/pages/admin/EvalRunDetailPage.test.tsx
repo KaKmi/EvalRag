@@ -252,3 +252,54 @@ it("trace 链接指向 preview trace 详情", async () => {
   const link = await screen.findByRole("link", { name: "trace" });
   expect(link).toHaveAttribute("href", `/admin/traces/${TRACE}`);
 });
+
+// QA P3-4：任何加载失败都渲染「评测报告不存在」，与真 404 无法区分——QA 期间实际造成误诊。
+describe("加载失败：404 与「没读回来」必须可区分", () => {
+  function renderWithError(error: unknown) {
+    vi.mocked(api.getEvalRunReport).mockRejectedValue(error);
+    render(
+      <MemoryRouter initialEntries={["/admin/eval/runs/run-1"]}>
+        <Routes>
+          <Route path="/admin/eval/runs/:runId" element={<EvalRunDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("服务器答 404 → 「评测报告不存在」（这句是它说的，可以照直转述）", async () => {
+    renderWithError(new api.ApiError(404, "评测 run 不存在"));
+    expect(await screen.findByText("评测报告不存在")).toBeInTheDocument();
+  });
+
+  it("响应不合契约（Zod 抛错）→ 报加载失败，**绝不**说「不存在」", async () => {
+    renderWithError(new Error("expected string, received undefined"));
+    expect(await screen.findByText("评测报告加载失败")).toBeInTheDocument();
+    expect(screen.queryByText("评测报告不存在")).not.toBeInTheDocument();
+    // 原始错误要透出来，否则排查还是得靠猜
+    expect(screen.getByText("expected string, received undefined")).toBeInTheDocument();
+  });
+
+  it("500 也不说「不存在」——只有 404 才是「不存在」", async () => {
+    renderWithError(new api.ApiError(500, "请求失败（500）"));
+    expect(await screen.findByText("评测报告加载失败")).toBeInTheDocument();
+    expect(screen.queryByText("评测报告不存在")).not.toBeInTheDocument();
+  });
+
+  it("重试成功后正常渲染报告（失败不是终态）", async () => {
+    vi.mocked(api.getEvalRunReport)
+      .mockRejectedValueOnce(new Error("Failed to fetch"))
+      .mockResolvedValueOnce(report());
+    render(
+      <MemoryRouter initialEntries={["/admin/eval/runs/run-1"]}>
+        <Routes>
+          <Route path="/admin/eval/runs/:runId" element={<EvalRunDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("评测报告加载失败")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
+    // 报告真渲染出来了（逐用例表出现），且失败态收走
+    expect((await screen.findAllByTestId("cell-faithfulness"))[0]).toHaveTextContent("96");
+    expect(screen.queryByText("评测报告加载失败")).not.toBeInTheDocument();
+  });
+});

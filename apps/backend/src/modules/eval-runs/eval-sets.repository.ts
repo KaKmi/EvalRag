@@ -40,6 +40,8 @@ export type EvalSetAggregate = EvalSetRow & {
   /** 当前版本标了 gold docs 的**存活**用例数（原型 §5「38/50」的分子）。 */
   withGoldDocs: number;
   lastRunScore: number | null;
+  /** `lastRunScore === null` 的消歧位：跑过但没出分 vs 从未跑过（见 SET_AGG_SELECT）。 */
+  hasCompletedRun: boolean;
 };
 
 /** 逻辑用例 + 其当前版本 —— DTO 组装需要两者（status 在身份行，内容在版本行）。 */
@@ -86,8 +88,10 @@ const SET_AGG_SELECT = {
    * 非空均值：每个指标先按非 NULL 样本求 avg（AVG 天然忽略 NULL），再对**评出来的**指标求
    * 均值，最后四舍五入到一位小数 —— 与 `EvalRunListItem.overallScore` 同一量（contracts
    * eval-runs.ts:7-12 要求两处口径一致；Story 6 的报告聚合必须复用本表达式，勿另造）。
-   * 四指标全 NULL（裁判全挂）或无终态 run → NULL，前端显示「未运行」。**绝不退化成 0**。
+   * 四指标全 NULL（裁判全挂 / 全部超时）或无终态 run → NULL。**绝不退化成 0**。
    * `failed` 不计入：它没答出任何结果，不是「得分很低」（同 018 §12 取舍 2 的口径）。
+   * ⚠️ NULL **不等于**「未运行」——两种成因的消歧信号是下面的 `hasCompletedRun`，
+   * 前端据它选词（018 §12 缺口 16）。
    */
   lastRunScore: sql<number | null>`(
     SELECT ROUND(AVG(m.v)::numeric, 1)::float8
@@ -107,6 +111,16 @@ const SET_AGG_SELECT = {
     ) agg
     CROSS JOIN LATERAL unnest(ARRAY[agg.f, agg.r, agg.p, agg.c]) AS m(v)
   )`.as("last_run_score"),
+  /**
+   * `lastRunScore === null` 的消歧位（018 §12 缺口 16 / QA P2）：**跑过但没出分** ≠ **从未跑过**。
+   * run population 必须与 `lastRunScore` **逐字一致**（`done|partial|budget_stop`，`failed` 不计）
+   * ——否则会造出「hasCompletedRun=true 但 score 恒 NULL」的幻影态，把消歧位本身变成新的谎。
+   */
+  hasCompletedRun: sql<boolean>`EXISTS (
+    SELECT 1 FROM "eval_runs" run
+    WHERE run.set_id = "eval_sets"."id"
+      AND run.status IN ('done', 'partial', 'budget_stop')
+  )`.as("has_completed_run"),
 } as const;
 
 @Injectable()
