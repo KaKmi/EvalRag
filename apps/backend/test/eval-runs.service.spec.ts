@@ -5,6 +5,7 @@ import {
 } from "@nestjs/common";
 import type { CreateEvalRunRequest } from "@codecrush/contracts";
 import { EVAL_RUN_JOB } from "../src/platform/queue/queue.constants";
+import { EVAL_RUN_REAP_GRACE_MS } from "../src/modules/eval-runs/eval-run.constants";
 import { EvalRunsService } from "../src/modules/eval-runs/eval-runs.service";
 import type {
   EvalRunAggregate,
@@ -116,16 +117,19 @@ function setup(opts: SetupOptions = {}) {
     async findActiveRun() {
       return [...runs.values()].find((r) => r.status === "queued" || r.status === "running");
     },
-    // 真仓库：running + 租约过期 → failed（worker 崩了才会这样；健康 run 会逐条续租）。
+    // 真仓库：running + 租约过期**超过宽限期** → failed。
+    // 宽限期是为了让 pg-boss 的重试（retry_delay 默认 0）永远先于回收，不架空 retryLimit: 3。
+    // 注意真仓库的 releaseLease 留下的是**已过期时间戳**而非 NULL —— 因为 SQL 里
+    // "NULL < 时间戳" 求值为 NULL 而非 TRUE，置 NULL 会让未捕获异常路径的僵尸 run 永不被回收。
     async reapAbandonedRuns(at: Date) {
+      const deadline = new Date(at.getTime() - EVAL_RUN_REAP_GRACE_MS);
       const dead = [...runs.values()].filter(
-        (r) => r.status === "running" && r.leaseUntil !== null && r.leaseUntil < at,
+        (r) => r.status === "running" && r.leaseUntil !== null && r.leaseUntil < deadline,
       );
       for (const r of dead) {
         r.status = "failed";
         r.finishedAt = at;
         r.error = "评测执行异常中断（worker 未在租约内续期）";
-        r.leaseOwner = null;
         r.leaseUntil = null;
       }
       return dead.map((r) => r.id);
@@ -265,7 +269,7 @@ describe("EvalRunsService", () => {
         id: "r-zombie",
         status: "running",
         leaseOwner: "dead-worker",
-        leaseUntil: new Date(Date.now() - 60_000), // 租约已过期 = worker 没了
+        leaseUntil: new Date(Date.now() - EVAL_RUN_REAP_GRACE_MS - 60_000), // 过期且超出宽限期 = worker 没了
       },
     });
     const created = await service.create(req(), "admin"); // 不再 409
@@ -282,7 +286,7 @@ describe("EvalRunsService", () => {
         id: "r-healthy",
         status: "running",
         leaseOwner: "live-worker",
-        leaseUntil: new Date(Date.now() + 60_000),
+        leaseUntil: new Date(Date.now() + 60_000), // 续租中
       },
     });
     await expect(service.create(req(), "admin")).rejects.toBeInstanceOf(ConflictException);

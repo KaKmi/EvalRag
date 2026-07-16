@@ -14,6 +14,20 @@ export const EVAL_RUN_CASE_TIMEOUT_MS = 30_000;
 /** run 租约 TTL：worker 崩溃后 5 分钟内不会被另一个 worker 抢跑同一条 run。 */
 export const EVAL_RUN_LEASE_MS = 5 * 60_000;
 
+/**
+ * 回收僵尸 run 前的宽限期。**必须大于 pg-boss 的 job 过期时间**（v12 默认
+ * `expire_seconds = 15min`），否则会和重试抢跑：
+ *
+ * 未捕获异常时 worker 的 `finally` 会 `releaseLease`，pg-boss 随即重试（默认
+ * `retry_delay = 0`，几乎立刻）。若回收器在这个窗口里把 run 判成 `failed`，重试上来
+ * 只会看到 `already_finished` 而空转 —— **等于把 `retryLimit: 3` 架空**（原型 §18.A
+ * 明写要重试 3 次才 failed）。宽限期取 15 分钟保证重试**永远先于**回收。
+ *
+ * 代价：真·僵尸 run 会多占用全局串行位约 15 分钟。相对于「一次崩溃永久锁死整个功能」
+ * 这是划算的；且这段时间里发起评测收到的是诚实的 409（有 run 在跑），不是错误结果。
+ */
+export const EVAL_RUN_REAP_GRACE_MS = 15 * 60_000;
+
 /** 幂等窗口（原型 §6「同评测集×同配置版本存在 1 小时内的完成 run → 提示复用」）。 */
 export const EVAL_RUN_IDEMPOTENCY_MS = 60 * 60_000;
 

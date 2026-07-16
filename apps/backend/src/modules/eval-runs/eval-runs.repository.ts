@@ -1,6 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
+import { EVAL_RUN_REAP_GRACE_MS } from "./eval-run.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
   evalCaseVersions,
@@ -219,32 +220,54 @@ export class EvalRunsRepository {
    * 发不起任何 run，只能人工 SQL 修。这不是「W2b 再说」的事，是一次崩溃就锁死全功能。
    *
    * 判据是**租约过期**而非「跑得久」——因为有了上面的续租，租约过期严格等价于「worker 没了」。
-   * 5 分钟 TTL 远长于 pg-boss 的重试节奏，故正常重试路径会先把 run 重新跑起来（并续上租约），
-   * 本回收器只在**重试也救不回来**时兜底 → 不会架空 `retryLimit: 3`。
+   *
+   * 两条遗弃路径都要覆盖（peer review 实测：只覆盖前者是不够的）：
+   *  · **进程被杀**：`finally` 不执行 → 租约留在原处、自然过期。
+   *  · **未捕获异常**：`finally` **会**执行 `releaseLease` → 故 release 必须留下一个
+   *    **已过期的时间戳**而非 NULL（见 `releaseLease` 注释）；否则 `NULL < ts` 求值为
+   *    NULL 而非 TRUE，这条 run 永不被回收 —— 而这恰恰是更常见的一条路径。
+   *
+   * 不架空 `retryLimit: 3` 靠的是 `EVAL_RUN_REAP_GRACE_MS`（15min > pg-boss 的
+   * `expire_seconds` 15min 默认值量级）**而不是**租约 TTL：异常路径上 pg-boss 的
+   * `retry_delay` 默认是 **0**（立刻重试），比 5 分钟 TTL 快得多，所以「TTL 长于重试节奏」
+   * 这个理由是**反的**。真正保证重试先跑的是宽限期。
    *
    * 收成 `failed` 而非退回 `queued`：018 §11 的状态机里「queued/running → failed」就是
    * 「job 异常重试 3 次仍败」这一格；且已完成的用例结果行照常保留，报告按 snapshot 推导 skipped。
    */
   async reapAbandonedRuns(now: Date): Promise<string[]> {
+    // 宽限期：`lease_until < now - GRACE`，不是 `< now`。GRACE > pg-boss 的 job 过期时间，
+    // 保证「未捕获异常 → releaseLease → 立刻重试」这条路径上，**重试永远先于回收**，
+    // 不架空 retryLimit: 3（详见 EVAL_RUN_REAP_GRACE_MS 的注释）。
+    const deadline = new Date(now.getTime() - EVAL_RUN_REAP_GRACE_MS);
     const rows = await this.db
       .update(evalRuns)
       .set({
         status: "failed",
         finishedAt: now,
         error: "评测执行异常中断（worker 未在租约内续期）",
-        leaseOwner: null,
         leaseUntil: null,
       })
-      .where(and(eq(evalRuns.status, "running"), lt(evalRuns.leaseUntil, now)))
+      .where(and(eq(evalRuns.status, "running"), lt(evalRuns.leaseUntil, deadline)))
       .returning({ id: evalRuns.id });
     return rows.map((r) => r.id);
   }
 
-  /** 只释放自己持有的租约（他人已抢走时是 no-op，不会误放）。 */
-  async releaseLease(id: string, owner: string): Promise<void> {
+  /**
+   * 只释放自己持有的租约（他人已抢走时是 no-op，不会误放）。
+   *
+   * ⚠️ `leaseUntil` 置为 **now（一个已过期的时刻）而不是 NULL** —— 这是回收器能工作的前提。
+   * 原先置 NULL 时：`processRun` 的 `finally` 在**未捕获异常**路径上也会跑到这里 →
+   * 留下 `{status:'running', lease_until: NULL}`；而回收谓词 `lease_until < now()` 在
+   * NULL 上求值为 **NULL 而非 TRUE**（三值逻辑），该行永不匹配 → run 永久卡 `running` →
+   * `create` 的全局串行守卫此后永远 409 → **整个离线评测功能死锁，只能人工改库**。
+   * 即：release 把回收器赖以判断的证据本身抹掉了。留一个已过期的时间戳，既让重试能立刻
+   * 重新抢到租约（`lease_until < now` 可获取），又让回收器在宽限期后仍看得见这条僵尸。
+   */
+  async releaseLease(id: string, owner: string, now = new Date()): Promise<void> {
     await this.db
       .update(evalRuns)
-      .set({ leaseOwner: null, leaseUntil: null })
+      .set({ leaseOwner: null, leaseUntil: now })
       .where(and(eq(evalRuns.id, id), eq(evalRuns.leaseOwner, owner)));
   }
 
