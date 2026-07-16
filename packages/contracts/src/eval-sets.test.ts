@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CreateEvalSetRequestSchema,
+  UpdateEvalSetRequestSchema,
   CreateEvalCaseRequestSchema,
   ImportEvalCasesRequestSchema,
 } from "./eval-sets";
@@ -12,6 +13,24 @@ describe("CreateEvalSetRequestSchema", () => {
   it("rejects empty and >50 char names", () => {
     expect(CreateEvalSetRequestSchema.safeParse({ name: "" }).success).toBe(false);
     expect(CreateEvalSetRequestSchema.safeParse({ name: "x".repeat(51) }).success).toBe(false);
+  });
+  it("rejects a whitespace-only name（§19.1「请输入名称」）", () => {
+    expect(CreateEvalSetRequestSchema.safeParse({ name: "   " }).success).toBe(false);
+  });
+});
+
+describe("UpdateEvalSetRequestSchema", () => {
+  // 回归护栏：曾用 CreateEvalSetRequestSchema.partial()，但 .partial() 不去掉 kbIds 的
+  // .default([]) → 一次纯改名会把关联知识库清空。此测试钉死 PATCH 的「只改传了的字段」语义。
+  it("omitting kbIds must NOT reset it（纯改名不得清空关联知识库）", () => {
+    const parsed = UpdateEvalSetRequestSchema.parse({ name: "新名字" });
+    expect("kbIds" in parsed).toBe(false);
+  });
+  it("an empty patch stays empty", () => {
+    expect(UpdateEvalSetRequestSchema.parse({})).toEqual({});
+  });
+  it("still validates the fields that ARE supplied", () => {
+    expect(UpdateEvalSetRequestSchema.safeParse({ name: "x".repeat(51) }).success).toBe(false);
   });
 });
 

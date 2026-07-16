@@ -144,6 +144,9 @@ export const evalRuns = pgTable(
       "eval_runs_status_check",
       sql`${t.status} IN ('queued','running','done','partial','budget_stop','failed')`,
     ),
+    // W2a 只认 'all'。不预先放行 low_score/tags —— 放行一个引擎不遵守的值 = 投机
+    // （同 D6「加一个不被遵守的列是投机」的判断）。W2b 实现「范围」时 ALTER 此 CHECK。
+    check("eval_runs_scope_check", sql`${t.scope} IN ('all')`),
     index("eval_runs_idempotency_idx").on(t.setId, t.configVersionId, t.createdAt), // 1h 幂等查询
     index("eval_runs_active_idx").on(t.status), // queued/running 并发检查
   ],
@@ -185,6 +188,20 @@ export const evalRunResults = pgTable(
     check(
       "eval_run_results_verdict_check",
       sql`${t.verdict} IN ('pass','weak','low','timeout','unscored')`,
+    ),
+    // 分数 0-100 的 DB 级兜底（对齐 evaluations/schema.ts:36-47 的同域约定）。
+    // NULL 不受 CHECK 约束（NULL → unknown → 通过），故「未评记 NULL」不受影响。
+    check(
+      "eval_run_results_scores_check",
+      sql`(${t.faithfulness} IS NULL OR ${t.faithfulness} BETWEEN 0 AND 100)
+        AND (${t.answerRelevancy} IS NULL OR ${t.answerRelevancy} BETWEEN 0 AND 100)
+        AND (${t.contextPrecision} IS NULL OR ${t.contextPrecision} BETWEEN 0 AND 100)
+        AND (${t.correctness} IS NULL OR ${t.correctness} BETWEEN 0 AND 100)
+        AND (${t.minScore} IS NULL OR ${t.minScore} BETWEEN 0 AND 100)`,
+    ),
+    check(
+      "eval_run_results_min_metric_check",
+      sql`${t.minMetric} IS NULL OR ${t.minMetric} IN ('faithfulness','answerRelevancy','contextPrecision','correctness')`,
     ),
     uniqueIndex("eval_run_results_run_case_unique").on(t.runId, t.caseVersionId),
     index("eval_run_results_worst_idx").on(t.runId, t.minScore), // 「最差指标升序」默认排序

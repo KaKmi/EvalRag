@@ -1,5 +1,5 @@
 {
-  "id": "18b2a008-d6bf-4199-9b78-5ef7209015e0",
+  "id": "39b55634-4c21-4d51-980d-c7e5192bffd4",
   "prevId": "aff150bf-4f8c-42fd-be2c-f9013d9463aa",
   "version": "7",
   "dialect": "postgresql",
@@ -3185,6 +3185,14 @@
         "eval_run_results_verdict_check": {
           "name": "eval_run_results_verdict_check",
           "value": "\"eval_run_results\".\"verdict\" IN ('pass','weak','low','timeout','unscored')"
+        },
+        "eval_run_results_scores_check": {
+          "name": "eval_run_results_scores_check",
+          "value": "(\"eval_run_results\".\"faithfulness\" IS NULL OR \"eval_run_results\".\"faithfulness\" BETWEEN 0 AND 100)\n        AND (\"eval_run_results\".\"answer_relevancy\" IS NULL OR \"eval_run_results\".\"answer_relevancy\" BETWEEN 0 AND 100)\n        AND (\"eval_run_results\".\"context_precision\" IS NULL OR \"eval_run_results\".\"context_precision\" BETWEEN 0 AND 100)\n        AND (\"eval_run_results\".\"correctness\" IS NULL OR \"eval_run_results\".\"correctness\" BETWEEN 0 AND 100)\n        AND (\"eval_run_results\".\"min_score\" IS NULL OR \"eval_run_results\".\"min_score\" BETWEEN 0 AND 100)"
+        },
+        "eval_run_results_min_metric_check": {
+          "name": "eval_run_results_min_metric_check",
+          "value": "\"eval_run_results\".\"min_metric\" IS NULL OR \"eval_run_results\".\"min_metric\" IN ('faithfulness','answerRelevancy','contextPrecision','correctness')"
         }
       },
       "isRLSEnabled": false
@@ -3401,6 +3409,10 @@
         "eval_runs_status_check": {
           "name": "eval_runs_status_check",
           "value": "\"eval_runs\".\"status\" IN ('queued','running','done','partial','budget_stop','failed')"
+        },
+        "eval_runs_scope_check": {
+          "name": "eval_runs_scope_check",
+          "value": "\"eval_runs\".\"scope\" IN ('all')"
         }
       },
       "isRLSEnabled": false

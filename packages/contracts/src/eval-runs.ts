@@ -2,7 +2,14 @@ import { z } from "zod";
 
 const isoString = z.string().datetime({ offset: true });
 const uuid = z.string().uuid();
+/** 逐指标分数：整数 0-100（原型 §7 逐用例表与记分卡均显示整数）。 */
 const score = z.number().int().min(0).max(100);
+/**
+ * 综合分：**允许一位小数**——原型 §5「上次得分」显示 `82.0`。与 `EvalSet.lastRunScore`
+ * 是同一个量（同一 run 的综合分），两处口径必须一致，故都不加 `.int()`。
+ * 计算方与舍入规则见 eval-runs.service（Story 6）：四指标非空均值 → 四舍五入到一位小数。
+ */
+const overallScoreValue = z.number().min(0).max(100);
 
 /** 原型 §18.A 状态机逐字对齐。 */
 export const EvalRunStatusSchema = z.enum([
@@ -55,7 +62,7 @@ export const EvalRunListItemSchema = z.object({
   configVersionId: uuid,
   configVersionLabel: z.string(),
   status: EvalRunStatusSchema,
-  overallScore: score.nullable(),
+  overallScore: overallScoreValue.nullable(),
   totalCases: z.number().int().nonnegative(),
   doneCases: z.number().int().nonnegative(),
   durationMs: z.number().int().nonnegative().nullable(),

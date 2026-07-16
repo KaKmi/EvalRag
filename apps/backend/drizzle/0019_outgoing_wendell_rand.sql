@@ -40,7 +40,13 @@ CREATE TABLE "eval_run_results" (
 	"duration_ms" integer DEFAULT 0 NOT NULL,
 	"error" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "eval_run_results_verdict_check" CHECK ("eval_run_results"."verdict" IN ('pass','weak','low','timeout','unscored'))
+	CONSTRAINT "eval_run_results_verdict_check" CHECK ("eval_run_results"."verdict" IN ('pass','weak','low','timeout','unscored')),
+	CONSTRAINT "eval_run_results_scores_check" CHECK (("eval_run_results"."faithfulness" IS NULL OR "eval_run_results"."faithfulness" BETWEEN 0 AND 100)
+        AND ("eval_run_results"."answer_relevancy" IS NULL OR "eval_run_results"."answer_relevancy" BETWEEN 0 AND 100)
+        AND ("eval_run_results"."context_precision" IS NULL OR "eval_run_results"."context_precision" BETWEEN 0 AND 100)
+        AND ("eval_run_results"."correctness" IS NULL OR "eval_run_results"."correctness" BETWEEN 0 AND 100)
+        AND ("eval_run_results"."min_score" IS NULL OR "eval_run_results"."min_score" BETWEEN 0 AND 100)),
+	CONSTRAINT "eval_run_results_min_metric_check" CHECK ("eval_run_results"."min_metric" IS NULL OR "eval_run_results"."min_metric" IN ('faithfulness','answerRelevancy','contextPrecision','correctness'))
 );
 --> statement-breakpoint
 CREATE TABLE "eval_runs" (
@@ -66,7 +72,8 @@ CREATE TABLE "eval_runs" (
 	"error" text,
 	"created_by" varchar(200) NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "eval_runs_status_check" CHECK ("eval_runs"."status" IN ('queued','running','done','partial','budget_stop','failed'))
+	CONSTRAINT "eval_runs_status_check" CHECK ("eval_runs"."status" IN ('queued','running','done','partial','budget_stop','failed')),
+	CONSTRAINT "eval_runs_scope_check" CHECK ("eval_runs"."scope" IN ('all'))
 );
 --> statement-breakpoint
 CREATE TABLE "eval_sets" (
