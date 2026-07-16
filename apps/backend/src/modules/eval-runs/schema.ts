@@ -1,0 +1,205 @@
+import { sql } from "drizzle-orm";
+import {
+  boolean,
+  check,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  smallint,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+/**
+ * E-W2a 离线评测域的表定义（018 §10）。纯表定义、零 service 引用（AGENTS.md 边界 8）。
+ * 字段级约束取自原型 §19.1（表单校验），不是臆造。
+ */
+
+/** 评测集。软删（原型 §18.B：历史报告仍可查看）。 */
+export const evalSets = pgTable(
+  "eval_sets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: varchar("name", { length: 50 }).notNull(), // §19.1：1-50 字
+    description: text("description").notNull().default(""),
+    kbIds: uuid("kb_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`), // 关联知识库（原型 §5：LLM 生成与统计口径）
+    createdBy: varchar("created_by", { length: 200 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [
+    // §19.1「名称已存在」；部分索引 → 软删后名字可复用
+    uniqueIndex("eval_sets_name_unique")
+      .on(sql`lower(${t.name})`)
+      .where(sql`${t.deletedAt} IS NULL`),
+  ],
+);
+
+/**
+ * 用例身份（稳定 id）。`status`/`deletedAt` 是「逻辑用例」属性，跨版本延续
+ * —— 原型 §18.B：reviewed --编辑保存--> reviewed(v+1)，不回退 draft。
+ */
+export const evalCases = pgTable(
+  "eval_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    setId: uuid("set_id")
+      .notNull()
+      .references(() => evalSets.id),
+    status: varchar("status", { length: 20 }).notNull().default("draft"), // 原型 §18.B 两态
+    currentVersion: integer("current_version").notNull().default(1),
+    /** 原型 §18.B。W2a 建列不建检测器 → 恒 false，UI 不显示橙 tag（018 已知缺口 4）。 */
+    goldStale: boolean("gold_stale").notNull().default(false),
+    /** 来源 trace（可空；过 TTL 仅置灰不删）。 */
+    sourceTraceId: varchar("source_trace_id", { length: 32 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("eval_cases_status_check", sql`${t.status} IN ('draft','reviewed')`),
+    index("eval_cases_set_status_idx").on(t.setId, t.status),
+  ],
+);
+
+/** 用例内容的不可变版本（原型 §5/§18.B：保存即新版本，旧版本冻结供历史 run 引用）。 */
+export const evalCaseVersions = pgTable(
+  "eval_case_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    caseId: uuid("case_id")
+      .notNull()
+      .references(() => evalCases.id),
+    version: integer("version").notNull(),
+    question: varchar("question", { length: 500 }).notNull(), // §19.1：1-500 字
+    /** §19.1：每条 ≤200 字；draft 可空，reviewed 要求 ≥1（service 层校验——两态阈值不同，DB check 表达不了）。 */
+    goldPoints: text("gold_points")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    /** §19.1：≤10；预留 W2b 检索层指标（W2a 建列不消费——决策 E，加指标时无需迁移）。 */
+    goldDocIds: uuid("gold_doc_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
+    /** §19.1：≤5 个、每个 ≤12 字。 */
+    tags: varchar("tags", { length: 12 })
+      .array()
+      .notNull()
+      .default(sql`'{}'::varchar[]`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("eval_case_versions_case_version_unique").on(t.caseId, t.version)],
+);
+
+/** run。 */
+export const evalRuns = pgTable(
+  "eval_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    setId: uuid("set_id")
+      .notNull()
+      .references(() => evalSets.id),
+    // 跨域引用只存 id、不建 FK（AGENTS.md 边界 5：跨域只走 service/端口）
+    applicationId: uuid("application_id").notNull(),
+    configVersionId: uuid("config_version_id").notNull(),
+    judgeModelId: uuid("judge_model_id").notNull(),
+    embeddingModelId: uuid("embedding_model_id").notNull(),
+    /** 离线独立版本；在线 judgeVersion 保持 online-v1 不动（017 基线）。 */
+    offlineJudgeVersion: varchar("offline_judge_version", { length: 100 })
+      .notNull()
+      .default("offline-v1"),
+    status: varchar("status", { length: 20 }).notNull().default("queued"), // 原型 §18.A 逐字
+    scope: varchar("scope", { length: 20 }).notNull().default("all"), // W2a 仅 all；low_score/tags 留 W2b
+    /**
+     * [{caseId, caseVersionId, seq}]：发起时快照（原型 §18.B「运行中 run 不受影响」）；
+     * 亦是推导 skipped 用例的唯一依据。
+     */
+    caseVersionSnapshot: jsonb("case_version_snapshot").notNull(),
+    totalCases: integer("total_cases").notNull().default(0),
+    doneCases: integer("done_cases").notNull().default(0),
+    tokenBudget: integer("token_budget").notNull().default(500000),
+    /** 决策 G：已知上报之和；provider 不回传 usage 时计 0 → 熔断偏松，不假装精确。 */
+    tokensUsed: integer("tokens_used").notNull().default(0),
+    /** 停止信号（worker 逐条检查）。 */
+    stopRequestedAt: timestamp("stop_requested_at", { withTimezone: true }),
+    // 串行化：全局同时最多 1 个 running（原型 §6）
+    leaseOwner: varchar("lease_owner", { length: 200 }),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    error: text("error"),
+    createdBy: varchar("created_by", { length: 200 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "eval_runs_status_check",
+      sql`${t.status} IN ('queued','running','done','partial','budget_stop','failed')`,
+    ),
+    index("eval_runs_idempotency_idx").on(t.setId, t.configVersionId, t.createdAt), // 1h 幂等查询
+    index("eval_runs_active_idx").on(t.status), // queued/running 并发检查
+  ],
+);
+
+/** 逐用例结果。未跑到的用例**不写行**——由 snapshot − 结果行推导 skipped，不留垃圾行。 */
+export const evalRunResults = pgTable(
+  "eval_run_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: "cascade" }),
+    caseVersionId: uuid("case_version_id")
+      .notNull()
+      .references(() => evalCaseVersions.id),
+    seq: integer("seq").notNull(), // 报告里的 # 列
+    verdict: varchar("verdict", { length: 20 }).notNull(),
+    // NULL = 未评（裁判失败 / 无 gold / 超时）——**绝不写 0**（原型 §6，防拉低均值）
+    faithfulness: smallint("faithfulness"),
+    answerRelevancy: smallint("answer_relevancy"),
+    contextPrecision: smallint("context_precision"),
+    correctness: smallint("correctness"),
+    minMetric: varchar("min_metric", { length: 30 }), // 最差指标（默认排序键）
+    minScore: smallint("min_score"),
+    /** {faithfulness:[],answerRelevancy:[],contextPrecision:[],correctness:[]}——只收评出来的指标。 */
+    evidence: jsonb("evidence")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    /** 「trace」链接；编排失败时为空。 */
+    previewTraceId: varchar("preview_trace_id", { length: 32 }),
+    answer: text("answer").notNull().default(""),
+    tokensUsed: integer("tokens_used").notNull().default(0),
+    durationMs: integer("duration_ms").notNull().default(0),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "eval_run_results_verdict_check",
+      sql`${t.verdict} IN ('pass','weak','low','timeout','unscored')`,
+    ),
+    uniqueIndex("eval_run_results_run_case_unique").on(t.runId, t.caseVersionId),
+    index("eval_run_results_worst_idx").on(t.runId, t.minScore), // 「最差指标升序」默认排序
+  ],
+);
+
+export type EvalSetRow = typeof evalSets.$inferSelect;
+export type EvalCaseRow = typeof evalCases.$inferSelect;
+export type EvalCaseVersionRow = typeof evalCaseVersions.$inferSelect;
+export type EvalRunRow = typeof evalRuns.$inferSelect;
+export type EvalRunResultRow = typeof evalRunResults.$inferSelect;
+
+/** `eval_runs.case_version_snapshot` 的行内结构（jsonb，无 drizzle 类型）。 */
+export interface EvalRunSnapshotEntry {
+  caseId: string;
+  caseVersionId: string;
+  seq: number;
+}
