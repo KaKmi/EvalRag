@@ -1,4 +1,4 @@
-import { Injectable, Optional } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { AnswerRelevancyEvaluator } from "./answer-relevancy.evaluator";
 import { ContextPrecisionEvaluator } from "./context-precision.evaluator";
 import { CorrectnessEvaluator } from "./correctness.evaluator";
@@ -14,6 +14,8 @@ import { FaithfulnessEvaluator } from "./faithfulness.evaluator";
 
 @Injectable()
 export class EvaluationJudgeService {
+  private readonly logger = new Logger(EvaluationJudgeService.name);
+
   constructor(
     private readonly faithfulness: FaithfulnessEvaluator,
     private readonly answerRelevancy: AnswerRelevancyEvaluator,
@@ -86,6 +88,15 @@ export class EvaluationJudgeService {
       // rejected（裁判重试后仍失败）→ null。**绝不写 0**（原型 §6：不拉低均值）。
       if (outcome.status !== "fulfilled" || outcome.value === null) {
         scores[key] = null;
+        // QA recheck P2：原先这里静默丢弃 reason —— 全场 NULL 遍地却 0 条 warn/error，
+        // 生产上裁判为何失败完全不可见（"未评"在报告里长得像"这题没测"，排查无从下手）。
+        // 只记原因，不改 NULL 语义。value===null 是「无 gold 不调 correctness」的正常路径，不记。
+        if (outcome.status === "rejected") {
+          const reason = outcome.reason as Error | undefined;
+          this.logger.warn(
+            `裁判指标 ${key} 重试后仍失败，记未评（trace=${input.targetTraceId}）：${reason?.message ?? String(outcome.reason)}`,
+          );
+        }
         return;
       }
       const result = outcome.value as MetricResult;

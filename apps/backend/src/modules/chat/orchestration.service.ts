@@ -83,6 +83,16 @@ export interface EvaluationRunOutcome {
   usage: TokenUsage;
   isFallback: boolean;
   timedOut: boolean;
+  /**
+   * 编排**产出失败**的原因（首 token 熔断 / 生成 infra 失败）。这两条路径 `yield` 一个
+   * error 事件后 **return 而不抛**（见 :367/:390），故若不显式带出来，调用方拿到的
+   * `{replyText:"", timedOut:false}` 与「成功但答案为空」完全同形 —— 离线评测会把空串
+   * 送去判分，裁判据此编出 correctness=0 + faithfulness=100（空文本无可验证主张）的
+   * 假分数，双向污染记分卡还标「已评」。带上它，调用方才能把这类用例记成「未评」。
+   *
+   * `undefined` = 编排正常产出（含检索兜底：兜底话术是用户真会看到的答案，不是失败）。
+   */
+  error?: string;
 }
 
 interface ExecuteNodeOptions {
@@ -474,6 +484,7 @@ export class OrchestrationService {
     let traceId = "";
     let replyText = "";
     let timedOut = false;
+    let error: string | undefined;
 
     // 此处传 cfg.applicationId 作 agentId 是安全的（018 决策 C 已论证）：离线不传 convId
     // → resolveConvId 首行短路，走不到归属校验；且 persist 已跳过，无写入归属。
@@ -533,6 +544,10 @@ export class OrchestrationService {
 
         const event = tick.value;
         if (event.type === "token") replyText += event.delta;
+        // 生成失败的两条路径（:367 首 token 熔断、:390 infra 失败）yield 本事件后
+        // **return 而不抛** —— 不在此捕获，调用方就只能看到 {replyText:"", timedOut:false}，
+        // 与「成功但答案为空」同形，进而把空串送去判分、编出假分数（见 EvaluationRunOutcome.error）。
+        else if (event.type === "error") error = event.message;
       }
     } finally {
       // 对已读完/已抛错的生成器是安全 no-op；超时路径靠它触发 finally（span end + 上游取消）。
@@ -554,6 +569,7 @@ export class OrchestrationService {
       usage,
       isFallback: prep?.isFallback ?? false,
       timedOut,
+      ...(error === undefined ? {} : { error }),
     };
   }
 

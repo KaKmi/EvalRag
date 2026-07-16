@@ -36,6 +36,10 @@ interface SetupOptions {
   usagePerCase?: number;
   /** 这些 seq 的用例编排超时。 */
   timeoutOn?: number[];
+  /** 这些 seq 的用例编排**失败**（yield error 后 return，不抛）——replyText 为空。 */
+  errorOn?: number[];
+  /** 这些 seq 的用例编排「成功」但答案为空（无 error、无 timeout）。 */
+  emptyAnswerOn?: number[];
   resolveThrows?: boolean;
   leaseBusy?: boolean;
   /** 第 N 次续租之后开始失败（模拟租约被回收器收走/被别的 worker 接管）。 */
@@ -143,14 +147,18 @@ function setup(opts: SetupOptions = {}) {
       async (_cfg: unknown, question: string, _opts: { runId: string; timeoutMs: number }) => {
       const seq = Number(question.replace("问题 ", ""));
       const timedOut = (opts.timeoutOn ?? []).includes(seq);
+      const errored = (opts.errorOn ?? []).includes(seq);
+      const empty = (opts.emptyAnswerOn ?? []).includes(seq);
       return {
         traceId: `trace-${seq}`,
-        replyText: `回答 ${seq}`,
+        // 编排失败与「成功但答案为空」在返回值上同形：error 事件不抛，生成器正常收尾。
+        replyText: errored || empty ? "" : `回答 ${seq}`,
         // 真实 chunkId —— 绝不合成 c1/c2（Global Constraints）。
         hits: [{ chunkId: `chunk-${seq}`, text: `片段 ${seq}`, finalScore: 0.9 }],
         usage: { inputTokens: opts.usagePerCase ?? 0, outputTokens: 0 },
         isFallback: false,
         timedOut,
+        ...(errored ? { error: "生成失败，请稍后重试" } : {}),
       };
       },
     ),
@@ -245,6 +253,51 @@ describe("EvalRunWorkerProcessor", () => {
     await processor.processRun("r1");
     expect(runs.get("r1")!.status).toBe("budget_stop");
     expect(results).toHaveLength(1); // 第 2 条开跑前就熔断
+  });
+
+  // ——— QA recheck P1：编排失败绝不能被洗成分数 ————————————————————————
+  //
+  // 生成失败的两条路径（orchestration.service.ts 首 token 熔断 / infra 失败）都是
+  // `yield {type:"error"}` 后 **return，不抛**；runForEvaluation 的收集循环原先只认 token
+  // 事件，于是返回 {replyText:"", timedOut:false} —— 与「成功但答案为空」完全同形。
+  // worker 当成功 → 把空串喂裁判 → correctness 记 0（"答案是空的"）、faithfulness 记 100
+  // （空文本没有可验证主张 → faithfulness.evaluator.ts:58 直接给 100）→ 记分卡**双向**被
+  // 假分污染，还标「已评 2/2」满信心。这比 NULL 更糟：NULL 诚实，假分会撒谎。
+  // 不变式：**编排没产出答案的用例，绝不送去判分。**
+  it("编排失败（yield error 不抛）→ verdict=unscored、分数全 null、带错误原文，且绝不判分", async () => {
+    const { processor, results, judge } = setup({ snapshot: [c(1), c(2)], errorOn: [1] });
+    await processor.processRun("r1");
+
+    const failed = results.find((r) => r.seq === 1)!;
+    expect(failed.verdict).toBe("unscored");
+    expect(failed.faithfulness).toBeNull(); // ← 绝不是 100
+    expect(failed.answerRelevancy).toBeNull();
+    expect(failed.contextPrecision).toBeNull();
+    expect(failed.correctness).toBeNull(); // ← 绝不是 0
+    expect(failed.minScore).toBeNull();
+    expect(failed.error).toContain("生成失败");
+    // 最关键：裁判**根本没被调用**——只有第 2 条正常用例调了它。
+    expect(judge.scoreOffline).toHaveBeenCalledTimes(1);
+    expect(judge.scoreOffline.mock.calls[0][0]).toMatchObject({ question: "问题 2" });
+  });
+
+  it("编排「成功」但答案为空 → 同样 unscored 不判分（空答案恒被裁判评成 faithfulness=100）", async () => {
+    const { processor, results, judge } = setup({ snapshot: [c(1)], emptyAnswerOn: [1] });
+    await processor.processRun("r1");
+
+    const empty = results.find((r) => r.seq === 1)!;
+    expect(empty.verdict).toBe("unscored");
+    expect(empty.faithfulness).toBeNull();
+    expect(empty.correctness).toBeNull();
+    expect(empty.error).toBe("编排未产出答案");
+    expect(judge.scoreOffline).not.toHaveBeenCalled();
+  });
+
+  it("检索兜底（有兜底话术）仍照常判分 —— 兜底是用户真会看到的答案，不是失败", async () => {
+    const { processor, results, judge } = setup({ snapshot: [c(1)] });
+    await processor.processRun("r1");
+    expect(judge.scoreOffline).toHaveBeenCalledTimes(1);
+    expect(results.find((r) => r.seq === 1)!.verdict).not.toBe("unscored");
   });
 
   it("单用例编排超时 → verdict=timeout，分数全 null，run 继续跑下一条", async () => {

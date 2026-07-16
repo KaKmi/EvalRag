@@ -257,6 +257,44 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
       return;
     }
 
+    // ——— 不变式：编排没产出答案的用例，**绝不送去判分** ————————————————————
+    //
+    // 生成失败的两条路径（orchestration.service.ts 首 token 熔断 / infra 失败）`yield` 一个
+    // error 事件后 **return 而不抛**，故 outcome 是 {replyText:"", timedOut:false} —— 与
+    // 「成功但答案为空」同形。若放行到 scoreOffline，裁判会对空串**编出**一对假分数：
+    // correctness=0（"答案是空的"）+ faithfulness=100（空文本无可验证主张 →
+    // faithfulness.evaluator.ts:58 直接给 100），记分卡被**双向**污染，还标「已评」满信心。
+    // 这比 NULL 更糟：NULL 诚实，假分会撒谎（QA recheck 实测 8 条中 3 条中招，非确定性；
+    // 此前 30s 超时把所有用例杀在判分之前，故完全看不见）。
+    //
+    // 空 replyText 一律拦下（不止 error 分支）：无论因何而空，faithfulness 恒被评成 100。
+    // 检索兜底**不在此列**——兜底话术是用户真会看到的答案（replyText 非空），照常判分。
+    const noAnswer = outcome.error ?? (outcome.replyText.trim() === "" ? "编排未产出答案" : null);
+    if (noAnswer) {
+      await this.repo.recordResult({
+        runId,
+        caseVersionId: entry.caseVersionId,
+        seq: entry.seq,
+        verdict: "unscored" satisfies EvalVerdict,
+        faithfulness: null,
+        answerRelevancy: null,
+        contextPrecision: null,
+        correctness: null,
+        minMetric: null,
+        minScore: null,
+        evidence: {},
+        previewTraceId: outcome.traceId || null,
+        answer: outcome.replyText,
+        tokensUsed: orchestrationTokens,
+        durationMs: Date.now() - startedAt,
+        error: noAnswer,
+      });
+      this.logger.warn(
+        `用例编排未产出答案，记 unscored 不判分（run=${runId} seq=${entry.seq}）：${noAnswer}`,
+      );
+      return;
+    }
+
     // 真实 chunkId/text/finalScore 直接来自编排的 TaggedHit —— 绝不合成 c1/c2
     // （Global Constraints；假 chunkId 会让 Context Precision 评的是不存在的上下文）。
     const scores = await this.judge.scoreOffline(
