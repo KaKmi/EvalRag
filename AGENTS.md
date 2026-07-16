@@ -38,7 +38,7 @@ infra/                   docker-compose（postgres+pgvector / clickhouse / otel-
 
 ## 依赖边界（不可违反，ESLint 强制）
 
-1. **依赖方向朝下、无环**：`chat`(顶点) → … → `platform` → `contracts` / `otel-conventions`(基座)。
+1. **依赖方向朝下、无环**：`eval-runs`(顶点，E-W2a) → `chat`(问答顶点) → … → `platform` → `contracts` / `otel-conventions`(基座)。详见 `docs/design/018`。
 2. `apps/frontend` 只能 import `@codecrush/contracts` 与 `@codecrush/otel-conventions`（纯常量）；**不得** import `apps/backend` 或 `@codecrush/otel`（Node-only，进前端打包炸）。
 3. `packages/contracts` / `@codecrush/otel-conventions` 是地基，**只能依赖 `zod`**（或零依赖）；严禁 Node-only（`pg`/`fs`/`@opentelemetry/*`）或浏览器-only 依赖，否则前端打包会炸。
 4. `@codecrush/otel` 仅后端运行时：只依赖 `@opentelemetry/*` 与 `@codecrush/otel-conventions`；**不得** import `@codecrush/contracts`、ClickHouse client 或 backend 模块（只返回中性 `SpanIdentity`，DTO 转换留在 `traces` 模块）。

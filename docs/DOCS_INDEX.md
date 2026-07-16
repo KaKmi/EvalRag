@@ -14,8 +14,11 @@
 | design | 008 | draft | M5 检索 | M5 设计：RetrieverPort 真实实现（pgvector 向量召回 + tsvector 关键词召回 + 加权融合 + 可选 rerank）与检索测试台。 | 2026-07-09 | [008](docs/design/008-m5-retrieval.md) |
 | design | 009 | not-implemented | M7 应用管理与配置发布 | 应用发布：production 单指针（受门禁 CAS）+ 版本命名标签访问锚点 + 异步真实 NodeRuntime ReleaseCheck。 | 2026-07-12 | [009](docs/design/009-m7-application-management.md) |
 | design | 010 | draft | 文档处理 Profile 与结构化入库管线 | 用版本化 Profile 编排解析、清洗与分块，统一输出可溯源 Markdown，并支持 PDF 版面解析与 OCR。 | 2026-07-10 | [010](docs/design/010-document-processing-profiles.md) |
-| design | 011 | draft | Prompt 组装与 LLM 节点契约（NodeContract 执行引擎） | 四个固定节点的完整 NodeContract 数据、三层 Prompt 组装与 NodeRuntimeService 执行/校验/Fallback 设计，本轮写死代码。 | 2026-07-12 | [011](docs/design/011-prompt-assembly-node-contracts.md) |
+| design | 011 | draft | Prompt 组装与 LLM 节点契约（NodeContract 执行引擎） | 四个固定节点的完整 NodeContract 数据、两层 Prompt 组装与 NodeRuntimeService 执行/校验/Fallback 设计，本轮写死代码。 | 2026-07-12 | [011](docs/design/011-prompt-assembly-node-contracts.md) |
 | design | 012 | current | Prompt 管理模块重构 | Prompt 版本从三态状态机改为可排他移动的标识（标签）模型，详情页新增试运行，谁在用改为应用域只读派生视图。 | 2026-07-11 | [012](docs/design/012-prompt-management-redesign.md) |
 | design | 013 | draft | 问答 / RAG 编排内核（M8 OrchestrationService 与 SSE 流式） | 七节点编排流水线、SSE 逐 token 流式、会话/消息持久化与完整 OTLP trace 写侧的架构设计。 | 2026-07-12 | [013](docs/design/013-m8-rag-orchestration.md) |
 | design | 014 | draft | 两级意图表与知识库外挂意图路由 | 意图节点只做静态闭集大分类，路由靠 KB↔意图绑定映射；替换 013 的 KB-UUID 路由方案。 | 2026-07-12 | [014](docs/design/014-intent-routing.md) |
 | design | 015 | draft | M9 Trace 追踪（完整版）读模型 | M9 落地：根 span 补 session/agent/user 身份 → 纯 VIEW 读模型（列表/Session/详情）+ 只读 API + 前端四屏；out-flow 延后 M11。 | 2026-07-13 | [015](docs/design/015-m9-trace-read-model.md) |
+| design | 016 | draft | 指标读模型：ClickHouse 汇总层 + 第一批运行看板 | 在 otel_traces 之上加一层 AggregatingMergeTree 预聚合（物化视图增量卷积）作为指标读模型；第一批 8 指标全部复用已有埋点，纯读侧增量；产品做总览→应用→样本三层下钻。触发 004 演进第 2 步，喂 M10 运行看板。 | 2026-07-14 | [016](docs/design/016-metrics-rollup-dashboard.md) |
+| design | 018 | draft | 离线评测 run 与评测集（E-W2a） | gold 题库 + 对指定配置版本发起离线 run（真实走编排产出 preview trace）+ 屏3 报告；结果存 Postgres 与在线 rag.eval 读模型物理隔离。 | 2026-07-16 | [018](docs/design/018-offline-eval-runs.md) |
+
