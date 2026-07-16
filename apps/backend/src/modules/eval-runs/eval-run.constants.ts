@@ -15,8 +15,18 @@ export const EVAL_RUN_CASE_TIMEOUT_MS = 30_000;
 export const EVAL_RUN_LEASE_MS = 5 * 60_000;
 
 /**
- * 回收僵尸 run 前的宽限期。**必须大于 pg-boss 的 job 过期时间**（v12 默认
- * `expire_seconds = 15min`），否则会和重试抢跑：
+ * 回收僵尸 run 前的宽限期。
+ *
+ * **不变式：`EVAL_RUN_REAP_GRACE_MS + EVAL_RUN_LEASE_MS > pg-boss 的 expire_seconds`**
+ * （v12 默认 900s=15min）。改动这两个常量中的任何一个都要重新验算此式，否则回收会和
+ * 重试抢跑、静默架空 `retryLimit: 3`。当前 15min + 5min = 20min > 15min ✓。
+ *
+ * 两条路径的余量各自成立：
+ *  · **进程被杀**：租约留在 acquire+TTL，回收还要再等 GRACE → 共 20min > 15min ✓
+ *  · **未捕获异常**：`releaseLease` 留下 `lease_until = now`，pg-boss 以 retry_delay=0
+ *    立刻重试 → 重试比回收早整整一个 GRACE ✓
+ *
+ * 为什么要大于 job 过期时间：
  *
  * 未捕获异常时 worker 的 `finally` 会 `releaseLease`，pg-boss 随即重试（默认
  * `retry_delay = 0`，几乎立刻）。若回收器在这个窗口里把 run 判成 `failed`，重试上来

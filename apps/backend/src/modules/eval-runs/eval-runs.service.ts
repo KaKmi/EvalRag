@@ -166,8 +166,9 @@ export class EvalRunsService {
     // 先回收僵尸 run，再查全局串行位：worker 进程被杀/OOM/掉电时，`finally` 的 releaseLease
     // 与 pg-boss 重试都不会发生，run 会永久卡在 `running` —— 而下面这道守卫把 running 一律
     // 视为「有活跃 run」→ **一次崩溃就把整个离线评测功能永久锁死**（此后每次发起都 409，
-    // 只能人工改库）。回收判据是租约过期（worker 已逐条续租 → 过期严格等价于 worker 没了），
-    // 且 5 分钟 TTL 远长于 pg-boss 重试节奏，故不会架空 retryLimit: 3。
+    // 只能人工改库）。回收判据是租约过期（worker 已逐条续租 → 过期严格等价于 worker 没了）。
+    // 不架空 retryLimit: 3 靠的是 `EVAL_RUN_REAP_GRACE_MS` 宽限期，**不是**租约 TTL——
+    // 异常路径上 pg-boss 的 retry_delay 默认为 0（立刻重试），比 5 分钟 TTL 快得多。
     const reaped = await this.repo.reapAbandonedRuns(new Date());
     if (reaped.length > 0) {
       this.logger.warn(`回收了 ${reaped.length} 条租约过期的僵尸 run：${reaped.join(", ")}`);
@@ -204,11 +205,21 @@ export class EvalRunsService {
       totalCases: snapshot.length,
       createdBy: actor,
     });
-    await this.queue.publish(
-      EVAL_RUN_JOB,
-      { runId: run.id },
-      { retryLimit: EVAL_RUN_JOB_RETRY_LIMIT },
-    );
+    // 入队失败必须把 run 收成 failed 再抛：插行与入队不在同一事务，publish 抛出会留下一条
+    // **永远 queued 且没有任何 job 会来跑**的孤儿 run —— 而 queued 同样占着全局串行位，
+    // 且回收器只认 `running`（queued 的 lease_until 恒 NULL，无从判活），
+    // stop() 也只置信号不改状态 → 又是一个永久死锁，只能人工改库。
+    try {
+      await this.queue.publish(
+        EVAL_RUN_JOB,
+        { runId: run.id },
+        { retryLimit: EVAL_RUN_JOB_RETRY_LIMIT },
+      );
+    } catch (err) {
+      await this.repo.finishRun(run.id, "failed", new Date(), "入队失败，未能启动评测");
+      this.logger.error(`run ${run.id} 入队失败，已收成 failed：${(err as Error).message}`);
+      throw err;
+    }
     // 新 run 必然 0 结果 → 综合分直接给 null，省一次回读（同 eval-sets.service.ts:78-85 的做法）。
     return toListItem({ ...run, setName: set.name, overallScore: null }, `v${cfg.version}`);
   }

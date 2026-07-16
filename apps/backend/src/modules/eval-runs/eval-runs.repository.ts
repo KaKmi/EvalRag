@@ -246,6 +246,12 @@ export class EvalRunsRepository {
         status: "failed",
         finishedAt: now,
         error: "评测执行异常中断（worker 未在租约内续期）",
+        // `leaseOwner: null` 是**必须的**，不是清理洁癖：worker 靠 `renewLease` 的
+        // 条件更新（`WHERE lease_owner = owner`）判断自己是否已被回收。若回收时留着
+        // 原 owner，被误回收的 worker 续租仍返回 true → 永远不让位 → 继续把结果写进
+        // 一条已 `failed` 的 run，`finishRun` 还会把它翻回 `done`（而此时 create 已放行
+        // 第二个 run）。清掉 owner，续租立刻返回 false，worker 下一轮迭代即让位。
+        leaseOwner: null,
         leaseUntil: null,
       })
       .where(and(eq(evalRuns.status, "running"), lt(evalRuns.leaseUntil, deadline)))
