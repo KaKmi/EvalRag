@@ -161,26 +161,39 @@ export class EvalSetsService {
 
     // 守卫先于任何写入：否则「改内容 + 转 reviewed 但 gold 空」会先落一个新版本再抛 422,
     // 留下 currentVersion 没跟上的孤儿版本行。校验对象是**新内容**，不是库里的旧内容。
-    if (req.status === "reviewed" && nextContent.goldPoints.length === 0) {
+    //
+    // `req.status ?? row.status` —— 这是**状态不变式**，不是转移守卫（peer review P1）：
+    // 「`reviewed` 要求 ≥1 gold 要点」（§19.1 + schema.ts 的列注释）说的是「凡 reviewed 的
+    // 用例都必须有 gold」，而不只是「转成 reviewed 的那一刻要有」。
+    // 曾经写 `req.status === "reviewed"` → 只在请求**显式带 status** 时才校验 →
+    // 对一条已 reviewed 的用例 `PATCH {goldPoints: []}` 可以把 gold 清空且**仍是 reviewed**，
+    // 于是 listReviewedCaseVersions 会把一条**无 gold 可对照**的用例喂给 run 引擎，
+    // correctness 永远评不出来。勿回退。
+    const nextStatus = req.status ?? row.status;
+    if (nextStatus === "reviewed" && nextContent.goldPoints.length === 0) {
       throw new UnprocessableEntityException("至少填写 1 个答案要点"); // §19.1 逐字
     }
 
     const patch: Partial<EvalCaseRow> = {};
-    let currentVersion = version;
+    if (req.status !== undefined) patch.status = req.status;
+
     if (hasContentChange) {
-      currentVersion = await this.repo.appendCaseVersion(
+      patch.currentVersion = row.currentVersion + 1;
+      // 原型 §18.B：「编辑产生新版本自动清」gold-stale 标志。
+      if (row.goldStale) patch.goldStale = false;
+      // 版本行 + 身份行同事务：分两步会在中间失败时把用例永久卡死（见 repository 注释）。
+      const next = await this.repo.appendCaseVersionAndPatch(
         caseId,
         row.currentVersion + 1,
         nextContent,
+        patch,
       );
-      patch.currentVersion = currentVersion.version;
-      // 原型 §18.B：「编辑产生新版本自动清」gold-stale 标志。
-      if (row.goldStale) patch.goldStale = false;
+      return toEvalCase(next);
     }
-    if (req.status !== undefined) patch.status = req.status;
 
+    // 纯 status 变更（审核通过）：不产生新版本。
     const updated = Object.keys(patch).length ? await this.repo.updateCase(caseId, patch) : row;
-    return toEvalCase({ case: updated, version: currentVersion });
+    return toEvalCase({ case: updated, version });
   }
 
   async removeCase(setId: string, caseId: string): Promise<void> {

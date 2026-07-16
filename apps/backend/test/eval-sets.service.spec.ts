@@ -148,16 +148,26 @@ function setup(opts: { existingNames?: string[]; cases?: CaseFixture[] } = {}) {
       versions.push(version);
       return { case: row, version };
     },
-    async appendCaseVersion(caseId: string, version: number, content: EvalCaseVersionContent) {
-      const row: EvalCaseVersionRow = {
+    // 真仓库把这两步放在**同一事务**里（分两步会把用例永久卡死——见 repository 注释）。
+    // fake 同步成同一个方法，保证 service 的调用形状与真实实现一致。
+    async appendCaseVersionAndPatch(
+      caseId: string,
+      version: number,
+      content: EvalCaseVersionContent,
+      patch: Partial<EvalCaseRow>,
+    ) {
+      const versionRow: EvalCaseVersionRow = {
         id: `${caseId}-v${version}`,
         caseId,
         version,
         ...content,
         createdAt: now,
       };
-      versions.push(row);
-      return row;
+      const row = cases.find((c) => c.id === caseId);
+      if (!row) throw new Error(`case ${caseId} missing`);
+      versions.push(versionRow);
+      Object.assign(row, patch);
+      return { case: row, version: versionRow };
     },
     async updateCase(caseId: string, patch: Partial<EvalCaseRow>): Promise<EvalCaseRow> {
       const row = cases.find((c) => c.id === caseId);
@@ -172,6 +182,8 @@ function setup(opts: { existingNames?: string[]; cases?: CaseFixture[] } = {}) {
       return true;
     },
     async listReviewedCaseVersions(setId: string) {
+      // 集软删不级联到用例行 → 必须也校验集存活，否则「删了还能跑」（真仓库靠 join eval_sets）。
+      if (!sets.find((s) => s.id === setId && !s.deletedAt)) return [];
       return live(setId)
         .filter((c) => c.status === "reviewed")
         .map((c, index) => {
@@ -254,6 +266,40 @@ describe("EvalSetsService", () => {
     const [set] = await service.list();
     expect(set.reviewedCaseCount).toBe(0);
     expect(set.goldDocCoverage).toEqual({ withGoldDocs: 1, total: 2 });
+  });
+
+  // ——— peer review P1 回归护栏：「reviewed 要求 ≥1 gold 要点」是**状态不变式**，不是转移守卫 ———
+  it("updateCase：把已 reviewed 用例的 gold 清空 → 422（不得留下「reviewed 但无 gold」的用例）", async () => {
+    // 曾经守卫写成 req.status === "reviewed"，只在请求显式带 status 时才校验 →
+    // 对已 reviewed 的用例 PATCH {goldPoints: []} 能把 gold 清空且仍是 reviewed →
+    // run 引擎会拿到一条无 gold 可对照的用例，correctness 永远评不出来。
+    const { service, cases } = setup({
+      cases: [{ id: "c1", setId: "s1", status: "reviewed", version: 1, goldPoints: ["要点"] }],
+    });
+    await expect(service.updateCase("s1", "c1", { goldPoints: [] })).rejects.toBeInstanceOf(
+      UnprocessableEntityException,
+    );
+    expect(cases.find((c) => c.id === "c1")!.status).toBe("reviewed"); // 未被写坏
+  });
+
+  it("updateCase：已 reviewed 用例改问题但保留 gold → 正常出 v2 且仍 reviewed", async () => {
+    // 与上一条成对：状态不变式不能误伤正常编辑（原型 §18.B reviewed --编辑--> reviewed）。
+    const { service } = setup({
+      cases: [{ id: "c1", setId: "s1", status: "reviewed", version: 1, goldPoints: ["要点"] }],
+    });
+    const updated = await service.updateCase("s1", "c1", { question: "改过的问题" });
+    expect(updated.status).toBe("reviewed");
+    expect(updated.version).toBe(2);
+    expect(updated.goldPoints).toEqual(["要点"]);
+  });
+
+  it("listReviewedCaseVersions：集被软删后不再吐 run 候选（删了不能还能跑）", async () => {
+    const { service, repo } = setup({
+      cases: [{ id: "c1", setId: "s1", status: "reviewed", version: 1, goldPoints: ["要点"] }],
+    });
+    expect(await repo.listReviewedCaseVersions("s1")).toHaveLength(1);
+    await service.remove("s1");
+    expect(await repo.listReviewedCaseVersions("s1")).toEqual([]);
   });
 
   it("updateCase：改内容且同时转 reviewed 但 gold 为空 → 422，且不落孤儿版本", async () => {

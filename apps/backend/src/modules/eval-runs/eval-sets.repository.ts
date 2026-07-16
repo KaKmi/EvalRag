@@ -221,17 +221,38 @@ export class EvalSetsRepository {
     });
   }
 
-  /** 追加不可变版本（旧版本冻结供历史 run 引用 —— 原型 §18.B）。 */
-  async appendCaseVersion(
+  /**
+   * 追加不可变版本 v+1（旧版本冻结供历史 run 引用 —— 原型 §18.B）**并**推进身份行，
+   * 同一事务（peer review P2）。
+   *
+   * 两步分离会造成**永久性损坏**，不只是短暂不一致：若版本行插入成功而 `currentVersion`
+   * 没跟上，`findCase` 按 `version = currentVersion`（仍是旧值）取到旧版本 →
+   * 用户重试时重新算出同一个 v+1 → 撞 `eval_case_versions_case_version_unique` →
+   * **此后每次编辑都必失败**，只能手工 SQL 修。
+   * （`insertCaseWithVersion` 早已按此理由用事务；这条路径当初漏了。）
+   */
+  async appendCaseVersionAndPatch(
     caseId: string,
     version: number,
     content: EvalCaseVersionContent,
-  ): Promise<EvalCaseVersionRow> {
-    const rows = await this.db
-      .insert(evalCaseVersions)
-      .values({ caseId, version, ...content })
-      .returning();
-    return rows[0];
+    patch: Partial<EvalCaseRow>,
+  ): Promise<EvalCaseWithVersion> {
+    return await this.db.transaction(async (tx) => {
+      const inserted = (
+        await tx
+          .insert(evalCaseVersions)
+          .values({ caseId, version, ...content })
+          .returning()
+      )[0];
+      const rows = await tx
+        .update(evalCases)
+        .set(patch)
+        .where(and(eq(evalCases.id, caseId), isNull(evalCases.deletedAt)))
+        .returning();
+      // 并发软删会让这里匹配 0 行 —— 抛出即回滚掉上面的版本行，不留孤儿。
+      if (!rows[0]) throw new Error(`eval case ${caseId} missing`);
+      return { case: rows[0], version: inserted };
+    });
   }
 
   async updateCase(caseId: string, patch: Partial<EvalCaseRow>): Promise<EvalCaseRow> {
@@ -254,8 +275,14 @@ export class EvalSetsRepository {
   }
 
   /**
-   * run 候选集（Story 5/6 消费）：只取**已审核且存活**用例的**当前版本**
+   * run 候选集（Story 6 消费）：只取**已审核且存活**用例的**当前版本**
    * —— 原型 §18.B「draft 不参与 run」。顺序与 `listCases` 一致，`seq` 即报告 # 列。
+   *
+   * 三重存活校验，缺一不可（peer review P2）：
+   *  · `evalCases.deletedAt` —— 用例自身软删；
+   *  · `evalSets.deletedAt` —— **集软删不级联到用例行**（`softDeleteSet` 只改 eval_sets），
+   *    不 join 过滤的话，一个已删的集照样能吐出 run 候选，等于「删了还能跑」；
+   *  · `status='reviewed'`。
    */
   async listReviewedCaseVersions(setId: string): Promise<ReviewedCaseVersion[]> {
     const rows = await this.db
@@ -273,11 +300,13 @@ export class EvalSetsRepository {
           eq(evalCaseVersions.version, evalCases.currentVersion),
         ),
       )
+      .innerJoin(evalSets, eq(evalSets.id, evalCases.setId))
       .where(
         and(
           eq(evalCases.setId, setId),
           eq(evalCases.status, "reviewed"),
           isNull(evalCases.deletedAt),
+          isNull(evalSets.deletedAt),
         ),
       )
       .orderBy(asc(evalCases.createdAt), asc(evalCases.id));
