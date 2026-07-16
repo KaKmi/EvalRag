@@ -39,7 +39,8 @@ export function invalidJudgeOutput(message: string): never {
 }
 
 export async function withJudgeRetry<T>(
-  metric: "faithfulness" | "answer relevancy" | "context precision",
+  // "correctness" 是 E-W2a 的加性扩宽（018 决策 D）——三个既有值一字未动。
+  metric: "faithfulness" | "answer relevancy" | "context precision" | "correctness",
   attempt: () => Promise<T>,
 ): Promise<T> {
   let lastError: unknown;

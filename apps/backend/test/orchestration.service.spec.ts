@@ -668,3 +668,115 @@ describe("OrchestrationService · chain span 质量信号 + IO (M8 T3)", () => {
     expect(JSON.parse(enrich({ intent: "CHAT" })["rag.route.kb_names"])).toEqual([]);
   });
 });
+
+// ——— E-W2a（018 决策 C）：eval 专用只读入口。既有 run() 行为由上方全部用例守护。———
+describe("OrchestrationService.runForEvaluation（离线评测入口）", () => {
+  const RUN_ID = "11111111-1111-4111-8111-111111111111";
+
+  it("用传入的 cfg，不调 resolvePublic，不落会话，返回真实 chunkId 与 usage", async () => {
+    const d = makeDeps();
+    const outcome = await makeSvc(d).runForEvaluation(cfg({ preview: true, configVersionId: "v7" }), "课程可以退款吗", {
+      runId: RUN_ID,
+      timeoutMs: 30_000,
+    });
+
+    expect(d.applications.resolvePublic).not.toHaveBeenCalled(); // 用传入 cfg
+    expect(d.conversations.createConversation).not.toHaveBeenCalled(); // persist=false（决策 C-2）
+    expect(d.conversations.appendMessage).not.toHaveBeenCalled();
+    expect(outcome.traceId).toMatch(/^[a-f0-9]{32}$/);
+    expect(outcome.replyText).toBe("答案[1][2]");
+    expect(outcome.timedOut).toBe(false);
+    expect(outcome.isFallback).toBe(false);
+    // 真实 chunkId（禁止合成 c1/c2）——mergeHits 按 finalScore 降序 → a1(0.9) 在前
+    expect(outcome.hits.map((h) => h.chunkId)).toEqual(["a1", "b1"]);
+    expect(outcome.hits[0].text).toBe("内容 a1");
+    expect(outcome.hits[0].finalScore).toBeCloseTo(0.9);
+    // usage 出进程（决策 G）：prep(rewrite 5+3, intent 5+3) + reply(20+15)
+    expect(outcome.usage.inputTokens).toBe(30);
+    expect(outcome.usage.outputTokens).toBe(21);
+  });
+
+  it("单用例超时 → timedOut=true，不抛", async () => {
+    const d = makeDeps();
+    d.nodeRuntime.streamTextChunks = jest.fn(async function* () {
+      await new Promise((r) => setTimeout(r, 50));
+      yield { delta: "慢" };
+      return { outcome: "ok", text: "慢", usage: { inputTokens: 1, outputTokens: 1 }, model: "m" };
+    }) as unknown as typeof d.nodeRuntime.streamTextChunks;
+
+    const outcome = await makeSvc(d).runForEvaluation(cfg({ preview: true }), "q", {
+      runId: RUN_ID,
+      timeoutMs: 1,
+    });
+    expect(outcome.timedOut).toBe(true);
+  });
+
+  it("检索兜底分支：hits 为空、isFallback=true，仍返回兜底话术（不抛）", async () => {
+    const d = makeDeps();
+    d.retrieval.test = jest.fn(async () => ({ hits: [] })) as unknown as typeof d.retrieval.test;
+    const outcome = await makeSvc(d).runForEvaluation(cfg({ preview: true }), "q", {
+      runId: RUN_ID,
+      timeoutMs: 30_000,
+    });
+    expect(outcome.isFallback).toBe(true);
+    expect(outcome.hits).toEqual([]);
+    expect(outcome.replyText).toBe("很抱歉，没有找到相关答案。");
+  });
+
+  describe("chain span 标记", () => {
+    let exporter: InMemorySpanExporter;
+    beforeEach(() => {
+      exporter = new InMemorySpanExporter();
+      trace.disable();
+      trace.setGlobalTracerProvider(
+        new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }),
+      );
+    });
+    afterEach(() => trace.disable());
+
+    it("chain 根 span 标 rag.eval.run_id 与 rag.preview=true（供 W2b 按 run 过滤 trace）", async () => {
+      const d = makeDeps();
+      const outcome = await makeSvc(d).runForEvaluation(cfg({ preview: true }), "q", {
+        runId: RUN_ID,
+        timeoutMs: 30_000,
+      });
+      const chain = exporter.getFinishedSpans().find((s) => s.name === "rag.pipeline");
+      expect(chain).toBeDefined();
+      expect(chain!.attributes["rag.eval.run_id"]).toBe(RUN_ID);
+      expect(chain!.attributes["rag.preview"]).toBe(true);
+      expect(chain!.spanContext().traceId).toBe(outcome.traceId);
+    });
+
+    // 决策 B 的守护网（单元层）：离线 run 的 trace 绝不是 rag.eval span。
+    // 真正的隔离证明在 Task 7 的 infra-gated 污染回归测试。
+    it("离线 run 只产出 rag.pipeline，绝不产出 rag.eval span", async () => {
+      const d = makeDeps();
+      await makeSvc(d).runForEvaluation(cfg({ preview: true }), "q", {
+        runId: RUN_ID,
+        timeoutMs: 30_000,
+      });
+      const names = exporter.getFinishedSpans().map((s) => s.name);
+      expect(names).toContain("rag.pipeline");
+      expect(names).not.toContain("rag.eval");
+    });
+  });
+});
+
+describe("OrchestrationService.run（E-W2a 重构后行为不变——决策 C 的守护网）", () => {
+  it("run()：仍走 resolvePublic 并落会话，末位仍是 done", async () => {
+    const d = makeDeps();
+    const r = await collect(makeSvc(d).run("app1", "q"));
+    expect(d.applications.resolvePublic).toHaveBeenCalledWith("app1");
+    expect(d.conversations.createConversation).toHaveBeenCalled();
+    expect(r.events[r.events.length - 1].type).toBe("done");
+  });
+
+  it("run()：resolvePublic 抛错必须在首个 next() 时冒泡（controller 依赖它在写 SSE 头前翻 404）", async () => {
+    const d = makeDeps();
+    d.applications.resolvePublic = jest.fn(async () => {
+      throw new NotFoundException("应用不存在");
+    }) as unknown as typeof d.applications.resolvePublic;
+    const gen = makeSvc(d).run("nope", "q");
+    await expect(gen.next()).rejects.toBeInstanceOf(NotFoundException);
+  });
+});

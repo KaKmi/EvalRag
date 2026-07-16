@@ -6,6 +6,7 @@ import {
   type ChatStreamEvent,
   type FallbackInfo,
   type FallbackReason,
+  type ResolvedApplicationConfig,
   type ResolvedNodeConfig,
 } from "@codecrush/contracts";
 import { startManualSpan, runInContext, SpanStatusCode } from "@codecrush/otel";
@@ -46,9 +47,43 @@ interface PrepResult {
   isFallback: boolean;
   reasons: FallbackReason[];
   fallbackInfo: FallbackInfo;
+  /**
+   * 018 决策 C：命中分块原文（含真实 chunkId / finalScore），供离线评测喂 Judge。
+   * 内部结构，**不进 SSE 契约**（ChatCitation 没有 chunkId，且 text 可选——拼不出 Judge 输入）。
+   * 兜底/CHAT 分支为 []。
+   */
+  hits: TaggedHit[];
 }
 
 type TokenUsage = { inputTokens: number; outputTokens: number };
+
+/** 018 决策 C：`runWithConfig` 的加性选项。全部省略 → 行为与 E-W2a 之前逐字节一致。 */
+interface RunWithConfigOptions {
+  /** false = 跳过全部 persist（决策 C-2：离线 run 不落会话，避免污染会话表）。默认 true。 */
+  persist?: boolean;
+  /** 非空 → chain 根 span 标 `rag.eval.run_id`（原型 §6）。**不是**发 rag.eval span。 */
+  evalRunId?: string;
+  /**
+   * chain 根 span 一建立即回调 traceId。离线专用：`done` 事件也带 traceId，但**超时路径没有
+   * done** —— 而超时恰恰是最需要「trace」链接去看卡在哪的时候。故不能只依赖 done。
+   */
+  onTrace?: (traceId: string) => void;
+  /** 预备阶段产物回调（离线取 hits）。 */
+  onPrep?: (prep: PrepResult) => void;
+  /** 编排累计 token 回调（决策 G：让 usage 出进程做预算熔断）。 */
+  onUsage?: (usage: TokenUsage) => void;
+}
+
+/** 018 决策 C：`runForEvaluation` 的返回值——离线 run 引擎构造 Judge 输入所需的一切。 */
+export interface EvaluationRunOutcome {
+  traceId: string;
+  replyText: string;
+  /** 真实 chunkId/text/finalScore —— 禁止合成 c1/c2（Global Constraints）。 */
+  hits: Array<{ chunkId: string; text: string; finalScore: number }>;
+  usage: TokenUsage;
+  isFallback: boolean;
+  timedOut: boolean;
+}
 
 interface ExecuteNodeOptions {
   spanEnrich?: (output: unknown) => Record<string, string | number | boolean>;
@@ -110,6 +145,18 @@ class ChainMetricsAccumulator {
     if (model) this.replyObserver.onModel(model);
   }
 
+  /**
+   * 018 决策 G：把已累计的 token 用量读出进程（原先只写进 span 属性，run 引擎拿不到）。
+   * 口径与 `applyTo` 完全一致（prep + reply）。provider 未回传 usage 的部分恒为 0——
+   * 尽力而为，不估算、不假装精确。
+   */
+  totals(): TokenUsage {
+    return {
+      inputTokens: this.prepUsage.inputTokens + this.replyUsage.inputTokens,
+      outputTokens: this.prepUsage.outputTokens + this.replyUsage.outputTokens,
+    };
+  }
+
   applyTo(span: { setAttribute(key: string, value: string | number): void }): void {
     const inputTokens = this.prepUsage.inputTokens + this.replyUsage.inputTokens;
     const outputTokens = this.prepUsage.outputTokens + this.replyUsage.outputTokens;
@@ -162,8 +209,28 @@ export class OrchestrationService {
     userId?: string,
   ): AsyncGenerator<ChatStreamEvent> {
     // resolvePublic 在 chain span 之外：未上线/停用异常直接冒泡给 controller 翻 404/403（写头之前）。
+    // 必须留在生成器体内（首个 next() 时才触发）——chat.controller.ts:52-53 依赖此时序。
+    // yield* 委托保持该时序不变。
     const cfg = await this.applications.resolvePublic(agentId);
+    yield* this.runWithConfig(agentId, cfg, query, convId, userId);
+  }
 
+  /**
+   * 018 决策 C：编排主体（自 chain span 起）。原 `run()` 的全部逻辑**纯搬移**至此，零行为变化。
+   *
+   * `agentId` **必须**是独立首参、**不得**改用 `cfg.applicationId` 推导：入参可能是 slug，
+   * 且它是会话归属 IDOR 校验的判据（`resolveConvId` 里 `conv.agentId !== agentId`）。
+   * 既有测试的 fixture 恰好 `applicationId === agentId`，**抓不到**这个 divergence——
+   * 换句话说，这里没有测试守护，只能靠不改。
+   */
+  private async *runWithConfig(
+    agentId: string,
+    cfg: ResolvedApplicationConfig,
+    query: string,
+    convId?: string,
+    userId?: string,
+    opts?: RunWithConfigOptions,
+  ): AsyncGenerator<ChatStreamEvent> {
     // chain 根 span 用手动生命周期：跨 yield 存活，finally 手动 end（withSpan 撑不住流式）。
     const { span: chain, ctx: chainCtx } = startManualSpan("rag.pipeline", {
       attributes: {
@@ -172,7 +239,10 @@ export class OrchestrationService {
         [RAG.PREVIEW]: cfg.preview,
       },
     });
+    // 018 决策 B：给编排 trace 打 run 标记（原型 §6）。写在 rag.pipeline 上 → 不进 eval MV。
+    if (opts?.evalRunId) chain.setAttribute(RAG.EVAL_RUN_ID, opts.evalRunId);
     const traceId = chain.spanContext().traceId;
+    opts?.onTrace?.(traceId); // 离线：超时路径无 done 事件，traceId 只能从这里拿
     // M8 T3：输入即得，起始即记（通用 IO 属性；导出前经 RedactingSpanExporter 脱敏）
     chain.setAttribute(CODECRUSH_IO.INPUT, query);
     // M9 W1：身份富化——agentId/userId 入口即得，cfg.name 已解析；session.id 须待 persist 出真 convId（见 finally）。
@@ -191,6 +261,14 @@ export class OrchestrationService {
     // reply 迭代器提到外层：手动 next() 循环不像 for-await 那样自动传播 return()，故 finally
     // 显式 return() 级联取消上游（streamTextChunks → chatStream → reader.cancel）+ 结束 reply span。
     let replyIt: AsyncGenerator<{ delta: string }, unknown> | undefined;
+    // 018 决策 C-2：离线 run 不落会话——persist 在每条完成路径都会调用，而 conversations
+    // 表没有 preview/source 列，一个 50 题的 run 会灌 50 行与真实用户会话不可区分。
+    // 默认 true → 线上路径的 4 处 persist 调用逐字节不变。
+    const shouldPersist = opts?.persist !== false;
+    const maybePersist = async (
+      result: OrchestrationResult,
+      ctx: { agentId: string; query: string; convId?: string; userId?: string },
+    ): Promise<string | undefined> => (shouldPersist ? this.persist(result, ctx) : undefined);
     // M8 T3：所有结束路径统一写 output + 四质量布尔（每路径恰一次；prep 未就绪的 infra 早失败不写）。
     let signalsWritten = false;
     // reply 分支模型输出未过契约校验 → streamTextChunks 返回 outcome=fallback（把兜底话术当整段）；
@@ -240,6 +318,7 @@ export class OrchestrationService {
         this.prepare(agentId, query, convId, cfg, metrics),
       );
       persistCtx = { agentId, query, convId: prep.validConvId, userId };
+      opts?.onPrep?.(prep); // 018 决策 C：把 hits 交给离线评测（在线路径无回调 → no-op）
 
       // —— 流式阶段 ——
       for (const c of prep.citations) yield { type: "citation", citation: c };
@@ -280,7 +359,7 @@ export class OrchestrationService {
             chain.setStatus({ code: SpanStatusCode.ERROR, message: "first token timeout" });
             finalizeChainSignals(true); // 唯一 timedOut=true 路径（其余路径由 finally 写 false）
             yield { type: "error", message: "生成超时，请稍后重试" };
-            sessionId = (await this.persist(this.buildResult(traceId, "", prep), persistCtx)) ?? persistCtx?.convId ?? sessionId;
+            sessionId = (await maybePersist(this.buildResult(traceId, "", prep), persistCtx)) ?? persistCtx?.convId ?? sessionId;
             completed = true;
             return; // 熔断：不发 done
           }
@@ -303,7 +382,7 @@ export class OrchestrationService {
           chain.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
           chain.recordException(err as Error);
           yield { type: "error", message: "生成失败，请稍后重试" };
-          sessionId = (await this.persist(this.buildResult(traceId, replyText, prep), persistCtx)) ?? persistCtx?.convId ?? sessionId;
+          sessionId = (await maybePersist(this.buildResult(traceId, replyText, prep), persistCtx)) ?? persistCtx?.convId ?? sessionId;
           completed = true;
           return;
         }
@@ -311,7 +390,7 @@ export class OrchestrationService {
 
       // —— 派生指标 + 落库 + done（先 persist+completed，再 yield，杜绝 yield 处 abort 致重复落库）——
       const result = this.buildResult(traceId, replyText, prep);
-      const persistedConvId = await this.persist(result, persistCtx);
+      const persistedConvId = await maybePersist(result, persistCtx);
       sessionId = persistedConvId ?? persistCtx?.convId ?? sessionId; // M9 W1：首轮取 persist 生成的真 convId
       const doneConvId = persistedConvId ?? prep.validConvId; // 可能 undefined（落库彻底失败）
       completed = true;
@@ -335,7 +414,7 @@ export class OrchestrationService {
       if (!completed && persistCtx && prep) {
         // 客户端 abort（gen.return()）：落已产出部分 assistant 内容（复用现有字段，无 aborted 列）。
         try {
-          sessionId = (await this.persist(this.buildResult(traceId, replyText, prep), persistCtx)) ?? persistCtx?.convId ?? sessionId;
+          sessionId = (await maybePersist(this.buildResult(traceId, replyText, prep), persistCtx)) ?? persistCtx?.convId ?? sessionId;
         } catch (e) {
           this.logger.error(`abort 落部分失败（边界7 兜住）：${(e as Error).message}`);
         }
@@ -353,10 +432,104 @@ export class OrchestrationService {
       // 早失败（prepare 抛）prep=undefined，finalize guard 跳过（早失败无质量信号可言）。
       finalizeChainSignals(false);
       // M9 W1：session.id 待此写——首轮新会话的真 convId 已由各 persist 路径捕获进 sessionId。
+      // 决策 C-2 的已知代价：离线 run 跳过 persist → sessionId 恒空 → eval trace 无 session.id。
       if (sessionId) chain.setAttribute(SESSION_ID, sessionId);
       metrics.applyTo(chain);
+      // 018 决策 G：usage 出进程供预算熔断（在线路径无回调 → no-op）。
+      // 放在 applyTo 之后、end 之前：口径与写进 span 的完全一致。
+      opts?.onUsage?.(metrics.totals());
       chain.end(); // 手动生命周期：所有路径必 end
     }
+  }
+
+  /**
+   * 018 决策 C：离线评测专用只读入口。与线上**同一份** `runWithConfig` 代码路径
+   * （原型 §6「与线上完全同路径」），只是：用调用方给的 cfg（preview=true 的显式版本）、
+   * 不落会话、给 chain span 打 run 标记、把 hits/usage 带出来。
+   *
+   * **不发 `rag.eval` span**（018 决策 B）——那会污染屏1；离线分数存 PG。
+   *
+   * 超时不抛：返回 `timedOut: true`，run 引擎据此记 `verdict=timeout` + 分数全 NULL，
+   * 并继续跑下一条用例。
+   */
+  async runForEvaluation(
+    cfg: ResolvedApplicationConfig,
+    query: string,
+    opts: { runId: string; timeoutMs: number },
+  ): Promise<EvaluationRunOutcome> {
+    let prep: PrepResult | undefined;
+    let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
+    let traceId = "";
+    let replyText = "";
+    let timedOut = false;
+
+    // 此处传 cfg.applicationId 作 agentId 是安全的（018 决策 C 已论证）：离线不传 convId
+    // → resolveConvId 首行短路，走不到归属校验；且 persist 已跳过，无写入归属。
+    const gen = this.runWithConfig(cfg.applicationId, cfg, query, undefined, undefined, {
+      persist: false,
+      evalRunId: opts.runId,
+      onTrace: (id) => {
+        traceId = id;
+      },
+      onPrep: (p) => {
+        prep = p;
+      },
+      onUsage: (u) => {
+        usage = u;
+      },
+    });
+
+    // 超时用 Promise.race 包住**每次** next()：单个 case 的墙钟上限。
+    // 超时后必须 gen.return() 级联取消上游（同 controller 断连路径——chat.controller.ts:49-51），
+    // 否则 streamTextChunks 的 fetch 悬挂 + reply span 泄漏。
+    const deadline = Date.now() + opts.timeoutMs;
+    try {
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          timedOut = true;
+          break;
+        }
+        let timer: NodeJS.Timeout | undefined;
+        const tick = await Promise.race([
+          gen.next(),
+          new Promise<"timeout">((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), remaining);
+          }),
+        ]).finally(() => {
+          if (timer) clearTimeout(timer);
+        });
+
+        if (tick === "timeout") {
+          timedOut = true;
+          break;
+        }
+        if (tick.done) break;
+
+        const event = tick.value;
+        if (event.type === "token") replyText += event.delta;
+      }
+    } finally {
+      // 对已读完/已抛错的生成器是安全 no-op；超时路径靠它触发 finally（span end + 上游取消）。
+      try {
+        await gen.return(undefined);
+      } catch (err) {
+        this.logger.warn(`eval 生成器 return 级联异常（忽略）：${(err as Error).message}`);
+      }
+    }
+
+    return {
+      traceId,
+      replyText,
+      hits: (prep?.hits ?? []).map((h) => ({
+        chunkId: h.chunkId,
+        text: h.text,
+        finalScore: h.finalScore,
+      })),
+      usage,
+      isFallback: prep?.isFallback ?? false,
+      timedOut,
+    };
   }
 
   /** 预备阶段：rewrite→intent→路由→检索→兜底判定，产出 PrepResult。无 yield，供 runInContext 包裹挂父。 */
@@ -419,6 +592,7 @@ export class OrchestrationService {
         isFallback: true,
         reasons,
         fallbackInfo: { reasons, scopeKbNames: [] },
+        hits: [], // CHAT 短路不检索
       };
     }
 
@@ -469,6 +643,8 @@ export class OrchestrationService {
         isFallback: true,
         reasons: decision.reasons,
         fallbackInfo,
+        // 检索层兜底：命中未过阈值 → 不喂给生成，也不作为判分依据（与 citations=[] 同口径）
+        hits: [],
       };
     }
 
@@ -490,6 +666,7 @@ export class OrchestrationService {
       isFallback: false,
       reasons: [],
       fallbackInfo,
+      hits, // 018 决策 C：真实命中（含 chunkId/finalScore），与 citations 1:1 同序
     };
   }
 

@@ -17,5 +17,8 @@ import { OrchestrationService } from "./orchestration.service";
   ],
   controllers: [ChatController],
   providers: [OrchestrationService],
+  // 018 决策 A：eval-runs（新顶点）注入 OrchestrationService.runForEvaluation 走同一编排路径。
+  // chat 本身不感知 eval-runs——依赖方向单向朝下，无环。
+  exports: [OrchestrationService],
 })
 export class ChatModule {}
