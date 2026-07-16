@@ -23,6 +23,7 @@ import { ChatModule } from "./modules/chat/chat.module";
 import { ConversationsModule } from "./modules/conversations/conversations.module";
 import { ApplicationsModule } from "./modules/applications/applications.module";
 import { EvaluationsModule } from "./modules/evaluations/evaluations.module";
+import { EvalRunsModule } from "./modules/eval-runs/eval-runs.module";
 
 @Module({
   imports: [
@@ -49,6 +50,8 @@ import { EvaluationsModule } from "./modules/evaluations/evaluations.module";
     ChatModule,
     ConversationsModule,
     EvaluationsModule,
+    // E-W2a：离线评测 run 与评测集（018 决策 A：依赖顶点，不被其他域 import）
+    EvalRunsModule,
   ],
   providers: [
     // 全局 Zod 管道：@Body/@Query/@Param 用 createZodDto 时自动校验，失败抛 ZodValidationException(400)
