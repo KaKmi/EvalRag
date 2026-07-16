@@ -47,6 +47,16 @@ describe("CreateEvalCaseRequestSchema", () => {
       CreateEvalCaseRequestSchema.safeParse({ question: "q", goldPoints: ["x".repeat(201)] }).success,
     ).toBe(false);
   });
+  it("rejects a whitespace-only gold point（否则「reviewed 要求 ≥1 条」形同虚设）", () => {
+    expect(CreateEvalCaseRequestSchema.safeParse({ question: "q", goldPoints: ["   "] }).success).toBe(
+      false,
+    );
+  });
+  it("trims gold points", () => {
+    expect(
+      CreateEvalCaseRequestSchema.parse({ question: "q", goldPoints: [" 要点 "] }).goldPoints,
+    ).toEqual(["要点"]);
+  });
   it("rejects >10 gold docs and >5 tags", () => {
     expect(
       CreateEvalCaseRequestSchema.safeParse({

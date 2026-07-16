@@ -65,7 +65,11 @@ export type EvalSetListResponse = z.infer<typeof EvalSetListResponseSchema>;
 export const CreateEvalCaseRequestSchema = z.object({
   // trim 后再校验：§19.1「问题不能为空」——纯空白同样是空。
   question: z.string().trim().min(1).max(500),
-  goldPoints: z.array(z.string().min(1).max(200)).default([]),
+  // gold 要点同样 trim：纯空白要点会**满足**「reviewed 要求 ≥1 条」这条不变式，
+  // 于是一条「已审核但唯一 gold 要点是空白」的用例会进 run 候选集，correctness 实际无从判起。
+  // csv-import.ts:58-63 早已在导入路径堵了同类漏洞（纯分隔符 `;;;` → 僵尸用例），
+  // 直连 API 路径当初漏了。
+  goldPoints: z.array(z.string().trim().min(1).max(200)).default([]),
   goldDocIds: z.array(uuid).max(10).default([]),
   tags: z.array(z.string().min(1).max(12)).max(5).default([]),
   sourceTraceId: z
@@ -78,7 +82,7 @@ export type CreateEvalCaseRequest = z.infer<typeof CreateEvalCaseRequestSchema>;
 /** 内容字段改动 → 新建不可变版本；status 单独走（审核通过）。 */
 export const UpdateEvalCaseRequestSchema = z.object({
   question: z.string().trim().min(1).max(500).optional(),
-  goldPoints: z.array(z.string().min(1).max(200)).optional(),
+  goldPoints: z.array(z.string().trim().min(1).max(200)).optional(),
   goldDocIds: z.array(uuid).max(10).optional(),
   tags: z.array(z.string().min(1).max(12)).max(5).optional(),
   status: EvalCaseStatusSchema.optional(),
