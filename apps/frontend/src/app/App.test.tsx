@@ -69,6 +69,53 @@ it("renders admin sider with brand, grouped nav (10 items + 3 group headers) whe
   expect(screen.queryByText("Agent 管理")).not.toBeInTheDocument();
 }, 10_000);
 
+it("loads EvalSetsPage from real /api/eval/sets on /admin/eval/sets (E-W2a 决策 F 新路由)", async () => {
+  localStorage.setItem("token", "fake-token");
+  // 018 决策 F：旧 /admin/evalsets 占位页整体替换为 /admin/eval/sets，且脱 mock 走真实端点。
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _opts?: RequestInit) => {
+    const u = typeof input === "string" ? input : input.toString();
+    if (u.includes("/api/eval/sets") || u.includes("/api/knowledge-bases")) {
+      return { ok: true, status: 200, json: async () => [] } as unknown as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as unknown as Response;
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+
+  render(
+    <MemoryRouter initialEntries={["/admin/eval/sets"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText("还没有评测集")).toBeInTheDocument();
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.includes("/api/eval/sets"))).toBe(true);
+  });
+});
+
+it("loads EvalRunsPage from real /api/eval/runs on /admin/eval/runs (E-W2a 决策 F 新路由)", async () => {
+  localStorage.setItem("token", "fake-token");
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _opts?: RequestInit) => {
+    const u = typeof input === "string" ? input : input.toString();
+    if (u.includes("/api/eval/runs")) {
+      return { ok: true, status: 200, json: async () => [] } as unknown as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as unknown as Response;
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+
+  render(
+    <MemoryRouter initialEntries={["/admin/eval/runs"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText("还没有评测记录")).toBeInTheDocument();
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.includes("/api/eval/runs"))).toBe(true);
+  });
+});
+
 it("renders GapsPage shell on /admin/gaps (数据飞轮壳页)", async () => {
   localStorage.setItem("token", "fake-token");
   render(

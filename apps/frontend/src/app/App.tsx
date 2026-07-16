@@ -20,7 +20,8 @@ const PromptsPage = lazy(() => import("../pages/admin/PromptsPage"));
 const PromptDetailPage = lazy(() => import("../pages/admin/PromptDetailPage"));
 const GapsPage = lazy(() => import("../pages/admin/GapsPage"));
 const EvalSetsPage = lazy(() => import("../pages/admin/EvalSetsPage"));
-const EvalsPage = lazy(() => import("../pages/admin/EvalsPage"));
+const EvalRunsPage = lazy(() => import("../pages/admin/EvalRunsPage"));
+const EvalRunDetailPage = lazy(() => import("../pages/admin/EvalRunDetailPage"));
 const TracesPage = lazy(() => import("../pages/admin/TracesPage"));
 const TraceDetailPage = lazy(() => import("../pages/admin/TraceDetailPage"));
 const QualityPage = lazy(() => import("../pages/admin/QualityPage"));
@@ -79,9 +80,11 @@ export function App() {
           <Route path="prompts" element={<PromptsPage />} />
           <Route path="prompts/:promptId" element={<PromptDetailPage />} />
           <Route path="gaps" element={<GapsPage />} />
-          <Route path="evalsets" element={<EvalSetsPage />} />
-          <Route path="evaluations" element={<EvalsPage />} />
-          <Route path="evaluations/:reportId" element={<EvalsPage />} />
+          {/* 018 决策 F：路由采纳产品文档 §5/§7 的路径；旧 evalsets/evaluations 占位页整体
+              重写，不保留重定向（M2 mock 页无真实用户依赖）。 */}
+          <Route path="eval/sets" element={<EvalSetsPage />} />
+          <Route path="eval/runs" element={<EvalRunsPage />} />
+          <Route path="eval/runs/:runId" element={<EvalRunDetailPage />} />
           <Route path="traces" element={<TracesPage />} />
           <Route path="traces/sessions/:sessionId" element={<SessionDetailPage />} />
           <Route path="traces/:traceId" element={<TraceDetailPage />} />

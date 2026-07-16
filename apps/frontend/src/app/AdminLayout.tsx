@@ -30,8 +30,8 @@ const NAV_ENTRIES: NavEntry[] = [
   { kind: "group", label: "数据飞轮" },
   { kind: "item", key: "/admin/quality", label: "答案质量", icon: <FundOutlined /> },
   { kind: "item", key: "/admin/gaps", label: "知识缺口" },
-  { kind: "item", key: "/admin/evalsets", label: "评测集" },
-  { kind: "item", key: "/admin/evaluations", label: "效果评测", icon: <FundOutlined /> },
+  { kind: "item", key: "/admin/eval/sets", label: "评测集" },
+  { kind: "item", key: "/admin/eval/runs", label: "效果评测", icon: <FundOutlined /> },
 ];
 
 /** 子路由需要高亮父级菜单的路径前缀（dashboard 不在侧栏） */
@@ -45,8 +45,8 @@ const PREFIX_KEYS = [
   "/admin/traces",
   "/admin/quality",
   "/admin/gaps",
-  "/admin/evalsets",
-  "/admin/evaluations",
+  "/admin/eval/sets",
+  "/admin/eval/runs",
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -62,8 +62,8 @@ const PAGE_TITLES: Record<string, string> = {
   "/admin/traces": "Trace 追踪",
   "/admin/quality": "答案质量",
   "/admin/gaps": "知识缺口",
-  "/admin/evalsets": "评测集",
-  "/admin/evaluations": "效果评测",
+  "/admin/eval/sets": "评测集",
+  "/admin/eval/runs": "效果评测",
 };
 
 function getSelectedKey(pathname: string): string {
