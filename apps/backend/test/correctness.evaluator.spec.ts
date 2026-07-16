@@ -81,3 +81,38 @@ describe("CorrectnessEvaluator", () => {
     expect(opts.structuredOutput).toBeDefined();
   });
 });
+
+// ——— peer review 修订：裁判不合规响应绝不能变成 0 分（Global Constraints）———
+describe("CorrectnessEvaluator · 不合规裁判响应必须成为「未评」而非 0 分", () => {
+  it("模型返回空 points（schema 曾允许）→ 必须抛（→ scoreOffline 记 null），绝不返回 0", async () => {
+    const m = models(JSON.stringify({ points: [] }));
+    await expect(
+      new CorrectnessEvaluator(m).score({ ...base, goldPoints: ["p1", "p2"] }, "m-judge"),
+    ).rejects.toThrow(/correctness/);
+    expect((m.chat as jest.Mock).mock.calls).toHaveLength(2); // 重试过
+  });
+
+  it("模型少返回要点（5 个 gold 只回 1 个 hit）→ 必须抛，不得按 1/1=100 虚高", async () => {
+    const m = models(points(["p1", "hit"]));
+    await expect(
+      new CorrectnessEvaluator(m).score(
+        { ...base, goldPoints: ["p1", "p2", "p3", "p4", "p5"] },
+        "m-judge",
+      ),
+    ).rejects.toThrow(/correctness/);
+  });
+
+  it("模型多返回要点 → 必须抛（分母不受模型摆布）", async () => {
+    const m = models(points(["p1", "hit"], ["凭空多出来的", "hit"]));
+    await expect(
+      new CorrectnessEvaluator(m).score({ ...base, goldPoints: ["p1"] }, "m-judge"),
+    ).rejects.toThrow(/correctness/);
+  });
+
+  it("gold 要点 >20 条仍可评（分母随 gold 数动态，无固定上限）", async () => {
+    const gold = Array.from({ length: 21 }, (_, i) => `p${i}`);
+    const m = models(JSON.stringify({ points: gold.map((p) => ({ point: p, status: "hit", reason: "r" })) }));
+    const result = await new CorrectnessEvaluator(m).score({ ...base, goldPoints: gold }, "m-judge");
+    expect(result.score).toBe(100);
+  });
+});

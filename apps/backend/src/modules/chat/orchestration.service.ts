@@ -242,7 +242,13 @@ export class OrchestrationService {
     // 018 决策 B：给编排 trace 打 run 标记（原型 §6）。写在 rag.pipeline 上 → 不进 eval MV。
     if (opts?.evalRunId) chain.setAttribute(RAG.EVAL_RUN_ID, opts.evalRunId);
     const traceId = chain.spanContext().traceId;
-    opts?.onTrace?.(traceId); // 离线：超时路径无 done 事件，traceId 只能从这里拿
+    // 离线：超时路径无 done 事件，traceId 只能从这里拿。
+    // try 包裹同 :425 的 replyIt.return()——回调是外部代码，抛了也不能泄漏 chain span。
+    try {
+      opts?.onTrace?.(traceId);
+    } catch (err) {
+      this.logger.warn(`onTrace 回调异常（忽略）：${(err as Error).message}`);
+    }
     // M8 T3：输入即得，起始即记（通用 IO 属性；导出前经 RedactingSpanExporter 脱敏）
     chain.setAttribute(CODECRUSH_IO.INPUT, query);
     // M9 W1：身份富化——agentId/userId 入口即得，cfg.name 已解析；session.id 须待 persist 出真 convId（见 finally）。
@@ -437,7 +443,12 @@ export class OrchestrationService {
       metrics.applyTo(chain);
       // 018 决策 G：usage 出进程供预算熔断（在线路径无回调 → no-op）。
       // 放在 applyTo 之后、end 之前：口径与写进 span 的完全一致。
-      opts?.onUsage?.(metrics.totals());
+      // try 包裹：回调抛出绝不能跳过下面的 chain.end()（同 :425 replyIt.return() 的理由）。
+      try {
+        opts?.onUsage?.(metrics.totals());
+      } catch (err) {
+        this.logger.warn(`onUsage 回调异常（忽略）：${(err as Error).message}`);
+      }
       chain.end(); // 手动生命周期：所有路径必 end
     }
   }
@@ -450,7 +461,8 @@ export class OrchestrationService {
    * **不发 `rag.eval` span**（018 决策 B）——那会污染屏1；离线分数存 PG。
    *
    * 超时不抛：返回 `timedOut: true`，run 引擎据此记 `verdict=timeout` + 分数全 NULL，
-   * 并继续跑下一条用例。
+   * 并继续跑下一条用例。注意 `opts.timeoutMs` 的确切口径见下方循环处的长注释——
+   * 它是**判定阈值**而非墙钟上限。
    */
   async runForEvaluation(
     cfg: ResolvedApplicationConfig,
@@ -479,9 +491,22 @@ export class OrchestrationService {
       },
     });
 
-    // 超时用 Promise.race 包住**每次** next()：单个 case 的墙钟上限。
-    // 超时后必须 gen.return() 级联取消上游（同 controller 断连路径——chat.controller.ts:49-51），
-    // 否则 streamTextChunks 的 fetch 悬挂 + reply span 泄漏。
+    // 超时用 Promise.race 包住**每次** next()。
+    //
+    // ⚠️ 口径（peer review 实测订正，勿再写成「墙钟上限」）：`timeoutMs` 是**判定超时的阈值**，
+    // **不是** runForEvaluation 的墙钟上限。原因：JS 异步生成器规范规定，对**执行中**的
+    // 生成器调用 `return()` 会**排队**到当前 `next()` 完成之后，无法抢占。而 `prepare()`
+    // （rewrite + intent + 检索，全是模型/embedding 调用）整段跑在**第一个 next() 内且无 yield**
+    // —— 恰恰就是最典型的超时场景。实测：timeoutMs=300ms 时循环确实 300ms 就 break，但
+    // 本方法直到 in-flight 的 next() 自己结束（3005ms）才返回。
+    //
+    // 仍选择 await gen.return() 而非 fire-and-forget：
+    //  · 换来准确的 usage（那几个 token 是真花了的——不 await 就统计不到，预算会少算）；
+    //  · 换来确定性的 span 收尾与上游取消（同 controller 断连路径 chat.controller.ts:49-51），
+    //    否则 streamTextChunks 的 fetch 悬挂 + reply span 泄漏；
+    //  · 且串行 run 下不 await 会让下一条用例与上一条的在途请求重叠加压。
+    // 实际墙钟因此由底层 provider 的 HTTP 超时兜底，不是无界。
+    // 真正的硬中断需要把 AbortSignal 一路plumb 进模型调用 —— 留 W2b（018 已知缺口 9）。
     const deadline = Date.now() + opts.timeoutMs;
     try {
       for (;;) {

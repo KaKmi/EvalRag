@@ -16,19 +16,11 @@ import {
  * 结构与 faithfulness.evaluator.ts 同款：structuredOutput + Zod strict + withJudgeRetry + limitedEvidence。
  */
 
-const CorrectnessOutputSchema = z.strictObject({
-  points: z
-    .array(
-      z.strictObject({
-        point: z.string().min(1).max(200),
-        status: z.enum(["hit", "missing", "contradicted"]),
-        reason: z.string().min(1).max(300),
-      }),
-    )
-    .max(20),
+const PointJudgmentSchema = z.strictObject({
+  point: z.string().min(1).max(200),
+  status: z.enum(["hit", "missing", "contradicted"]),
+  reason: z.string().min(1).max(300),
 });
-
-const CORRECTNESS_OUTPUT = structuredOutput("evaluation_correctness_v1", CorrectnessOutputSchema);
 
 @Injectable()
 export class CorrectnessEvaluator {
@@ -39,6 +31,21 @@ export class CorrectnessEvaluator {
     if (input.goldPoints.length === 0) {
       return { score: 0, evidence: ["No gold points supplied."] };
     }
+
+    // 分母**钉死为 gold 要点数**，不受模型摆布——与 context-precision.evaluator.ts:29-31
+    // 的 `.length(input.contexts.length)` 同款。
+    // 曾经的两个缺陷（peer review 抓出）都源于分母可变：
+    //  ① `.max(20)` 无下限 → 模型回 `{points: []}` 也是合法响应 → 落到 `score: 0` 分支，
+    //     等于把**裁判失败**写成 0 分（Global Constraints 明令禁止，必须记未评/NULL）；
+    //  ② 分母取 `output.points.length` → 模型少回几条（恰恰是答案没覆盖、最该记 missing 的那几条）
+    //     就能把 1 hit / 1 returned 算成 100 分——**系统性虚高**，且发生在本波的头号指标上。
+    // 用 `.length(n)` 后，条数不符 = 解析失败 → withJudgeRetry 重试一次 → 仍败则抛 →
+    // scoreOffline 的 allSettled 记 **null（未评）**，这才是正确语义。
+    // 顺带解决：不再有固定 20 条上限（gold 要点数在契约里本就无上限）。
+    const OutputSchema = z.strictObject({
+      points: z.array(PointJudgmentSchema).length(input.goldPoints.length),
+    });
+    const outputSpec = structuredOutput("evaluation_correctness_v1", OutputSchema);
 
     const { output, usage } = await withJudgeRetry("correctness", async () => {
       const response = await callJudgeProvider(() =>
@@ -62,24 +69,20 @@ export class CorrectnessEvaluator {
               }),
             },
           ],
-          { temperature: 0, structuredOutput: CORRECTNESS_OUTPUT },
+          { temperature: 0, structuredOutput: outputSpec },
         ),
       );
       return {
-        output: parseJudgeOutput(response.content, CorrectnessOutputSchema),
+        output: parseJudgeOutput(response.content, OutputSchema),
         usage: response.usage,
       };
     });
 
-    // 分母取模型实际返回的要点数（而非 input.goldPoints.length）：schema 已约束 ≤20 且
-    // prompt 要求逐条对应；若模型少返回，按它给出的判定算，避免凭空把缺失项当"缺失"再罚一次。
-    if (output.points.length === 0) {
-      return { score: 0, evidence: ["Judge returned no point comparisons."], usage };
-    }
     // 只有 hit 计入一致数——missing 与 contradicted 都不算（原型 §7 三态）。
+    // 分母恒为 input.goldPoints.length（schema 已保证 output.points 与之等长）。
     const hits = output.points.filter((p) => p.status === "hit").length;
     return {
-      score: Math.round((hits / output.points.length) * 100),
+      score: Math.round((hits / input.goldPoints.length) * 100),
       evidence: limitedEvidence(
         output.points.map((p) => `[${p.status}] ${p.point} —— ${p.reason}`),
         "No point evidence was returned.",
