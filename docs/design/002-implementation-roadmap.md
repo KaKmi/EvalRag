@@ -40,12 +40,14 @@ last_modified: "2026-07-13"
 | **M8.0** | Prompt 组装 / NodeContract | ✅ | | 011 |
 | **M7b** | 应用发布闭环 | ✅ | | 009 |
 | **M8** | 问答 / RAG 编排 | ✅ | 四波全交付：**T1**（PR #16）/ **T2**（PR #18）/ **T3**（PR #19）/ **T4**（PR #20，C 端问答页真实化 + markdown）——见附录 A | 013 / 014 |
-| **M9** | Trace 追踪（完整版） | 🔄 | W1+W2（#21）/P1 修复（#22）/每节点面板（#23）已合并；**W3a Session 详情**（#25）+ 路线图回写（#24）待合；**cost 真算按用户决策移出首期**（先算 token）——见附录 A | 015 |
-| **M10** | 运行看板 | 🔄 | **W-a 后端 + W-b 前端已实现（PR #28 待合）**：读模型汇总层 + D-metrics + `/metrics/*` + 看板前端（6 卡/趋势/质量信号/下钻）。4 前端测试待收尾（见 PR #28）；cost 真算延后 | 016 |
+| **M9** | Trace 追踪（完整版） | 🔄 | W1+W2（#21）/P1 修复（#22）/每节点面板（#23）/**W3a Session 详情（#25）**/路线图回写（#24）**均已合并 main**；**cost 真算按用户决策移出首期**（先算 token）——见附录 A | 015 |
+| **M10** | 运行看板 | 🔄 | **W-a 后端 + W-b 前端已交付（PR #28 已合并）**：读模型汇总层 + D-metrics + `/metrics/*` + 看板前端（6 卡/趋势/质量信号/下钻）。4 前端测试待收尾（见 PR #28 描述）；cost 真算延后 | 016 |
 | **M11** | 评测集 / 管理 / 报告 | 🔄 | 原列「里程碑 2 不做」，实际已按**评测飞轮 E-W 波次**推进：**E-W1 在线质量**（PR #31）+ **E-W2a 离线 run/评测集**（[PR #32](https://github.com/KaKmi/RAGForge/pull/32)，含运行时 QA 修复）已交付；**E-W2b**（重放/对比屏4/检索层指标）待做；~~E-W2c 思考 token 治理~~ **已由换模型解决、波次取消**（2026-07-17 实测）——见附录 A「评测飞轮（E-W）分波交付进度」 | 017 / 018 |
 | **M12** | RBAC 权限 | ⬜ | 里程碑 2（首期不做） | — |
 
-**当前下一步**：**M9 首期基本收口**——W1+W2（#21）/P1（#22）/每节点面板（#23）已合并，W3a Session 详情（#25）+ 路线图回写（#24）待合。cost 真算（W3b）按用户决策移出首期（先算 token，需从零建定价体系，延后单独拆）。M9 之后即进里程碑 2（M10 运行看板等，首期不做）。
+**当前下一步**：**E-W2b**（评测飞轮第三波）——用户 2026-07-17 拍板，从 main 开新分支。范围见附录 A 的 E-W2b 行与 `018` §1「OUT（W2b 及以后）」。
+
+已收口：**M9 首期**（#21/#22/#23/#24/#25 全合；cost 真算按用户决策移出首期）· **M10 运行看板**（#28 合）· **M11 的 E-W1**（#31 合）**与 E-W2a**（#32 合）。
 
 ## Boundaries
 
@@ -179,7 +181,7 @@ M9 按 015 拆三波（见 015「建议分波」），逐波闭环：
 | **W3a** | Session 详情：1:1 还原 C 端聊天窗口（用户/bot 气泡回放）+ 每 bot 气泡挂 Trace 溯源条下钻该轮详情。`GET /traces/sessions/:sessionId` 复用现成 `codecrush_traces` VIEW（零 schema/VIEW 改动），`SessionDetailResponse` 契约 + 前端 `SessionDetailPage` | **已交付**（PR #25；直接写码不走 spec，用户手动 QA） |
 | **W3b cost 真算** | ~~模型 params 带单价 → generation span 落 `rag.cost.usd`，VIEW 聚合~~ | **移出 M9 首期**（用户决策 2026-07-14：非"接数据源"而是从零建定价体系——模型加单价字段 + 配置 UI + 算 cost + VIEW；先只算 token，cost 恒 `—`，延后再单独拆） |
 
-> 提示（给后续会话）：M9 **W1+W2（#21）+ P1（#22）+ 每节点面板（#23）已合并 main；W3a Session 详情（#25）+ 本回写（#24）待合**。**M9 首期到此基本收口**——余下仅 cost 真算，已按用户决策移出首期（先算 token）。运行时 QA（真 ClickHouse trace）需起 docker + `pnpm start`/`dev`（dev 现也落 trace）；本地测试全绿但运行时验收待人工。
+> 提示（给后续会话）：M9 **W1+W2（#21）+ P1（#22）+ 每节点面板（#23）+ W3a Session 详情（#25）+ 本回写（#24）全部已合并 main**。**M9 首期到此基本收口**——余下仅 cost 真算，已按用户决策移出首期（先算 token）。运行时 QA（真 ClickHouse trace）需起 docker + `pnpm start`/`dev`（dev 现也落 trace）；本地测试全绿但运行时验收待人工。
 
 ### 评测飞轮（E-W）分波交付进度
 
@@ -189,7 +191,7 @@ M9 按 015 拆三波（见 015「建议分波」），逐波闭环：
 |---|---|---|
 | **E-W1** | 在线答案质量评测：PG 控制面 + 周期抽样 + reference-free 三指标 Judge + `rag.eval` → ClickHouse 读模型 + `/eval/quality/*` + Trace 质量列 + `/admin/quality` 总览。全程 chat 零改动 | **已交付**（PR #31） |
 | **E-W2a** | 离线评测：gold 题库 CRUD（软删/不可变版本/CSV 逐行回执）+ `eval-runs` 顶点模块 + run 引擎（发起/停止/预算熔断/租约 + 僵尸回收）+ 屏3 报告。**核心不变量：离线分数只落 Postgres，绝不发 `rag.eval` span**；指标 4/8 | **已交付**（[PR #32](https://github.com/KaKmi/RAGForge/pull/32)）；运行时 QA 抓 1×P1 + 1×P2 + 4×P3，**已修**（见下方「E-W2a QA 修复」） |
-| **E-W2b** | 重放、版本对比屏4、检索层 gold-docs 指标（Recall/NDCG/命中率）、Citation、每题重复聚合、配置版本引用保护、`timeoutMs` 硬中断（需 plumb AbortSignal）、doc→chunk 级 gold 选择器 | **待做**（范围见 018 §12） |
+| **E-W2b** | 重放、版本对比屏4、检索层 gold-docs 指标（Recall/NDCG/命中率）、Citation、每题重复聚合、配置版本引用保护、`timeoutMs` 硬中断（需 plumb AbortSignal）、doc→chunk 级 gold 选择器 | **进行中 —— 用户 2026-07-17 拍板为下一波，从 main（`137cce2`）开新分支**。范围见 018 §1「OUT（W2b 及以后）」+ §12 缺口 3/9/13/14/15/18。**先做功能，018 的技术债缺口按用户指示后修** |
 | **E-W2c 思考 token 治理** | **慢的真正根因，实测驱动、独立成波**（018 §12 缺口 17）：`qwen3.6-flash` 是 hybrid thinking 且**默认开**，全仓**零** thinking 控制（`enable_thinking`/`reasoning_effort`/`no_think` 全无命中），adapter 只发 `response_format`。实测 `rewrite` 均 **8.4s / 637 out-tok**、`intent` 均 **7.3s / 745 out-tok**（30 天全量、**线上真实用户**，非评测专属）⇒ **每次提问干等 ~15.7s**；单 trace 更达 rewrite 16.06s/1759 tok + intent 11.65s/1322 tok（应为 ~30 / ~5 tok）。叠加 ~20% 结构化调用因必填字段缺失而重试一次（供应商 `json_schema` **未真正强制 schema**）。收益：单用例 ~36s → ~10s，**线上问答快 3 倍以上** | **✅ 取消（2026-07-17 实测解决）**——用户把四节点从 `qwen3.6-flash` 换成 `deepseek-v4-flash`（管理学 v9 / 售后 v5）。**同 prompt、同 schema、同代码**实测：rewrite **16.06s/1759 tok → 3.3s/121 tok**、intent **11.65s/1322 tok → 2.6s/92 tok**（均 **~14.5×**），`rag.pipeline` **36–59s → 18.9–21.5s**，且**重试归零**（deepseek 的 92–121 tok 正是该 schema 应有的量，反证 qwen 多出的 1200–1600 tok 确为思考过程）。⇒ **根因是模型选型不是代码**：无需 thinking 开关、无需动 adapter、无需碰 chat 关键路径。若日后再用 hybrid thinking 模型跑这四个节点，本条重新生效 |
 
 > 提示（给后续会话）：120s 超时**当初**只是安全网——真正的根因是思考 token。**该根因已于 2026-07-17 由「换用 deepseek-v4-flash」消除**（见上行实测），超时余量随之从 2× 变 **5.6×**（120s vs 21.5s）。**教训留档**：这类「慢」先查模型的 output token 数（一次改写吐 1759 token = 思考没关），再考虑改代码——本例中改代码是错的路。
@@ -233,7 +235,7 @@ M9 按 015 拆三波（见 015「建议分波」），逐波闭环：
 - **2026-07-16**：**E-W1 在线答案质量评测闭环交付（PR #31）**——契约/OTel 语义 → PG 控制面+周期调度 → 原文输入+三指标 reference-free Judge → worker 分层抽样+`rag.eval` → ClickHouse 去重读模型+`/eval/quality/*` → Trace 质量列/筛选/只读面板 → `/admin/quality` 总览，全程 chat 零改动，基线见 017。落地 QA 修三缺陷：`getLowSamples` 列名限定叠 USING 致 `targetTraceId` 恒 undefined 崩总览（列显式别名）、`getByAgent` 空 `agent_id` 幽灵行违 min(1) 契约（过滤空值）、chat 根 span 写原始 agentId 致分应用聚合按 slug/UUID 碎片化（改写规范 `cfg.applicationId`，行为中性、历史不回填）。答案质量页重构为 antd + 共享 echarts `MetricChart`。后端 792 测试绿、lint 0、build 绿。**applicationId 全统一（API 字段/旧 `agents` 表/历史回填）留作独立决策；下一步 E-W2（评测集/报告/重放）。**
 - **2026-07-15**：冻结 E-W1 在线答案质量评测实施基线（017）。交付顺序为共享契约与语义 → PG 控制面/周期调度 → 原文输入与三指标 Judge → worker/抽样/`rag.eval` → ClickHouse/API → Trace 联动 → 质量总览与设置；每一阶段保持 chat 零改动、可独立验证与回滚。
 
-- **2026-07-14**：**016 W-b 前端看板已实现（PR #28 待合）**——DashboardPage 接 `/metrics/overview|apps`（6 指标卡/双线趋势/质量信号/应用分布/坏样本下钻/阈值染色，删 M2 mock），TracesPage URL 水合支持看板深链下钻预选筛选；后端单应用响应补六阶段 P50/P95/样本数（现算 `codecrush_trace_spans`）+ 检索降级信号埋点。lint 绿、后端/契约测试绿；**4 前端测试待收尾**（CSV/Session 文案、单应用 TTFT 范围、SessionDetail 引用气泡疑似回归），owner 本波判为次要、随 PR 带出。cost 真算仍延后。
+- **2026-07-14**：**016 W-b 前端看板已实现（PR #28，已合并）**——DashboardPage 接 `/metrics/overview|apps`（6 指标卡/双线趋势/质量信号/应用分布/坏样本下钻/阈值染色，删 M2 mock），TracesPage URL 水合支持看板深链下钻预选筛选；后端单应用响应补六阶段 P50/P95/样本数（现算 `codecrush_trace_spans`）+ 检索降级信号埋点。lint 绿、后端/契约测试绿；**4 前端测试待收尾**（CSV/Session 文案、单应用 TTFT 范围、SessionDetail 引用气泡疑似回归），owner 本波判为次要、随 PR 带出。cost 真算仍延后。
 - **2026-07-14**：**016 指标读模型 W-a 后端已交付**——`otel_traces` 上新增 `AggregatingMergeTree` 汇总层（物化视图只读根 chain span）+ **D-metrics 写侧**（trace 级 token 总和 + 生成模型标签落根 span）+ 守卫历史回填 + `/metrics/*` 只读 API。D2′ 使用单 `dur_tdigest` state 并由仓库直接 `xxxMerge`，不建 finalize VIEW。运行时 QA 修复 series 别名与旧数据回填，随后 review 补齐 trace 详情防重复计数及失败/中断 usage 汇总。**前端看板仍待 `metrics-dashboard-frontend` plan；cost 真算继续独立延后**。
 - **2026-07-13**：M9 设计（015）+ W1/W2 交付（分支 m9-trace-read-model-w1，未合并）。M9 拆三波：W1 读模型地基（根 span 身份 delta + traces/sessions VIEW + list/summary/sessions API + 前端双列表）、W2 详情下钻（detail meta + StatusMessage + 写侧 chunk.scores doc/citation.ids + 前端 TraceDetailPage 真数据 + e2e）。决策：读模型单一事实源=ClickHouse（决策 A，不 join Postgres，doc 名/引用走写侧富化）；OTLP JSON 前端构建不建端点（收敛 015 决策 C）；cost/Session 详情延后 W3；评测集/重放/Badcase 出口延后 M11。完整对抗档全程（peer 调查+diff+drill+per-story review）。运行时 QA 待人工起 docker。**下一步 W3**。
 - **2026-07-13**：M8 T4（C 端问答页真实化）交付（PR #20）——`/chat/:agentId` 真接 `POST /chat` SSE 逐 token、单 Agent 信息卡（删 M2 切换器）、行内 `[n]` 角标 ⇄ 右栏真实原文（`ChatCitation.text`）、可信度/引用完整度/兜底来自 `done`、未上线占位（`resolvePublic` 404）、markdown 渲染（`react-markdown` + 自定义 `[n]` 角标插件）。后端最小改动：citation 带 `text`、`done` 带 `convId`、会话读接口 `agentId`+`userId` 归属过滤（IDOR）。完整对抗档：peer 独立调查 + diff（4 分歧证据消解）+ execution drill + 每波 peer review。真实 infra+LLM 浏览器 QA 验证逐 token/角标联动/可信度/未上线占位/markdown。QA 反馈修正：撑满视口高、可信度仅真引用时展示、移除转人工。**M8 四波（T1–T4）全交付、M8 完结，下一步 M9。**
