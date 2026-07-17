@@ -17,6 +17,20 @@ RAGForge 是一个用于搭建、发布和持续优化 RAG 问答应用的平台
 
 核心闭环：**配置 → 入库 → 问答 → 观测 → 评测优化 → 安全上线**。
 
+## 系统架构
+
+![RAGForge 系统架构](docs/design/assets/ragforge-architecture.svg)
+
+几个值得一提的设计选择：
+
+- **一切外部依赖藏在端口背后**。模型、召回、入库管线、队列、对象存储、观测后端六个接缝都是端口 + 适配器，换实现只改 DI 注入：模型不绑厂商（`(type, protocol)` 是路由键，Base URL 决定打到谁家），本地 docker-compose 与云上托管跑的是同一套业务代码。
+- **每一轮问答 = 一条 OTLP Trace**。埋点走 OpenTelemetry 标准语义，应用只吐 OTLP，落到哪里由 Collector 决定——换 Jaeger / Tempo / SLS，应用代码零改动。
+- **埋点绝不进入问答关键路径**。Collector 或 ClickHouse 挂掉，问答照常成功；评测、入库、指标汇总同样全在关键路径之外。
+- **自研薄编排，不引入 LangChain**。每个阶段就是一个显式 span，链路全程可见可控；模型原始输出经 NodeContract 校验后才进编排。
+- **不可变配置版本 + production 单指针**。上线前跑真实预演，上线与回滚都只是切指针，线上 Prompt 与契约永不静默漂移。
+
+> 图中每个端口都标了「当前 / 可换」：当前本地实现用 pg-boss 与本地卷，Kafka、OSS、Redis 是云上目标形态，接口一致。
+
 ## 本地启动
 
 ### 1. 准备环境
