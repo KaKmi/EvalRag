@@ -1,0 +1,96 @@
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Req,
+} from "@nestjs/common";
+import {
+  CreateEvalCaseRequestSchema,
+  CreateEvalSetRequestSchema,
+  ImportEvalCasesRequestSchema,
+  UpdateEvalCaseRequestSchema,
+  UpdateEvalSetRequestSchema,
+  type EvalCase,
+  type EvalCaseListResponse,
+  type EvalSet,
+  type EvalSetListResponse,
+  type ImportEvalCasesResponse,
+} from "@codecrush/contracts";
+import type { AuthenticatedUser } from "../../platform/security/authenticated-user";
+import { EvalSetsService } from "./eval-sets.service";
+
+type AuthedRequest = { user: AuthenticatedUser };
+
+/** 原型 §5 / 决策 F：屏2 `/admin/eval/sets` 的后端；与既有 `eval/quality` 同族。 */
+@Controller("eval/sets")
+export class EvalSetsController {
+  constructor(private readonly service: EvalSetsService) {}
+
+  @Get() list(): Promise<EvalSetListResponse> {
+    return this.service.list();
+  }
+
+  @Post() @HttpCode(201) create(@Body() raw: unknown, @Req() req: AuthedRequest): Promise<EvalSet> {
+    const parsed = CreateEvalSetRequestSchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues);
+    return this.service.create(parsed.data, req.user.email);
+  }
+
+  @Patch(":id") update(@Param("id") id: string, @Body() raw: unknown): Promise<EvalSet> {
+    const parsed = UpdateEvalSetRequestSchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues);
+    return this.service.update(id, parsed.data);
+  }
+
+  @Delete(":id") @HttpCode(204) remove(@Param("id") id: string): Promise<void> {
+    return this.service.remove(id);
+  }
+
+  @Get(":id/cases") listCases(@Param("id") id: string): Promise<EvalCaseListResponse> {
+    return this.service.listCases(id);
+  }
+
+  @Post(":id/cases") @HttpCode(201) createCase(
+    @Param("id") id: string,
+    @Body() raw: unknown,
+    @Req() req: AuthedRequest,
+  ): Promise<EvalCase> {
+    const parsed = CreateEvalCaseRequestSchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues);
+    return this.service.createCase(id, parsed.data, req.user.email);
+  }
+
+  @Patch(":id/cases/:caseId") updateCase(
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+    @Body() raw: unknown,
+  ): Promise<EvalCase> {
+    const parsed = UpdateEvalCaseRequestSchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues);
+    return this.service.updateCase(id, caseId, parsed.data);
+  }
+
+  @Delete(":id/cases/:caseId") @HttpCode(204) removeCase(
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+  ): Promise<void> {
+    return this.service.removeCase(id, caseId);
+  }
+
+  /** CSV 在前端解析（018 决策 D13），这里只收行数组。§19.1：>1000 行整体拒（Zod `.max(1000)`）。 */
+  @Post(":id/import") @HttpCode(200) importCases(
+    @Param("id") id: string,
+    @Body() raw: unknown,
+    @Req() req: AuthedRequest,
+  ): Promise<ImportEvalCasesResponse> {
+    const parsed = ImportEvalCasesRequestSchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues);
+    return this.service.importCases(id, parsed.data.rows, req.user.email);
+  }
+}

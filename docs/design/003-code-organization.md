@@ -142,6 +142,10 @@ rag-service/
 > 注意:这与 002 的 DAG 不同——002 是**建造顺序**,这里是**代码 import 依赖**。两者一致但视角不同。
 
 ```
+⓪ 评测编排    eval-runs 离线评测 run(E-W2a 新顶点，见 018)
+                  │  依赖 ↓（chat 编排 + evaluations 判分 + applications 版本解析）
+                  ├────────────────────────────► evaluations 在线评测/判分(E-W1，见 017)
+                  │                                  │ 依赖 ↓ conversations · chunks · models
 ① 编排        chat 问答编排 ─────────── (虚线: 经 OTLP/CH, 无代码依赖) ┄┄► traces 追踪(只读 CH)
                   │  依赖 ↓
 ② 配置·会话   applications 配置/发布 · conversations 会话
@@ -156,7 +160,9 @@ rag-service/
 ```
 
 精确依赖边:
+- `eval-runs` → `chat`(编排 `OrchestrationService`)、`evaluations`(判分 `EvaluationJudgeService`)、`applications`(`resolveForTest` 版本解析)——E-W2a 新顶点，见 018 决策 A；反向依赖一律禁止（`chat`/`evaluations` 不感知 `eval-runs`）
 - `chat` → `applications`、`retrieval`、`prompts`、`node-runtime`、`conversations`、`observability`（配置只经 `ApplicationConfigResolver`，LLM 调用经 node-runtime）
+- `evaluations` → `conversations`、`chunks`、`models` + ClickHouse 读客户端（E-W1，见下方「E-W1 evaluations 域边界」；与 `traces` 互不 import，写侧经 OTLP `rag.eval` 解耦）
 - `conversations` → `applications`
 - `applications` → `knowledge-bases`、`models`、`prompts`、`node-runtime`（ReleaseCheck）
 - `retrieval` → `models`、`chunks`
@@ -322,6 +328,15 @@ SDK **不以 RAG 阶段名（改写/意图/召回…）为基元**，而以 Open
 - evaluations 与 traces 不直接 import；写侧通过 OTLP `rag.eval` 解耦，读侧分别查询 ClickHouse VIEW。
 - 共享 API 形状放在 `@codecrush/contracts/quality`，属性 key 放在 `@codecrush/otel-conventions`；evidence 只使用 `CODECRUSH_IO.OUTPUT`，由 `@codecrush/otel` 统一脱敏。
 - 周期任务注册在 platform queue，但业务状态机留在 evaluations；schedule adapter 不感知领域 schema。
+
+### E-W2a eval-runs 域边界
+
+- `apps/backend/src/modules/eval-runs` 拥有评测集/用例/用例版本/run/逐用例结果，以及 run 引擎（发起、停止、预算熔断、全局串行租约）。**它是新的依赖顶点**（`AGENTS.md` 边界 1 已同步）：run 引擎须同时驱动 chat 编排与 evaluations 判分，放进任一方都会耦死；置于两者之上则图仍无环。完整论证见 `018` 决策 A。
+- 允许的依赖边**仅**：`eval-runs → chat`（`OrchestrationService.runForEvaluation`）、`eval-runs → evaluations`（`EvaluationJudgeService.scoreOffline`）、`eval-runs → applications`（`resolveForTest`，preview=true 的显式版本解析）。**`evaluations` 与 `chat` 均不反向依赖 `eval-runs`**——017 的 evaluations 域边界不变。
+- 导出面最小化：`EvaluationsModule` 只导出 `EvaluationJudgeService`（不导出 4 个 evaluator——「怎么判分」是 evaluations 的域知识）；`ChatModule` 只新增导出 `OrchestrationService`。
+- **离线 run 结果存 Postgres，绝不发 `rag.eval` span**：ClickHouse 的 `codecrush_eval_targets_mv` 只按 `SpanName='rag.eval'` 过滤、**不看 preview**，发 span 即污染屏1 在线总览。写侧隔离靠存储物理分离，不靠过滤条件。见 `018` 决策 B（附守护测试）。
+- run 产生的 preview trace 照常经 OTLP 进 ClickHouse（`rag.pipeline`，`preview=true` + `rag.eval.run_id`）——给编排 trace 打标 ≠ 发评测 span，前者不进 MV。
+- 队列 job 注册在 platform queue（`EVAL_RUN_QUEUE`），业务状态机留在 eval-runs；跨域引用（`application_id`/`config_version_id`/模型 id）只存 id、不建 FK。
 
 ## References
 

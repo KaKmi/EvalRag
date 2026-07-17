@@ -145,6 +145,35 @@ import {
   type MetricsOverviewResponse,
   type MetricsAppResponse,
   type MetricsQuery,
+  CreateEvalSetRequestSchema,
+  type CreateEvalSetRequest,
+  UpdateEvalSetRequestSchema,
+  type UpdateEvalSetRequest,
+  EvalSetSchema,
+  type EvalSet,
+  EvalSetListResponseSchema,
+  type EvalSetListResponse,
+  CreateEvalCaseRequestSchema,
+  type CreateEvalCaseRequest,
+  UpdateEvalCaseRequestSchema,
+  type UpdateEvalCaseRequest,
+  EvalCaseSchema,
+  type EvalCase,
+  EvalCaseListResponseSchema,
+  type EvalCaseListResponse,
+  ImportEvalCasesRequestSchema,
+  type ImportEvalCasesRequest,
+  ImportEvalCasesResponseSchema,
+  type ImportEvalCasesResponse,
+  CreateEvalRunRequestSchema,
+  type CreateEvalRunRequest,
+  EvalRunListItemSchema,
+  type EvalRunListItem,
+  EvalRunListResponseSchema,
+  type EvalRunListResponse,
+  EvalRunReportSchema,
+  type EvalRunReport,
+  RecentEvalRunConflictSchema,
 } from "@codecrush/contracts";
 
 const TOKEN_KEY = "token";
@@ -158,20 +187,50 @@ interface ZodSchema<T> {
   parse(input: unknown): T;
 }
 
+/** 从 Nest 错误体里取人类可读文案（`message` 可能是 string 或 string[]）。 */
+function bodyMessage(body: unknown): string | undefined {
+  const raw = (body as { message?: unknown } | null | undefined)?.message;
+  if (typeof raw === "string" && raw.trim()) return raw;
+  if (Array.isArray(raw)) {
+    const messages = raw.filter((item): item is string => typeof item === "string");
+    if (messages.length > 0) return messages.join("；");
+  }
+  return undefined;
+}
+
+/**
+ * 带 HTTP 状态码的错误：让调用方能把「服务器说没有这条」与「网络断了 / 响应不合契约」
+ * **分开**。前者是事实陈述，后者是本地故障——混成一句「XX 不存在」会让排查从第一步就走错
+ * （E-W2a QA 实测代价：屏3 对 Zod 解析失败照样渲染「评测报告不存在」，误导了真实排查时间）。
+ *
+ * 仍是 `Error` 子类且 `message` 不变 ⇒ 既有的 `error instanceof Error ? error.message : …`
+ * 调用点零改动。
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function responseError(resp: Response, fallback: string): Promise<Error> {
   try {
-    const body = (await resp.json()) as { message?: unknown };
-    if (typeof body.message === "string" && body.message.trim()) {
-      return new Error(body.message);
-    }
-    if (Array.isArray(body.message)) {
-      const messages = body.message.filter((item): item is string => typeof item === "string");
-      if (messages.length > 0) return new Error(messages.join("；"));
-    }
+    return new ApiError(resp.status, bodyMessage(await resp.json()) ?? fallback);
   } catch {
     // 非 JSON 错误响应使用调用方提供的中文兜底文案。
+    return new ApiError(resp.status, fallback);
   }
-  return new Error(fallback);
+}
+
+/** schema.parse 的非抛出版：用于「按形状分流」的响应（如 409 幂等体 vs 普通错误体）。 */
+function safeParse<T>(schema: ZodSchema<T>, input: unknown): T | undefined {
+  try {
+    return schema.parse(input);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -801,3 +860,109 @@ export async function deletePrompt(promptId: string): Promise<void> {
 // retrieval — @Controller("retrieval")
 export const testRetrieval = (body: RetrievalTestRequest): Promise<RetrievalTestResponse> =>
   postJson("/api/retrieval/test", body, RetrievalTestRequestSchema, RetrievalTestResponseSchema);
+
+// —— E-W2a 离线评测（018 决策 F：路径对齐产品文档 §5/§7）——
+// eval sets — @Controller("eval/sets")；eval runs — @Controller("eval/runs")。
+// 写路径非 2xx 一律透出服务端 message（409「名称已存在」/ 422「至少填写 1 个答案要点」
+// 与「所选范围没有已审核用例」等 §19.1/§19.2 逐字文案由后端给出，前端不再复述一遍）。
+
+async function patchJson<TReq, TRes>(
+  path: string,
+  body: TReq,
+  reqSchema: ZodSchema<TReq>,
+  resSchema: ZodSchema<TRes>,
+): Promise<TRes> {
+  const resp = await apiFetch(path, {
+    method: "PATCH",
+    body: JSON.stringify(reqSchema.parse(body)),
+  });
+  if (!resp.ok) throw await responseError(resp, `保存失败（${resp.status}）`);
+  return resSchema.parse(await resp.json());
+}
+
+async function deleteVoid(path: string, fallback: string): Promise<void> {
+  const resp = await apiFetch(path, { method: "DELETE" });
+  if (!resp.ok) throw await responseError(resp, `${fallback}（${resp.status}）`);
+}
+
+const setPath = (id: string) => `/api/eval/sets/${encodeURIComponent(id)}`;
+
+export const getEvalSets = (): Promise<EvalSetListResponse> =>
+  getJson("/api/eval/sets", EvalSetListResponseSchema);
+export const createEvalSet = (req: CreateEvalSetRequest): Promise<EvalSet> =>
+  postJson("/api/eval/sets", req, CreateEvalSetRequestSchema, EvalSetSchema);
+export const updateEvalSet = (id: string, req: UpdateEvalSetRequest): Promise<EvalSet> =>
+  patchJson(setPath(id), req, UpdateEvalSetRequestSchema, EvalSetSchema);
+export const deleteEvalSet = (id: string): Promise<void> => deleteVoid(setPath(id), "删除失败");
+
+export const getEvalCases = (setId: string): Promise<EvalCaseListResponse> =>
+  getJson(`${setPath(setId)}/cases`, EvalCaseListResponseSchema);
+export const createEvalCase = (setId: string, req: CreateEvalCaseRequest): Promise<EvalCase> =>
+  postJson(`${setPath(setId)}/cases`, req, CreateEvalCaseRequestSchema, EvalCaseSchema);
+export const updateEvalCase = (
+  setId: string,
+  caseId: string,
+  req: UpdateEvalCaseRequest,
+): Promise<EvalCase> =>
+  patchJson(
+    `${setPath(setId)}/cases/${encodeURIComponent(caseId)}`,
+    req,
+    UpdateEvalCaseRequestSchema,
+    EvalCaseSchema,
+  );
+export const deleteEvalCase = (setId: string, caseId: string): Promise<void> =>
+  deleteVoid(`${setPath(setId)}/cases/${encodeURIComponent(caseId)}`, "删除失败");
+
+/** CSV 在前端解析（018 决策 D13）→ 这里只 POST 行数组，后端逐行校验并回执。 */
+export const importEvalCases = (
+  setId: string,
+  req: ImportEvalCasesRequest,
+): Promise<ImportEvalCasesResponse> =>
+  postJson(
+    `${setPath(setId)}/import`,
+    req,
+    ImportEvalCasesRequestSchema,
+    ImportEvalCasesResponseSchema,
+  );
+
+export const getEvalRuns = (): Promise<EvalRunListResponse> =>
+  getJson("/api/eval/runs", EvalRunListResponseSchema);
+export const getEvalRunReport = (runId: string): Promise<EvalRunReport> =>
+  getJson(`/api/eval/runs/${encodeURIComponent(runId)}`, EvalRunReportSchema);
+
+/**
+ * 1h 幂等命中时后端抛 `ConflictException({code:"recent_run_exists", recentRunId})` ——
+ * Nest 对**对象**入参直接把它当响应体（不包 message/statusCode），故 409 有两种体：
+ * 幂等体（本类型）与普通 `{message}`（全局串行「已有评测正在运行…」）。按形状分流，
+ * 让调用方能弹原型 §19.2 的「查看 / 仍重新运行」而不是把它当普通报错。
+ */
+export class RecentEvalRunConflictError extends Error {
+  readonly recentRunId: string;
+  constructor(recentRunId: string) {
+    super("1 小时内已有相同评测结果");
+    this.name = "RecentEvalRunConflictError";
+    this.recentRunId = recentRunId;
+  }
+}
+
+export async function createEvalRun(req: CreateEvalRunRequest): Promise<EvalRunListItem> {
+  const resp = await apiFetch("/api/eval/runs", {
+    method: "POST",
+    body: JSON.stringify(CreateEvalRunRequestSchema.parse(req)),
+  });
+  if (!resp.ok) {
+    const body: unknown = await resp.json().catch(() => undefined);
+    const conflict = resp.status === 409 ? safeParse(RecentEvalRunConflictSchema, body) : undefined;
+    if (conflict) throw new RecentEvalRunConflictError(conflict.recentRunId);
+    throw new Error(bodyMessage(body) ?? `发起评测失败（${resp.status}）`);
+  }
+  return EvalRunListItemSchema.parse(await resp.json());
+}
+
+/** 204 无响应体；终态再停 → 409「该评测已结束，无法停止」。 */
+export async function stopEvalRun(runId: string): Promise<void> {
+  const resp = await apiFetch(`/api/eval/runs/${encodeURIComponent(runId)}/stop`, {
+    method: "POST",
+  });
+  if (!resp.ok) throw await responseError(resp, `停止失败（${resp.status}）`);
+}

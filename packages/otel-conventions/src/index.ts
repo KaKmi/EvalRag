@@ -27,6 +27,11 @@ export const RAG = {
   RERANK_THRESHOLD: "rag.rerank.threshold",
   // 012 §Observability：试运行（预览）调用打标，与正式问答的成功率/延迟统计隔离
   PREVIEW: "rag.preview",
+  // 018 决策 B（原型 §6「trace 标 rag.preview='true' + rag.eval.run_id」）：
+  // 离线评测 run 产生的编排 trace 打 run 标记，供按 run 过滤/回溯。
+  // 注意：这写在 rag.pipeline 根 span 上，**不是**发 rag.eval 评测 span——
+  // codecrush_eval_targets_mv 只消费 SpanName='rag.eval'，故此属性不进 MV、不污染屏1。
+  EVAL_RUN_ID: "rag.eval.run_id",
   // M8.0 011 §Observability：NodeRuntime 执行层 span 属性
   NODE_NAME: "rag.node.name",
   PROMPT_CONTRACT_VERSION: "rag.prompt.contract_version",

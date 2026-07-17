@@ -17,3 +17,4 @@ export * from "../modules/agents/schema";
 export * from "../modules/applications/schema";
 export * from "../modules/conversations/schema";
 export * from "../modules/evaluations/schema";
+export * from "../modules/eval-runs/schema";

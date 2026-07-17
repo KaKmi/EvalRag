@@ -30,7 +30,8 @@ export class ContextPrecisionEvaluator {
       judgments: z.array(JudgmentSchema).length(input.contexts.length),
     });
     const outputSpec = structuredOutput("evaluation_context_precision_v1", OutputSchema);
-    const output = await withJudgeRetry("context precision", async () => {
+    // 018 决策 G：透传 response.usage（原先丢弃）。在线不读，离线用于预算熔断。
+    const { output, usage } = await withJudgeRetry("context precision", async () => {
       const response = await callJudgeProvider(() =>
         this.models.chat(
           judgeModelId,
@@ -56,7 +57,7 @@ export class ContextPrecisionEvaluator {
       ) {
         invalidJudgeOutput("context judgments do not match the ranked input contexts");
       }
-      return parsed;
+      return { output: parsed, usage: response.usage };
     });
 
     let relevantSoFar = 0;
@@ -72,6 +73,7 @@ export class ContextPrecisionEvaluator {
         output.judgments.map((judgment) => judgment.reason),
         "No context judgments were returned.",
       ),
+      usage,
     };
   }
 }

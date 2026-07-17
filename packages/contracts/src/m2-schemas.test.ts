@@ -11,8 +11,6 @@ import {
   CreateModelRequestSchema,
   CreatePromptRequestSchema,
   CreatePromptVersionRequestSchema,
-  EvalRunSchema,
-  EvalSetSchema,
   MessageListResponseSchema,
   MessageSchema,
   ModelProviderSchema,
@@ -143,16 +141,6 @@ const valid = {
   chatReq: { agentId: "aftersale", query: "怎么退货" },
   conv: { id: "c1", agentId: "aftersale", title: "退货咨询" },
   msg: { id: "m1", convId: "c1", role: "user", content: "怎么退货" },
-  evalSet: { id: "es1", name: "售后基础集", desc: "基础评测", caseCount: 30 },
-  evalRun: {
-    id: "r1",
-    setId: "es1",
-    agentId: "aftersale",
-    total: 30,
-    time: "2m14s",
-    metrics: [{ label: "召回率", value: "0.94", pct: "94%" }],
-    cases: [{ q: "怎么退货", recall: "0.94", acc: "通过", cite: "正确", st: "通过" }],
-  },
 };
 
 describe("M2 contracts — positive cases", () => {
@@ -199,12 +187,6 @@ describe("M2 contracts — positive cases", () => {
   it("MessageListResponseSchema wraps messages", () => {
     expect(MessageListResponseSchema.parse([valid.msg]).length).toBe(1);
     expect(() => MessageListResponseSchema.parse([{ ...valid.msg, role: "system" }])).toThrow();
-  });
-  it("EvalSetSchema accepts a valid eval set", () => {
-    expect(EvalSetSchema.parse(valid.evalSet)).toEqual(valid.evalSet);
-  });
-  it("EvalRunSchema accepts a valid eval run", () => {
-    expect(EvalRunSchema.parse(valid.evalRun)).toEqual(valid.evalRun);
   });
 });
 

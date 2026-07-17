@@ -48,4 +48,8 @@ export class AppConfigService {
   get processingProfilesEnabled(): boolean {
     return this.config.get("PROCESSING_PROFILES_ENABLED", { infer: true });
   }
+  /** 离线评测单用例编排超时（默认 120s；口径与偏离理由见 config.schema.ts 的注释）。 */
+  get evalRunCaseTimeoutMs(): number {
+    return this.config.get("EVAL_RUN_CASE_TIMEOUT_MS", { infer: true });
+  }
 }

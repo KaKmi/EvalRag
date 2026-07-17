@@ -18,6 +18,6 @@ export * from "./prompt-template";
 export * from "./node-contract";
 export * from "./chat";
 export * from "./conversations";
-export * from "./evalsets";
-export * from "./evals";
+export * from "./eval-sets";
+export * from "./eval-runs";
 export * from "./pagination";

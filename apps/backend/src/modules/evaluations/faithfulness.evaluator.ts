@@ -32,7 +32,9 @@ export class FaithfulnessEvaluator {
   constructor(private readonly models: ModelsService) {}
 
   async score(input: EvaluationInput, judgeModelId: string): Promise<MetricResult> {
-    const output = await withJudgeRetry("faithfulness", async () => {
+    // 018 决策 G：透传 response.usage（原先丢弃）。在线路径不读它（score() 与
+    // EvaluationScores 结构不变 → E-W1 零影响）；离线用于预算熔断。
+    const { output, usage } = await withJudgeRetry("faithfulness", async () => {
       const response = await callJudgeProvider(() =>
         this.models.chat(
           judgeModelId,
@@ -50,11 +52,11 @@ export class FaithfulnessEvaluator {
           { temperature: 0, structuredOutput: FAITHFULNESS_OUTPUT },
         ),
       );
-      return parseJudgeOutput(response.content, FaithfulnessOutputSchema);
+      return { output: parseJudgeOutput(response.content, FaithfulnessOutputSchema), usage: response.usage };
     });
 
     if (output.claims.length === 0) {
-      return { score: 100, evidence: ["No factual claims were identified."] };
+      return { score: 100, evidence: ["No factual claims were identified."], usage };
     }
 
     const supported =
@@ -65,6 +67,7 @@ export class FaithfulnessEvaluator {
         output.claims.map((claim) => claim.reason),
         "No claim evidence was returned.",
       ),
+      usage,
     };
   }
 }

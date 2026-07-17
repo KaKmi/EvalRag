@@ -51,6 +51,8 @@ export class AnswerRelevancyEvaluator {
       return {
         score: Math.round(Math.max(0, Math.min(1, mean)) * 100),
         evidence: output.questions,
+        // 018 决策 G：透传 chat 的 usage（embedTexts 不返回 usage → 该部分计 0，不猜）。
+        usage: response.usage,
       };
     });
   }
