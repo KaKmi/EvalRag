@@ -10,20 +10,24 @@ export const QualityScoreSchema = z.number().int().min(0).max(100);
 export type QualityScore = z.infer<typeof QualityScoreSchema>;
 
 export const QualityScoresSchema = z.object({
-  faithfulness: QualityScoreSchema,
+  faithfulness: QualityScoreSchema.nullable(),
   answerRelevancy: QualityScoreSchema,
   contextPrecision: QualityScoreSchema,
 });
 export type QualityScores = z.infer<typeof QualityScoresSchema>;
 
 export const QualityEvidenceSchema = z.object({
-  faithfulness: z.array(z.string().max(300)).min(1).max(5),
+  faithfulness: z.array(z.string().max(300)).min(1).max(5).optional(),
   answerRelevancy: z.array(z.string().max(300)).min(1).max(5),
   contextPrecision: z.array(z.string().max(300)).min(1).max(5),
 });
 export type QualityEvidence = z.infer<typeof QualityEvidenceSchema>;
 
-export const QualityThresholdsSchema = QualityScoresSchema;
+export const QualityThresholdsSchema = z.object({
+  faithfulness: QualityScoreSchema,
+  answerRelevancy: QualityScoreSchema,
+  contextPrecision: QualityScoreSchema,
+});
 export type QualityThresholds = z.infer<typeof QualityThresholdsSchema>;
 
 export const TraceQualityDetailSchema = z.discriminatedUnion("status", [
@@ -93,6 +97,7 @@ const qualityPoint = z.object({
   faithfulness: QualityScoreSchema.nullable(),
   answerRelevancy: QualityScoreSchema.nullable(),
   contextPrecision: QualityScoreSchema.nullable(),
+  faithfulnessSampleCount: count,
   sampleCount: count,
   insufficientSample: z.boolean(),
 });

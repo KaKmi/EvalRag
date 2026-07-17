@@ -4,6 +4,7 @@ import {
   OnlineEvalSettingsResponseSchema,
   QualityOverviewQuerySchema,
   QualityOverviewResponseSchema,
+  QualityThresholdsSchema,
   TraceQualityDetailSchema,
   UpdateOnlineEvalSettingsRequestSchema,
 } from "./quality";
@@ -36,6 +37,26 @@ describe("online quality contracts", () => {
         currentVersion: true,
       }).status,
     ).toBe("failed");
+  });
+
+  it("accepts unscored faithfulness without weakening thresholds", () => {
+    expect(
+      TraceQualityDetailSchema.safeParse({
+        ...scored,
+        scores: { ...scored.scores, faithfulness: null },
+        evidence: {
+          answerRelevancy: scored.evidence.answerRelevancy,
+          contextPrecision: scored.evidence.contextPrecision,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      QualityThresholdsSchema.safeParse({
+        faithfulness: null,
+        answerRelevancy: 80,
+        contextPrecision: 80,
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects scores and evidence outside bounds", () => {
@@ -78,7 +99,14 @@ describe("online quality contracts", () => {
         evaluatedCount: 1,
         eligibleCount: 10,
         evaluableCount: 2,
-        missed: { total: 7, sampledOut: 5, quotaSkipped: 0, incomplete: 1, judgeFailed: 1, neverSeen: 0 },
+        missed: {
+          total: 7,
+          sampledOut: 5,
+          quotaSkipped: 0,
+          incomplete: 1,
+          judgeFailed: 1,
+          neverSeen: 0,
+        },
         scoresNotPersisted: 0,
         judgeModel: "qwen-plus",
         judgeVersion: "online-v1",
@@ -108,11 +136,19 @@ describe("online quality contracts", () => {
           faithfulness: 70,
           answerRelevancy: 80,
           contextPrecision: 90,
+          faithfulnessSampleCount: 3,
           sampleCount: 9,
           insufficientSample: true,
         },
       ],
-      byAgent: [],
+      byAgent: [
+        {
+          agentId: "app-1",
+          agentName: "Refund Bot",
+          scores: { faithfulness: null, answerRelevancy: 80, contextPrecision: 90 },
+          sampleCount: 9,
+        },
+      ],
       lowSamples: [
         {
           targetTraceId: "a".repeat(32),
@@ -123,7 +159,9 @@ describe("online quality contracts", () => {
         },
       ],
     };
-    expect(QualityOverviewResponseSchema.safeParse(base).success).toBe(true);
+    const parsed = QualityOverviewResponseSchema.parse(base);
+    expect(parsed.trend[0]).toMatchObject({ faithfulnessSampleCount: 3, sampleCount: 9 });
+    expect(parsed.byAgent[0]?.scores?.faithfulness).toBeNull();
   });
 
   it("rejects a daily cap above the operational limit", () => {
@@ -147,7 +185,14 @@ describe("online quality contracts", () => {
         evaluatedCount: 12,
         eligibleCount: 100,
         evaluableCount: 40,
-        missed: { total: 48, sampledOut: 40, quotaSkipped: 3, incomplete: 2, judgeFailed: 1, neverSeen: 2 },
+        missed: {
+          total: 48,
+          sampledOut: 40,
+          quotaSkipped: 3,
+          incomplete: 2,
+          judgeFailed: 1,
+          neverSeen: 2,
+        },
         scoresNotPersisted: 0,
         judgeModel: "qwen-plus",
         judgeVersion: "online-v1",

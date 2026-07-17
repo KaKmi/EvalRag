@@ -1,6 +1,6 @@
 # 017 在线答案质量评测
 
-状态：E-W1 实施基线（2026-07-15）
+状态：E-W1 实施基线；Judge v2 语义由 020 修订（2026-07-17）
 
 ## 目标与边界
 
@@ -32,11 +32,11 @@ queue + evaluations control plane ───────► evaluations worker
 
 Judge 输入来自 Postgres 中未脱敏的问题与答案、ClickHouse 命中的 chunk id/分数，以及 Postgres 中对应 chunk 正文。Judge 固定 `temperature=0`。
 
-- Faithfulness：抽取答案中的可验证主张，逐条判断是否被检索上下文支持，`supportedClaims / claims × 100`；没有可验证主张时由结构化输出明确给分并说明。
+- Faithfulness：抽取答案中的可验证主张，逐条判断是否被检索上下文支持，`supportedClaims / claims × 100`；没有可验证主张时为**未评**（null，不进均分），不再以 100 表示“空洞地忠实”。
 - Answer Relevancy：从答案生成其所回答的问题，将生成问题与原问题 embedding 的 cosine similarity 映射到 0–100。
 - Context Precision：判断各命中 chunk 是否与问题相关，按排名前缀 precision 的 relevant-position 平均值计算 0–100。
 
-每个 LLM evaluator 使用 Zod 校验结构化输出，失败只重试一次；任一 metric 仍失败则整条 evaluation 失败，不聚合部分分数。默认阈值为 85/80/80；任一指标 `<70` 时 `evalVerdict=low`。算法、prompt、模型组合或解析契约变化必须提升 `judgeVersion`。
+每个 LLM evaluator 使用 Zod 校验结构化输出，失败只重试一次；任一**实际调用的** metric 仍失败则整条 evaluation 失败，不聚合部分分数。intentional null 不是失败：fallback、failed、无引用候选只免评 faithfulness，另外两项照评；低置信度 success 仍评 faithfulness。默认阈值为 85/80/80；任一已评分指标 `<70` 时 `evalVerdict=low`。算法、prompt、模型组合或解析契约变化必须提升 `judgeVersion`；020 将解析契约升为 `online-v2`。
 
 ## Postgres 控制面
 
@@ -72,17 +72,17 @@ eval_watermarks(
 - `rag.eval.status=success`
 - `gen_ai.agent.id` 与 `gen_ai.request.model`
 
-失败 span 只额外写标准 `error.type`、`error.message`，状态为 `failed`，不持久化部分分数。证据经过限长 JSON 写入受现有 redactor 保护的 `codecrush.io.output`；禁止创建未受保护的 evidence 属性，禁止写入完整 Judge 输入或 chunk 正文。邮箱、手机号、身份证和银行卡号在导出前脱敏。
+成功 span 的分数属性继续全部显式存在；faithfulness 未评时，因现有 ClickHouse state 为非 Nullable Float64，物理值写保留哨兵 `-1`，evidence 不含 faithfulness 键。`-1` 只属于 OTLP/raw aggregate，任何 API/UI 都必须看到 null。失败 span 只额外写标准 `error.type`、`error.message`，状态为 `failed`，不持久化部分分数。证据经过限长 JSON 写入受现有 redactor 保护的 `codecrush.io.output`；禁止创建未受保护的 evidence 属性，禁止写入完整 Judge 输入或 chunk 正文。邮箱、手机号、身份证和银行卡号在导出前脱敏。
 
 ## ClickHouse 读模型
 
-物化视图只消费 `rag.eval`。物理聚合键包含 target trace 与 judge version，保存 `argMaxState` 分数、模型、状态和时间。查询必须先在 target+version 层执行 `argMaxMerge` 去重，再在当前版本与时间窗口外层执行 `avg/count/quantile`；不得直接对原始重复 span 聚合。趋势 bucket 在去重后计算，跨版本不计算 delta。
+物化视图只消费 `rag.eval`。物理聚合键包含 target trace 与 judge version，保存 `argMaxState` 分数、模型、状态和时间。查询必须先在 target+version 层执行 `argMaxMerge` 去重，并在第一层把 faithfulness `-1` 转 NULL，再在当前版本与时间窗口外层执行 `avg/count/quantile`；不得直接对原始重复 span 聚合。总样本数表示成功 evaluation trace；faithfulness 另有独立非空样本数，均值、delta 与样本不足均按自己的 n。趋势 bucket 在去重后计算并同时报告两种 n，跨版本不计算 delta。
 
 Trace 详情优先返回跨版本最新 success，并标记是否为当前版本；没有 success 才读取最新 failed；两者均无则 unscored。列表只将当前选定版本的最新 success 作为质量列事实，排序为所选指标主键、NULLS LAST，再以时间和 trace id 稳定排序。
 
 ## API
 
-- `GET /eval/quality/overview?from&to&agentId?`：窗口不超过 30 天，返回运行状态、三指标、趋势、分应用和低分样本；样本数 `<20` 时 previous delta 为 null。
+- `GET /eval/quality/overview?from&to&agentId?`：窗口不超过 30 天，返回运行状态、三指标、趋势、分应用和低分样本；faithfulness 使用独立样本数，指标自己的样本数 `<20` 时 previous delta 为 null。
 - `GET /eval/quality/traces/:traceId`：返回 scored/unscored/failed 三态。
 - `GET /eval/quality/settings`：返回设置与 Judge/embedding 可选项。
 - `PUT /eval/quality/settings`：更新设置，启用时校验两类模型。

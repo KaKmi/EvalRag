@@ -49,11 +49,11 @@ export interface OfflineEvaluationScores {
 }
 
 export interface EvaluationScores {
-  faithfulness: number;
+  faithfulness: number | null;
   answerRelevancy: number;
   contextPrecision: number;
   evidence: {
-    faithfulness: string[];
+    faithfulness?: string[];
     answerRelevancy: string[];
     contextPrecision: string[];
   };
