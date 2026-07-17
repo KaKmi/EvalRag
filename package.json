@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "turbo run dev",
+    "dev": "turbo run dev dev:worker",
     "build": "turbo run build",
     "test": "turbo run test",
     "lint": "eslint .",

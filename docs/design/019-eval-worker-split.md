@@ -30,7 +30,7 @@ draft——设计已过 peer 对抗（0 P1 / 2 P2 / 4 P3，全部裁决并回写
 **Goals**：失败域隔离、生命周期解绑、为两类进程独立伸缩铺路；rollout 对未设 env 的既有部署零变化。
 
 **Non-goals**：
-- 不拆 `ingestion` / `release-check`——003:256 阈值（排队 P95 >5min 或 >100 文档/分）未触发；触发时改 `JOB_ROLES` 一行即可迁移。
+- 不拆 `ingestion` / `release-check`——003:256 阈值（排队 P95 >5min 或 >100 文档/分）未触发；触发时改 `QUEUE_CONSUMER_ROLES` 一行即可迁移。
 - 不换队列——BullMQ/RabbitMQ 已评估否决（见 Alternatives）。
 - 不做 worker 多副本——018 缺口 13（活跃槽位非原子守卫）未收口前不受支持；本设计把该前提从「单进程部署」改写为「worker 单副本」，语义等价。
 - 不修 018 缺口 15 的 (a)(b)(c)(d)（租约守卫 P3）、缺口 9（AbortSignal 硬中断）——属租约收口波。
@@ -52,7 +52,7 @@ draft——设计已过 peer 对抗（0 P1 / 2 P2 / 4 P3，全部裁决并回写
 
 **解析必须单点**（peer P2）：`main.ts` 的引导分支与 `tracing.ts` 的 serviceName 都在 Nest DI 容器建立**之前**就要读 role，若各自裸读 `process.env` 会与 `config.schema.ts` 形成三处独立解析，拼写/大小写分歧会静默走错引导路径。故新建**非 DI 纯函数** `platform/config/process-role.ts`：`parseProcessRole(process.env)` 返回枚举、**非法值直接 throw**——fail-fast 提前到 tracing 启动之前，杜绝「先以错误 serviceName 发几毫秒 span、随后才被 zod 拍死」的窗口。`config.schema.ts` 复用同一枚举常量。
 
-消费者→角色映射**单点定义**在 `platform/queue`（`JOB_ROLES` 表）：
+消费者→角色映射**单点定义**在 `platform/queue/queue.constants.ts`（`QUEUE_CONSUMER_ROLES` 表，粒度 = Queue token）：
 
 | 角色 | 消费 |
 |---|---|
@@ -60,7 +60,9 @@ draft——设计已过 peer 对抗（0 P1 / 2 P2 / 4 P3，全部裁决并回写
 | `worker` | eval-run、online-eval |
 | `all` | 全部（现行为） |
 
-4 个 processor 的 `onModuleInit` 开头统一守卫（`if (!consumesJob(role, JOB)) return`），`subscribe`/`schedule` 都在守卫之后。**`publish` 不设防**——任何角色都可入队（API 发起 run、worker 的 lease_busy 重投）。
+消费门控收口在 **QueueModule 的 token 工厂**：4 个 Queue token 的 provider 用 `RoleGatedQueueAdapter` 包装 `PgBossQueueAdapter`——`subscribe`/`schedule` 在本进程角色不消费该 token 时 no-op（各记一条 log），processor 拿到的 Queue 实例已按角色裁剪，**零感知零改动**。**`publish` 恒透传**——任何角色都可入队（API 发起 run、worker 的 lease_busy 重投）。
+
+> 修订记录（实现阶段，2026-07-17）：本段原写「4 个 processor 的 `onModuleInit` 开头统一守卫（`if (!consumesJob(role, JOB)) return`）」。实现调查改为 token 工厂门控：① Boundary 1 本就要求「processor 不得自带角色判断逻辑」，processor 内守卫行与之矛盾；② 咽喉点强制——「第 5 个消费者忘写守卫」的失败模式在工厂门控下不存在（拿不到未按角色裁剪的 Queue 实例）；③ processor 与其 7 处既有测试构造点零改动。详见 `.ship/tasks/eval-worker-split/plan/diff-report.md` 分歧 1。
 
 ### D2 worker 引导：application context，无 HTTP
 
@@ -84,7 +86,7 @@ online-eval 的 `queue.schedule()` 跟随消费者（worker 角色注册，与 s
 `apps/backend` 加 `dev:worker: cross-env PROCESS_ROLE=worker tsx watch src/main.ts`（cross-env/tsx 均已在 devDeps）。**不用第二个 `nest start --watch`**——双 tsc watch 写同一 dist 在 Windows 上会 EBUSY/EPERM。tsx 直跑 src 保持 tracing 首 import 语义。api 侧 dev 脚本不动。
 
 **turbo 接线两处都要做**（peer P2：`turbo run dev` 按任务名调度，不会自动带上 `dev:worker`）：
-1. `turbo.json` 加 `"dev:worker": { "cache": false, "persistent": true }`；
+1. `turbo.json` 加 `"dev:worker": { "dependsOn": ["^build"], "cache": false, "persistent": true }`——`dependsOn` 必须有：`@codecrush/otel` 的 main 指向 dist，冷启动未 build 时 tsx 直跑 src 会 MODULE_NOT_FOUND（实现阶段修订，原文缺此字段）；
 2. root `package.json` 的 `dev` 脚本改为 `turbo run dev dev:worker`（对没有该脚本的包 turbo 自动跳过）。
 
 ### D6 部署形态
@@ -128,7 +130,7 @@ online-eval 的 `queue.schedule()` 跟随消费者（worker 角色注册，与 s
 
 ## Boundaries
 
-1. **消费者→角色映射只活在 `platform/queue` 的 `JOB_ROLES` 一处**；任何 processor 不得自带角色判断逻辑，新增消费者必须登记角色。
+1. **消费者→角色映射只活在 `platform/queue/queue.constants.ts` 的 `QUEUE_CONSUMER_ROLES` 一处**（粒度 = Queue token；新消费者域一律开新 token 并登记角色）；任何 processor 不得自带角色判断逻辑。
 2. **`PROCESS_ROLE` 的解析只活在 `platform/config/process-role.ts` 一处**；`main.ts`/`tracing.ts`/`config.schema.ts` 一律经它，禁止再出现裸读 `process.env.PROCESS_ROLE` 的第二处。
 3. **`publish` 永不按角色设防**——入队是所有角色的能力，只有消费被门控。
 4. **api/all 的 bootstrap 路径不改**：`NestFactory.create` 分支的行为与本设计前逐字节等价（chat 零变化的落点）。
@@ -154,7 +156,7 @@ online-eval 的 `queue.schedule()` 跟随消费者（worker 角色注册，与 s
 
 - worker 需要多副本 → 先做 018 缺口 13「活跃槽位建模成有所有者与过期证据的资源」，否则不支持。
 - worker 进 k8s / compose `--wait` 编排 → 给 worker 分支加轻量 liveness 端点（当前无 HTTP）。
-- ingestion 排队 P95 >5min 或 >100 文档/分（003:256）→ 把 ingestion 迁到 worker 角色，改 `JOB_ROLES` 一行。
+- ingestion 排队 P95 >5min 或 >100 文档/分（003:256）→ 把 ingestion 迁到 worker 角色，改 `QUEUE_CONSUMER_ROLES` 一行。
 - 评测吞吐要并行多 run → 同缺口 13，且需重估 token 预算的全局性。
 
 ## 对抗记录
