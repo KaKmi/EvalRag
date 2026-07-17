@@ -6,6 +6,7 @@ import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
 import { applyGlobalConfig, setupSwagger } from "./app/app-bootstrap";
 import { AppConfigService } from "./platform/config/config.service";
+import { parseProcessRole } from "./platform/config/process-role";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -16,4 +17,19 @@ async function bootstrap() {
   await app.listen(config.port);
   console.log(`backend listening on :${config.port}`);
 }
-void bootstrap();
+
+// 019 D2：worker 角色走 application context——无 HTTP、无端口、无重复 API 面；
+// 全部模块照常实例化（QueueModule boss.start / processor 的 OnModuleInit 照跑，
+// 消费门控由 RoleGatedQueueAdapter 决定）。enableShutdownHooks 让 SIGTERM 能走到
+// QueueModule.onModuleDestroy 的 boss.stop()（api 分支现状无此钩子，属既有债务，019 A2 不动）。
+async function bootstrapWorker() {
+  const app = await NestFactory.createApplicationContext(AppModule);
+  app.enableShutdownHooks();
+  console.log("backend worker started (PROCESS_ROLE=worker): consuming eval-run + online-eval");
+}
+
+if (parseProcessRole(process.env) === "worker") {
+  void bootstrapWorker();
+} else {
+  void bootstrap();
+}
