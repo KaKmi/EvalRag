@@ -387,6 +387,7 @@ describeInfra("E-W1 infrastructure flow", () => {
       judge,
       emitter as never,
       fakeModels as never,
+      { onlineEvalBackfillWindowHours: 24 } as never,
     );
     service = new EvaluationsService(evaluationsRepo, clickhouseEvaluations, fakeModels as never);
     traces = new TracesService(new ClickHouseTracesRepository(harness.clickhouse));

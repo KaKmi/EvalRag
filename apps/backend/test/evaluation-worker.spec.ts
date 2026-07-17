@@ -87,6 +87,7 @@ describe("EvaluationWorkerProcessor", () => {
     schedule: jest.Mock;
   };
   let models: ReturnType<typeof makeModelsMock>;
+  let config: { onlineEvalBackfillWindowHours: number };
   let subscribedHandler: (data: unknown) => Promise<void>;
   let processor: EvaluationWorkerProcessor;
 
@@ -103,6 +104,7 @@ describe("EvaluationWorkerProcessor", () => {
       schedule: jest.fn().mockResolvedValue(undefined),
     };
     models = makeModelsMock();
+    config = { onlineEvalBackfillWindowHours: 24 };
     processor = new EvaluationWorkerProcessor(
       queue,
       repo,
@@ -111,6 +113,7 @@ describe("EvaluationWorkerProcessor", () => {
       judge,
       emitter,
       models,
+      config as never,
     );
   });
 
@@ -160,6 +163,59 @@ describe("EvaluationWorkerProcessor", () => {
       expect.any(String),
       expect.objectContaining({ consecutiveFailures: 5, lastTraceId: candidates[4].traceId }),
     );
+  });
+
+  // 空轮不该改写裁判的健康状态：finishCycle 曾无条件写 `?? 0` / `?? null`，而空轮也走
+  // finishCycle ⇒ 任何一个无所事事的轮次都会把「上次为什么失败」擦干净。018 §12 缺口 20 的
+  // 排除论证 ③ 正是据这两个字段排除「worker 失败」，而它们只描述最后一轮。
+  it("leaves judge health untouched on a cycle that never called the judge", async () => {
+    clickhouse.listCandidates.mockResolvedValue([]);
+    await processor.processCycle("online-quality-v1", fixedNow);
+    const [, , finish] = repo.finishCycle.mock.calls[0];
+    expect(finish).not.toHaveProperty("consecutiveFailures");
+    expect(finish).not.toHaveProperty("lastError");
+  });
+
+  it("leaves judge health untouched when every candidate is sampled out", async () => {
+    repo.getSettings.mockResolvedValue({ ...enabledSettings, sampleRate: 0.0001 });
+    const normal = { ...makeRisk(0), status: "success" as const, noCitations: false, confidence: 0.9 };
+    clickhouse.listCandidates.mockResolvedValue([normal]);
+    const cycle = await processor.processCycle("online-quality-v1", fixedNow);
+    expect(cycle.outcomes.map((item) => item.kind)).toEqual(["sampled_out"]);
+    expect(judge.score).not.toHaveBeenCalled();
+    // 500 条全被抽样刷掉也没碰过裁判 —— 判据是「动没动裁判」，不是「有没有候选」
+    const [, , finish] = repo.finishCycle.mock.calls[0];
+    expect(finish).not.toHaveProperty("consecutiveFailures");
+  });
+
+  it("reports judge health when the judge actually ran", async () => {
+    clickhouse.listCandidates.mockResolvedValue([makeRisk(0)]);
+    await processor.processCycle("online-quality-v1", fixedNow);
+    expect(repo.finishCycle).toHaveBeenCalledWith(
+      "online-quality-v1",
+      expect.any(String),
+      expect.objectContaining({ consecutiveFailures: 0, lastError: null }),
+    );
+  });
+
+  // 冷启动播种点只在水位线那行不存在时生效，而**行是在 tryAcquireLease 里诞生的** ——
+  // 只把 seedFrom 传给 getOrCreateWatermark 是够不着的。
+  it.each([
+    ["默认 24 小时（017:26 原行为）", 24, new Date("2026-07-14T02:00:00.000Z")],
+    ["0 = 只评此后的新问答", 0, fixedNow],
+    ["-1 = 回看全部历史", -1, new Date(0)],
+  ])("seeds a fresh watermark per ONLINE_EVAL_BACKFILL_WINDOW_HOURS: %s", async (_l, hours, seed) => {
+    config.onlineEvalBackfillWindowHours = hours;
+    clickhouse.listCandidates.mockResolvedValue([]);
+    await processor.processCycle("online-quality-v1", fixedNow);
+    expect(repo.tryAcquireLease).toHaveBeenCalledWith(
+      "online-quality-v1",
+      expect.any(String),
+      fixedNow,
+      20 * 60_000,
+      seed,
+    );
+    expect(repo.getOrCreateWatermark).toHaveBeenCalledWith("online-quality-v1", fixedNow, seed);
   });
 
   it("does not query candidates when disabled or lease is owned elsewhere", async () => {

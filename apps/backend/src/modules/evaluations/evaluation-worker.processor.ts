@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Inject, Injectable, type OnModuleInit } from "@nestjs/common";
 import { z } from "zod";
+import { AppConfigService } from "../../platform/config/config.service";
 import {
   EVALUATION_QUEUE,
   ONLINE_EVALUATION_JOB,
@@ -71,7 +72,17 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
     private readonly judge: EvaluationJudgeService,
     private readonly emitter: EvaluationSpanEmitter,
     private readonly models: ModelsService,
+    private readonly config: AppConfigService,
   ) {}
+
+  /**
+   * 冷启动播种点——只在水位线那行不存在时生效。`-1` = 全部历史（epoch）。
+   * 注意 `dailyCap` 仍然封顶：历史多时分多天评完，不会一次灌爆预算。
+   */
+  private seedFrom(now: Date): Date {
+    const hours = this.config.onlineEvalBackfillWindowHours;
+    return hours < 0 ? new Date(0) : new Date(now.getTime() - hours * 60 * 60 * 1000);
+  }
 
   async onModuleInit(): Promise<void> {
     await this.queue.subscribe(ONLINE_EVALUATION_JOB, async (data) => {
@@ -106,12 +117,13 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
     }
 
     const owner = randomUUID();
-    if (!(await this.repo.tryAcquireLease(workerName, owner, now, EVALUATION_LEASE_MS))) {
+    const seedFrom = this.seedFrom(now);
+    if (!(await this.repo.tryAcquireLease(workerName, owner, now, EVALUATION_LEASE_MS, seedFrom))) {
       return this.emptyResult("lease_busy");
     }
 
     try {
-      const watermark = await this.repo.getOrCreateWatermark(workerName, now);
+      const watermark = await this.repo.getOrCreateWatermark(workerName, now, seedFrom);
       const candidates = await this.clickhouse.listCandidates(
         watermark,
         new Date(now.getTime() - EVALUATION_LAG_BUFFER_MS),
@@ -122,6 +134,9 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
       let dailyCount = watermark.dailyCount;
       let consecutiveJudgeFailures = 0;
       let lastError: string | null = null;
+      // 本轮有没有真的调过裁判。判据不能用「有没有候选」——一轮 500 条全 sampled_out 同样
+      // 没碰过裁判，同样无权改写裁判的健康状态。
+      let judgeAttempted = false;
 
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index];
@@ -156,6 +171,7 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
           outcomes.push(outcome(candidate, "incomplete"));
           continue;
         }
+        judgeAttempted = true;
         try {
           const result = await this.judge.score(assembled.input, {
             judgeModelId: settings.judgeModelId!,
@@ -200,8 +216,9 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
         ...cursor,
         evaluatedIncrement: evaluatedCount,
         now,
-        consecutiveFailures: consecutiveJudgeFailures,
-        lastError,
+        // 没动过裁判就不上报裁判健康状态（传 undefined ⇒ finishCycle 不碰那两列），
+        // 否则空轮会把上一次真实故障擦成 0/null。
+        ...(judgeAttempted ? { consecutiveFailures: consecutiveJudgeFailures, lastError } : {}),
       });
       const status =
         dailyCount >= Math.floor(settings.dailyCap * 0.8) ? "budget_reduced" : "healthy";

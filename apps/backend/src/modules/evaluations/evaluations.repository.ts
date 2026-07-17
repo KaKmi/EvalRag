@@ -16,6 +16,12 @@ export interface FinishEvaluationCycle {
   lastTraceId: string;
   evaluatedIncrement: number;
   now: Date;
+  /**
+   * 裁判健康状态。**`undefined` = 本轮没动过裁判 ⇒ 不改写这两列**（保住上一次真实故障）；
+   * 传值 = 本轮确实调过裁判，该值就是权威。
+   * 曾经这两列被无条件写成 `?? 0` / `?? null`，而空轮也走 finishCycle ⇒ 任何一个无所事事的
+   * 轮次都会把「上次为什么失败」擦干净（018 §12 缺口 20 的排除论证 ③ 正因此失效）。
+   */
   consecutiveFailures?: number;
   lastError?: string | null;
 }
@@ -68,13 +74,23 @@ export class EvaluationsRepository {
     return watermark;
   }
 
-  async getOrCreateWatermark(workerName: string, now: Date): Promise<EvalWatermarkRow> {
+  /**
+   * `seedFrom` 只在**行不存在**时决定游标起点——`onConflictDoNothing` 保护重启（保住原游标），
+   * 但保护不了诞生：那一刻起，早于 seedFrom 的 trace 永不进候选集（`listCandidates` 只往前看）。
+   * 默认 `now - 24h` = `017:26` 的原行为；调用方（worker）按 `ONLINE_EVAL_BACKFILL_WINDOW_HOURS`
+   * 覆盖。默认值留在这里是为了让「不传 = 原行为」，既有调用点与测试无需改动。
+   */
+  async getOrCreateWatermark(
+    workerName: string,
+    now: Date,
+    seedFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000),
+  ): Promise<EvalWatermarkRow> {
     const today = utcDate(now);
     await this.db
       .insert(evalWatermarks)
       .values({
         workerName,
-        lastTs: new Date(now.getTime() - 24 * 60 * 60 * 1000),
+        lastTs: seedFrom,
         lastTraceId: "",
         dailyDate: today,
       })
@@ -97,13 +113,18 @@ export class EvaluationsRepository {
     return watermark;
   }
 
+  /**
+   * 水位线的行就是在这里诞生的——**worker 真正开工的那一刻**，也是唯一该播种的时机。
+   * 故 `seedFrom` 必须一路透传到这里；只传给 `getOrCreateWatermark` 是够不着的。
+   */
   async tryAcquireLease(
     workerName: string,
     owner: string,
     now: Date,
     ttlMs: number,
+    seedFrom?: Date,
   ): Promise<boolean> {
-    await this.getOrCreateWatermark(workerName, now);
+    await this.getOrCreateWatermark(workerName, now, seedFrom);
     const rows = await this.db
       .update(evalWatermarks)
       .set({
@@ -147,8 +168,11 @@ export class EvaluationsRepository {
         leaseUntil: null,
         lastRunAt: result.now,
         lastSuccessAt: result.now,
-        consecutiveFailures: result.consecutiveFailures ?? 0,
-        lastError: result.lastError ?? null,
+        // 没动过裁判就不碰这两列——见 FinishEvaluationCycle 的注释。
+        ...(result.consecutiveFailures === undefined
+          ? {}
+          : { consecutiveFailures: result.consecutiveFailures }),
+        ...(result.lastError === undefined ? {} : { lastError: result.lastError }),
         updatedAt: result.now,
       })
       .where(and(eq(evalWatermarks.workerName, workerName), eq(evalWatermarks.leaseOwner, owner)));
@@ -161,9 +185,15 @@ export class EvaluationsRepository {
       .where(and(eq(evalWatermarks.workerName, workerName), eq(evalWatermarks.leaseOwner, owner)));
   }
 
+  /**
+   * 行不存在时**不创建**——一个失败的轮次不该顺手把游标播种下去。原先它调 getOrCreateWatermark，
+   * 于是「模型还没配好就跑了一轮」会以 `now-24h` 建行，把更早的历史永久排除出候选集，
+   * 而这个播种时刻与任何人的意图都无关。行不存在 = worker 没真正开工过，
+   * 屏1 已由 `worker_stalled`（无行/lastRunAt 陈旧）与 `model_unavailable`（独立查模型）如实表达，
+   * 不需要靠这行记账。
+   */
   async recordFailure(workerName: string, errorClass: string, message: string): Promise<void> {
     const now = new Date();
-    await this.getOrCreateWatermark(workerName, now);
     await this.db
       .update(evalWatermarks)
       .set({

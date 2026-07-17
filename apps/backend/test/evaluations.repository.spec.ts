@@ -129,4 +129,62 @@ describeDb("EvaluationsRepository", () => {
     expect(saved.leaseOwner).toBeNull();
     expect(saved.leaseUntil).toBeNull();
   });
+
+  // 一个失败的轮次不该顺手把游标播种下去：原先 recordFailure 会以 now-24h 建行，
+  // 于是「模型还没配好就跑了一轮」永久吃掉更早的历史，而那个播种时刻与任何人的意图无关。
+  it("never creates the watermark from a failure record", async () => {
+    const workerName = "never-started-worker";
+    await repo.recordFailure(workerName, "ModelUnavailable", "judge missing");
+    expect(await repo.findWatermark(workerName)).toBeUndefined();
+  });
+
+  // 播种点是**一次性**的：onConflictDoNothing 保护重启（保住原游标），保护不了诞生。
+  // 行建好后再改窗口不得有任何效果——否则游标会因为一个 env 变动而倒退/前跳。
+  it("honours the seed window on birth and ignores it forever after", async () => {
+    const workerName = "seed-worker";
+    const bornAt = new Date("2026-07-15T12:00:00.000Z");
+    const epoch = new Date(0);
+    expect((await repo.getOrCreateWatermark(workerName, bornAt, epoch)).lastTs).toEqual(epoch);
+
+    const later = new Date("2026-07-16T12:00:00.000Z");
+    const reseeded = await repo.getOrCreateWatermark(workerName, later, later);
+    expect(reseeded.lastTs).toEqual(epoch);
+  });
+
+  // finishCycle 的 consecutiveFailures/lastError 传 undefined = 「本轮没动过裁判」⇒ 不碰这两列。
+  // 曾经它无条件写 `?? 0` / `?? null`，而空轮也走 finishCycle ⇒ 上一次真实故障被擦干净。
+  it("keeps the last real failure when a later cycle never touched the judge", async () => {
+    const workerName = "empty-cycle-worker";
+    const at = new Date("2026-07-15T05:00:00.000Z");
+    const later = new Date("2026-07-15T05:15:00.000Z");
+    const traceId = "a".repeat(32);
+    await repo.getOrCreateWatermark(workerName, at);
+
+    // 第一轮：裁判连挂 3 次，如实记账（finishCycle 顺带释放租约）
+    expect(await repo.tryAcquireLease(workerName, "owner-1", at, 20 * 60_000)).toBe(true);
+    await repo.finishCycle(workerName, "owner-1", {
+      lastTs: at,
+      lastTraceId: traceId,
+      evaluatedIncrement: 0,
+      now: at,
+      consecutiveFailures: 3,
+      lastError: "JudgeUnavailable: judge down",
+    });
+    expect((await repo.findWatermark(workerName))?.lastError).toBe("JudgeUnavailable: judge down");
+
+    // 第二轮：0 候选 ⇒ 没动裁判 ⇒ 两个字段传 undefined ⇒ 不得擦掉上一次真实故障
+    expect(await repo.tryAcquireLease(workerName, "owner-2", later, 20 * 60_000)).toBe(true);
+    await repo.finishCycle(workerName, "owner-2", {
+      lastTs: at,
+      lastTraceId: traceId,
+      evaluatedIncrement: 0,
+      now: later,
+    });
+    const saved = await repo.findWatermark(workerName);
+    expect(saved?.lastError).toBe("JudgeUnavailable: judge down");
+    expect(saved?.consecutiveFailures).toBe(3);
+    // 空轮仍是一次成功的轮次——lastSuccessAt 该走。断言它也钉住「这一轮真的写进去了」，
+    // 否则 0 行更新会让上面两条断言因为「什么都没发生」而假绿。
+    expect(saved?.lastSuccessAt).toEqual(later);
+  });
 });
