@@ -12,6 +12,8 @@ const overviewFixture = {
     evaluatedCount: 0,
     eligibleCount: 0,
     evaluableCount: 0,
+    missed: { total: 0, sampledOut: 0, quotaSkipped: 0, incomplete: 0, judgeFailed: 0, neverSeen: 0 },
+    scoresNotPersisted: 0,
     judgeModel: null,
     judgeVersion: "online-v1",
     status: "disabled" as const,

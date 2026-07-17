@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Inject, Injectable, type OnModuleInit } from "@nestjs/common";
+import { Inject, Injectable, Logger, type OnModuleInit } from "@nestjs/common";
 import { z } from "zod";
 import { AppConfigService } from "../../platform/config/config.service";
 import {
@@ -74,6 +74,8 @@ function outcome(
 
 @Injectable()
 export class EvaluationWorkerProcessor implements OnModuleInit {
+  private readonly logger = new Logger(EvaluationWorkerProcessor.name);
+
   constructor(
     @Inject(EVALUATION_QUEUE) private readonly queue: Queue,
     private readonly repo: EvaluationsRepository,
@@ -247,6 +249,7 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
         // 否则空轮会把上一次真实故障擦成 0/null。
         ...(judgeAttempted ? { consecutiveFailures: consecutiveJudgeFailures, lastError } : {}),
       });
+      await this.pruneLedger(now);
       const status =
         dailyCount >= Math.floor(settings.dailyCap * 0.8) ? "budget_reduced" : "healthy";
       return {
@@ -263,6 +266,22 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
       };
     } finally {
       await this.repo.releaseLease(workerName, owner, now);
+    }
+  }
+
+  /**
+   * 账本清理搭本轮的车，不新建 cron（多一个周期任务就多一个要盯的东西）。
+   * **绝不让清理失败带垮整轮**：这一轮的评分与游标此时已经落库，为了一次删除失败而把
+   * 整个 handler 抛出去，只会让 pg-boss 重投、`recordFailure` 记一笔与评测无关的错，
+   * 把「裁判到底健不健康」这个信号搅浑。
+   */
+  private async pruneLedger(now: Date): Promise<void> {
+    const days = this.config.onlineEvalLedgerRetentionDays;
+    try {
+      const removed = await this.repo.pruneLedger(new Date(now.getTime() - days * 24 * 60 * 60 * 1000));
+      if (removed > 0) this.logger.log(`账本清理：删除 ${removed} 行（早于 ${days} 天）`);
+    } catch (error) {
+      this.logger.warn(`账本清理失败（不影响本轮评测）：${normalizeEvaluationError(error).message}`);
     }
   }
 

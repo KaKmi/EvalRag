@@ -69,6 +69,8 @@ export class EvaluationsService {
       eligibleCount,
       evaluableCount,
       backlog,
+      ledger,
+      scoredInWindow,
     ] = await Promise.all([
       this.clickhouseRepo.getOverview(current),
       this.clickhouseRepo.getOverview(previous),
@@ -82,6 +84,8 @@ export class EvaluationsService {
       cursor && cursor.lastTs < backlogTo
         ? this.clickhouseRepo.countBacklog(cursor, backlogTo)
         : Promise.resolve(0),
+      this.controlRepo.countLedgerByOutcome(settings.judgeVersion, from, to, query.agentId),
+      this.clickhouseRepo.countScoredInWindow(from, to, settings.judgeVersion, query.agentId),
     ]);
     const judge = await this.resolveSelectedModel(settings.judgeModelId, "llm");
     const embedding = await this.resolveSelectedModel(settings.embeddingModelId, "embedding");
@@ -104,6 +108,12 @@ export class EvaluationsService {
         evaluatedCount: aggregate.sampleCount,
         eligibleCount,
         evaluableCount,
+        missed: missedBreakdown(eligibleCount, evaluableCount, ledger),
+        // 账本说评过（含之前评过的）、CH 里却查不到 ⇒ span 丢了。恒 0 才正常。
+        scoresNotPersisted: Math.max(
+          0,
+          (ledger.success ?? 0) + (ledger.already_scored ?? 0) - scoredInWindow,
+        ),
         judgeModel: judge?.name ?? null,
         judgeVersion: settings.judgeVersion,
         status,
@@ -244,6 +254,35 @@ export class EvaluationsService {
       return undefined;
     }
   }
+}
+
+/**
+ * 「已错过」= 游标已越过、却没有分数的。`total` 只能靠**算术**（窗口内 − 已评 − 仍可评），
+ * 因为最大的一类——**从没进过候选集的**——在账本里根本没有行：冷启动播种把游标钉在
+ * `now-N 小时`，更早的 trace 一眼都没被看过。
+ *
+ * 故 `neverSeen = total − 账本里的四类`，而不是反过来。把「已错过」直接换成查账本会让它
+ * 显示 0 而不是真实的数（018 §12 缺口 20 的那 31 条正是 neverSeen，账本一行都没有）。
+ */
+function missedBreakdown(
+  eligibleCount: number,
+  evaluableCount: number,
+  ledger: Record<string, number>,
+) {
+  const evaluatedOrPending = evaluableCount + (ledger.success ?? 0) + (ledger.already_scored ?? 0);
+  const total = Math.max(0, eligibleCount - evaluatedOrPending);
+  const sampledOut = ledger.sampled_out ?? 0;
+  const quotaSkipped = ledger.quota_skipped_normal ?? 0;
+  const incomplete = ledger.incomplete ?? 0;
+  const judgeFailed = ledger.processed_failed ?? 0;
+  return {
+    total,
+    sampledOut,
+    quotaSkipped,
+    incomplete,
+    judgeFailed,
+    neverSeen: Math.max(0, total - sampledOut - quotaSkipped - incomplete - judgeFailed),
+  };
 }
 
 /**

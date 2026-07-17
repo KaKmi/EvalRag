@@ -50,6 +50,7 @@ describe("EvaluationsService", () => {
     const control = {
       getSettings: jest.fn().mockResolvedValue(settings),
       updateSettings: jest.fn().mockResolvedValue(settings),
+      countLedgerByOutcome: jest.fn().mockResolvedValue({}),
       findWatermark: jest.fn().mockResolvedValue({
         lastTs: new Date("2026-07-15T01:55:00.000Z"),
         lastTraceId: "",
@@ -70,6 +71,7 @@ describe("EvaluationsService", () => {
       countEligible: jest.fn().mockResolvedValue(0),
       countEvaluable: jest.fn().mockResolvedValue(0),
       countBacklog: jest.fn().mockResolvedValue(0),
+      countScoredInWindow: jest.fn().mockResolvedValue(0),
       getLatestSuccess: jest.fn().mockResolvedValue(undefined),
       getLatestFailure: jest.fn().mockResolvedValue(undefined),
     };
@@ -227,6 +229,69 @@ describe("EvaluationsService", () => {
     const { service } = setupRunning();
     const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
     expect(result.meta.status).toBe("healthy");
+  });
+
+  // 账本只覆盖「worker 看过的」。冷启动播种孤儿化的 trace 从没进过候选集、没有账本行——
+  // 它们是「已错过」减去账本之后剩下的那部分。把「已错过」直接换成查账本会让它显示 0
+  // 而不是真实的数（018 §12 缺口 20 的那 31 条正是 neverSeen，账本一行都没有）。
+  it("attributes cursor-passed traces the ledger never saw to neverSeen", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    clickhouse.countEligible.mockResolvedValue(32);
+    clickhouse.countEvaluable.mockResolvedValue(0);
+    control.countLedgerByOutcome.mockResolvedValue({}); // worker 一条都没看过
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.meta.missed).toEqual({
+      total: 32,
+      sampledOut: 0,
+      quotaSkipped: 0,
+      incomplete: 0,
+      judgeFailed: 0,
+      neverSeen: 32,
+    });
+  });
+
+  it("splits missed traces by what the ledger recorded", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    clickhouse.countEligible.mockResolvedValue(20);
+    clickhouse.countEvaluable.mockResolvedValue(2);
+    control.countLedgerByOutcome.mockResolvedValue({
+      success: 3,
+      already_scored: 1,
+      sampled_out: 6,
+      quota_skipped_normal: 1,
+      incomplete: 2,
+      processed_failed: 1,
+    });
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    // 20 窗口内 − 2 仍可评 − (3 success + 1 already_scored) = 14 已错过
+    // 账本认领 6+1+2+1 = 10 ⇒ 剩 4 条从没被看过
+    expect(result.meta.missed).toEqual({
+      total: 14,
+      sampledOut: 6,
+      quotaSkipped: 1,
+      incomplete: 2,
+      judgeFailed: 1,
+      neverSeen: 4,
+    });
+  });
+
+  // 账本说评过、CH 查不到 ⇒ span 丢了。forceFlushTelemetry 吞掉导出失败，故
+  // 「worker 认为评了」不蕴含「分数可查」——账本是唯一不依赖 span 投递的证据。
+  it("reports scores the ledger claims but ClickHouse cannot show", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    control.countLedgerByOutcome.mockResolvedValue({ success: 5, already_scored: 2 });
+    clickhouse.countScoredInWindow.mockResolvedValue(4);
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.meta.scoresNotPersisted).toBe(3);
+  });
+
+  it("never reports negative loss when ClickHouse leads the ledger", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    // 账本被保留期清理过、CH 还留着旧分数 ⇒ CH 多于账本，这不是丢包
+    control.countLedgerByOutcome.mockResolvedValue({ success: 1 });
+    clickhouse.countScoredInWindow.mockResolvedValue(9);
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.meta.scoresNotPersisted).toBe(0);
   });
 
   // 游标不存在 ⇒ 此刻还没有任何 trace 被越过 ⇒ 全窗口都仍可评，「已错过」为 0。

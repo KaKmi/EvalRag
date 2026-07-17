@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, lt, or, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
@@ -245,6 +245,44 @@ export class EvaluationsRepository {
       .update(evalWatermarks)
       .set({ leaseOwner: null, leaseUntil: null, updatedAt: now })
       .where(and(eq(evalWatermarks.workerName, workerName), eq(evalWatermarks.leaseOwner, owner)));
+  }
+
+  /**
+   * 窗口内账本按 outcome 的计数（按 **trace 发生时间**切窗，与屏1 的 eligible/evaluable 同基准，
+   * 故三者可做算术）。
+   *
+   * ⚠️ 账本只覆盖「worker **看过**的」。游标播种时被孤儿化的 trace **从没进过候选集**、
+   * 没有账本行——它们正是「已错过」减去本表之后剩下的那部分（屏1 的「从没被看过」）。
+   * 不要拿本表当「已错过」的全部，那会把最大的一类漏掉。
+   */
+  async countLedgerByOutcome(
+    judgeVersion: string,
+    from: Date,
+    to: Date,
+    agentId?: string,
+  ): Promise<Record<string, number>> {
+    const rows = await this.db
+      .select({ outcome: evalCandidateLedger.outcome, count: sql<string>`count(*)` })
+      .from(evalCandidateLedger)
+      .where(
+        and(
+          eq(evalCandidateLedger.judgeVersion, judgeVersion),
+          gte(evalCandidateLedger.traceStartTime, from),
+          lt(evalCandidateLedger.traceStartTime, to),
+          ...(agentId ? [eq(evalCandidateLedger.agentId, agentId)] : []),
+        ),
+      )
+      .groupBy(evalCandidateLedger.outcome);
+    return Object.fromEntries(rows.map((row) => [row.outcome, Number(row.count)]));
+  }
+
+  /** 按 trace 发生时间清理旧账本行。返回删除行数。 */
+  async pruneLedger(before: Date): Promise<number> {
+    const rows = await this.db
+      .delete(evalCandidateLedger)
+      .where(lt(evalCandidateLedger.traceStartTime, before))
+      .returning({ targetTraceId: evalCandidateLedger.targetTraceId });
+    return rows.length;
   }
 
   /**

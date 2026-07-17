@@ -28,6 +28,8 @@ const baseOverview = {
     evaluatedCount: 30,
     eligibleCount: 300,
     evaluableCount: 270,
+    missed: { total: 0, sampledOut: 0, quotaSkipped: 0, incomplete: 0, judgeFailed: 0, neverSeen: 0 },
+    scoresNotPersisted: 0,
     judgeModel: "qwen-plus",
     judgeVersion: "online-v1",
     status: "healthy" as const,
@@ -160,7 +162,14 @@ it.each([
 it("separates the window total from what is still evaluable", async () => {
   vi.mocked(api.getQualityOverview).mockResolvedValue({
     ...baseOverview,
-    meta: { ...baseOverview.meta, evaluatedCount: 0, eligibleCount: 32, evaluableCount: 1, backlog: 1 },
+    meta: {
+      ...baseOverview.meta,
+      evaluatedCount: 0,
+      eligibleCount: 32,
+      evaluableCount: 1,
+      backlog: 1,
+      missed: { total: 31, sampledOut: 0, quotaSkipped: 0, incomplete: 0, judgeFailed: 0, neverSeen: 31 },
+    },
     metrics: {
       faithfulness: metric(null, 0),
       answerRelevancy: metric(null, 0),
@@ -174,6 +183,37 @@ it("separates the window total from what is still evaluable", async () => {
   expect(screen.queryByText(/可评测/)).not.toBeInTheDocument();
 });
 
+// 「已错过」必须说得出为什么。最大的一类往往是「从没被看过」（冷启动播种把游标钉在
+// now-N 小时之前），它在账本里没有行——把它误读成「抽样刷掉」正是 018 缺口 20 犯的错。
+it("explains why the missed traces were missed", async () => {
+  vi.mocked(api.getQualityOverview).mockResolvedValue({
+    ...baseOverview,
+    meta: {
+      ...baseOverview.meta,
+      eligibleCount: 40,
+      evaluableCount: 0,
+      missed: { total: 10, sampledOut: 4, quotaSkipped: 0, incomplete: 1, judgeFailed: 2, neverSeen: 3 },
+    },
+  });
+  renderQuality();
+  fireEvent.mouseOver(await screen.findByText(/已错过\s*10/));
+  expect(await screen.findByText(/3 条从没被看过（游标起点之前）/)).toBeInTheDocument();
+  expect(screen.getByText(/4 条抽样未命中/)).toBeInTheDocument();
+  expect(screen.getByText(/2 条裁判失败/)).toBeInTheDocument();
+  // 计数为 0 的原因不出现——横幅不该拿零噪音占地方
+  expect(screen.queryByText(/让位给高风险样本/)).not.toBeInTheDocument();
+});
+
+// 账本说评过、ClickHouse 查不到 ⇒ span 在上报途中丢了，记分卡会少算。恒 0 才正常。
+it("warns when the ledger and ClickHouse disagree about what was scored", async () => {
+  vi.mocked(api.getQualityOverview).mockResolvedValue({
+    ...baseOverview,
+    meta: { ...baseOverview.meta, scoresNotPersisted: 3 },
+  });
+  renderQuality();
+  expect(await screen.findByText(/分数丢失\s*3/)).toBeInTheDocument();
+});
+
 it("omits the missed count when the cursor has passed nothing", async () => {
   vi.mocked(api.getQualityOverview).mockResolvedValue({
     ...baseOverview,
@@ -182,6 +222,7 @@ it("omits the missed count when the cursor has passed nothing", async () => {
   renderQuality();
   expect(await screen.findByText(/已评测\s*30\s*\/\s*窗口内\s*300/)).toBeInTheDocument();
   expect(screen.queryByText(/已错过/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/分数丢失/)).not.toBeInTheDocument();
 });
 
 it("renders zero-sample empty state", async () => {

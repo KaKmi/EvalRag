@@ -50,6 +50,14 @@ export const envSchema = z.object({
    * 显示成「可评测」（018 §12 缺口 20 的真因，该缺口原把成因误判为抽样）。
    */
   ONLINE_EVAL_BACKFILL_WINDOW_HOURS: z.coerce.number().int().min(-1).default(24),
+  /**
+   * `eval_candidate_ledger` 的保留天数（按 trace 发生时间）。默认 30 = 屏1 最长窗口，
+   * 更旧的账本行没有读者。
+   *
+   * 容量：017 设计上限 ≤10 QPS，最坏每天约 86 万行 ⇒ 30 天约 2600 万行。单表能扛，
+   * 但要靠 `trace_start_time` 索引 + 本清理，两者缺一不可。真实流量更高时下调此值。
+   */
+  ONLINE_EVAL_LEDGER_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
   // M4.1 文档处理 Profile 特性开关：默认开；置 "false" 回退 legacy chunkTemplate 入库路径
   // （不建 Run、payload 无 processingRunId），供灰度/回滚。
   PROCESSING_PROFILES_ENABLED: z

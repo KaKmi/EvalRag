@@ -390,6 +390,46 @@ export class ClickHouseEvaluationsRepository {
     return Number(row?.count ?? 0);
   }
 
+  /**
+   * 窗口内**有分数**的 trace 数——按 **trace 发生时间**切窗（不是 evaluated_at），
+   * 好与 PG 账本的 `trace_start_time` 同基准，两者相减即可对账。
+   *
+   * 为什么要对账：`forceFlushTelemetry` 被有意设计成吞掉一切导出失败
+   * （`packages/otel/src/trace.ts`）⇒「worker 认为评了」与「分数真的可查」是两件事。
+   * 账本在 PG、与游标同事务，是唯一不依赖 span 投递的证据；本查询是它的对照面。
+   *
+   * 注意与 `getOverview` 的 `evaluatedCount` **口径不同**：那个按 `evaluated_at` 切窗
+   * （「这段时间评了多少」），本查询按 trace 发生时间（「这批问答里多少有分」）。
+   * 两者都对，但只有后者能跟账本比。
+   */
+  async countScoredInWindow(
+    from: Date,
+    to: Date,
+    judgeVersion: string,
+    agentId?: string,
+  ): Promise<number> {
+    if (!(await this.ensureEvalViews())) return 0;
+    const result = await this.clickhouse.query({
+      query: `SELECT count() AS count FROM codecrush_traces AS t
+        WHERE t.preview = 0
+          AND t.start_time >= {from:DateTime64(9)} AND t.start_time < {to:DateTime64(9)}
+          AND ({agentId:String} = '' OR t.agent_id = {agentId:String})
+          AND t.trace_id IN (
+            SELECT target_trace_id FROM (${LATEST_EVAL_SQL})
+            WHERE judge_version = {judgeVersion:String}
+          )`,
+      query_params: {
+        from: toClickHouseDateTime(from),
+        to: toClickHouseDateTime(to),
+        judgeVersion,
+        agentId: agentId ?? "",
+      },
+      format: "JSONEachRow",
+    });
+    const [row] = await result.json<{ count: number | string }>();
+    return Number(row?.count ?? 0);
+  }
+
   // 窗口内且仍在游标之后 —— 只有这些还有机会被评。游标已越过的 trace 永不回头。
   async countEvaluable(
     from: Date,

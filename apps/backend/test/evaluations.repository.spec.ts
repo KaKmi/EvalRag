@@ -138,6 +138,43 @@ describeDb("EvaluationsRepository", () => {
     expect(await repo.findWatermark(workerName)).toBeUndefined();
   });
 
+  // 账本与游标推进**必须原子**：崩在两者之间会造出「游标过了但没记账」——那正是账本要
+  // 消灭的黑洞。事务语义 fake 复刻不出（同 018 缺口 14 的理由），只能真库测。
+  it("prunes ledger rows by trace time and leaves the rest", async () => {
+    const workerName = "prune-worker";
+    const now = new Date("2026-07-15T08:00:00.000Z");
+    await repo.getOrCreateWatermark(workerName, now);
+    await repo.tryAcquireLease(workerName, "owner-1", now, 20 * 60_000);
+    await repo.finishCycle(workerName, "owner-1", {
+      lastTs: now,
+      lastTraceId: "d".repeat(32),
+      evaluatedIncrement: 0,
+      now,
+      judgeVersion: "prune-v1",
+      ledger: [
+        {
+          targetTraceId: "d".repeat(32),
+          traceStartTime: new Date("2026-05-01T00:00:00.000Z"),
+          agentId: "",
+          outcome: "sampled_out",
+        },
+        {
+          targetTraceId: "e".repeat(32),
+          traceStartTime: new Date("2026-07-14T00:00:00.000Z"),
+          agentId: "",
+          outcome: "sampled_out",
+        },
+      ],
+    });
+    expect(await repo.pruneLedger(new Date("2026-06-15T00:00:00.000Z"))).toBe(1);
+    const counts = await repo.countLedgerByOutcome(
+      "prune-v1",
+      new Date("2026-01-01T00:00:00.000Z"),
+      new Date("2026-08-01T00:00:00.000Z"),
+    );
+    expect(counts).toEqual({ sampled_out: 1 });
+  });
+
   // 播种点是**一次性**的：onConflictDoNothing 保护重启（保住原游标），保护不了诞生。
   // 行建好后再改窗口不得有任何效果——否则游标会因为一个 env 变动而倒退/前跳。
   it("honours the seed window on birth and ignores it forever after", async () => {
@@ -190,7 +227,9 @@ describeDb("EvaluationsRepository", () => {
 
   // ── 账本（游标的审计轨迹）────────────────────────────────────────────────
 
-  async function ledgerRows(traceId?: string) {
+  // 按 judge_version 取——本文件多个用例都往同一张表写，读全表会让用例互相污染
+  // （初版正是如此：另一个用例的行让这里从 3 变成 6）。一个用例只断言自己造的行。
+  async function ledgerRows(judgeVersion: string, traceId?: string) {
     const { rows } = await pool.query<{
       target_trace_id: string;
       outcome: string;
@@ -199,9 +238,9 @@ describeDb("EvaluationsRepository", () => {
       agent_id: string;
     }>(
       traceId
-        ? "SELECT * FROM eval_candidate_ledger WHERE target_trace_id=$1"
-        : "SELECT * FROM eval_candidate_ledger ORDER BY trace_start_time",
-      traceId ? [traceId] : [],
+        ? "SELECT * FROM eval_candidate_ledger WHERE judge_version=$1 AND target_trace_id=$2"
+        : "SELECT * FROM eval_candidate_ledger WHERE judge_version=$1 ORDER BY trace_start_time",
+      traceId ? [judgeVersion, traceId] : [judgeVersion],
     );
     return rows;
   }
@@ -231,7 +270,7 @@ describeDb("EvaluationsRepository", () => {
         entry("3", "processed_failed", "JudgeUnavailable: down"),
       ],
     });
-    const rows = await ledgerRows();
+    const rows = await ledgerRows("online-v1");
     // 记全 6 种（这里覆盖 3 种代表）——账本是唯一不依赖 span 投递的证据，
     // 与 codecrush_eval_targets 的差集正是丢包的量化手段。只记跳过拿不到这个能力。
     expect(rows.map((r) => r.outcome).sort()).toEqual([
@@ -266,7 +305,7 @@ describeDb("EvaluationsRepository", () => {
     // 账本必须累加 seen_count 而非插重复行（复合主键 (trace, judgeVersion) 保证）。
     await cycle(at, "owner-1", "success");
     await cycle(later, "owner-2", "already_scored");
-    const rows = await ledgerRows(traceId);
+    const rows = await ledgerRows("online-v1", traceId);
     expect(rows).toHaveLength(1);
     expect(rows[0].seen_count).toBe(2);
     // outcome 取最新——最后一次的判定才是当前事实
@@ -305,7 +344,7 @@ describeDb("EvaluationsRepository", () => {
     expect(after?.lastTs).toEqual(before?.lastTs);
     expect(after?.lastTraceId).toBe(before?.lastTraceId);
     expect(after?.lastCursorMoveAt).toBeNull();
-    expect(await ledgerRows("9".repeat(32))).toHaveLength(0);
+    expect(await ledgerRows("online-v1", "9".repeat(32))).toHaveLength(0);
   });
 
   it("refuses ledger entries without a judgeVersion", async () => {

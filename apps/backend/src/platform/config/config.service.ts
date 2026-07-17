@@ -61,4 +61,8 @@ export class AppConfigService {
   get onlineEvalBackfillWindowHours(): number {
     return this.config.get("ONLINE_EVAL_BACKFILL_WINDOW_HOURS", { infer: true });
   }
+  /** 候选账本保留天数（按 trace 发生时间，默认 30 = 屏1 最长窗口）。 */
+  get onlineEvalLedgerRetentionDays(): number {
+    return this.config.get("ONLINE_EVAL_LEDGER_RETENTION_DAYS", { infer: true });
+  }
 }
