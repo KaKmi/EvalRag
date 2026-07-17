@@ -81,12 +81,16 @@ draft——设计已过 peer 对抗（0 P1 / 2 P2 / 4 P3，全部裁决并回写
 
 online-eval 的 `queue.schedule()` 跟随消费者（worker 角色注册，与 subscribe 同守卫）。已注册的 schedule 持久在 PG；pg-boss 的 cron 触发是 **DB 级单赢者**机制（`trySetCronTime` 对共享 version 表做条件 UPDATE，每 tick 全系统只有一个 boss 实例真正投递，外加 singletonKey 二重去重——`pg-boss@12.25.1/dist/timekeeper.js:104-119`，源码验证）→ worker 停机期间只要 API 的 boss 活着，cron job 照常入队（retryLimit:1、15min 过期），worker 回来即消化，良性积压；双实例**不会**双倍投递。
 
-### D5 本地 dev：tsx watch 第二进程
+### D5 本地 dev：第二个 nest watch + 独立 outDir
 
-`apps/backend` 加 `dev:worker: cross-env PROCESS_ROLE=worker tsx watch src/main.ts`（cross-env/tsx 均已在 devDeps）。**不用第二个 `nest start --watch`**——双 tsc watch 写同一 dist 在 Windows 上会 EBUSY/EPERM。tsx 直跑 src 保持 tracing 首 import 语义。api 侧 dev 脚本不动。
+`apps/backend` 加 `dev:worker: cross-env PROCESS_ROLE=worker nest start --watch --path tsconfig.worker.json`（零新依赖：`@nestjs/cli`/`cross-env` 均已在 devDeps）。`tsconfig.worker.json` 只改一件事——`outDir: ./dist-worker`，其余全继承 `tsconfig.json`；`dist-worker/` 进 `.gitignore`。api 侧 dev 脚本不动。
+
+**为什么必须独立 outDir**：`pnpm dev` 会并行跑两个 `nest start --watch`，而 `nest-cli.json` 设了 `deleteOutDir: true` —— 共用 `./dist` 会让两者**互删对方的编译产物**（外加 Windows 上并发写同一批 .js 的 EBUSY/EPERM）。各自 outDir 后两个 tsc watch 完全隔离，且 worker 可独立启动（不依赖 api 的 dev 任务在跑）。
+
+> 修订记录（QA 阶段，2026-07-17）：本段原方案是 **`tsx watch src/main.ts`**，理由写「不用第二个 `nest start --watch`——双 tsc watch 写同一 dist 会 EBUSY」。**该方案实测不可用**：tsx 基于 esbuild，**不支持 `emitDecoratorMetadata`**（本仓 `tsconfig.json` 开着它），不发射 `design:paramtypes` ⇒ NestJS DI 解析不出构造器参数，worker 进程启动即 `UndefinedDependencyException: Nest can't resolve dependencies of the ModelsService`。差分已证与角色无关：不带 `PROCESS_ROLE` 的裸 `tsx src/main.ts` 同样崩，而 `node dist/main.js`（tsc 产物）一切正常——故**生产形态从未受影响**，只有本地 dev 起不来。原方案对「共用 dist 会冲突」的判断是对的（且 `deleteOutDir: true` 让后果比预计更严重），错在选了个不发射装饰器元数据的编译器；解法是保留第二个 nest watch、给它独立 outDir。证据见 `.ship/tasks/eval-worker-split/qa/api-report.md` P1。
 
 **turbo 接线两处都要做**（peer P2：`turbo run dev` 按任务名调度，不会自动带上 `dev:worker`）：
-1. `turbo.json` 加 `"dev:worker": { "dependsOn": ["^build"], "cache": false, "persistent": true }`——`dependsOn` 必须有：`@codecrush/otel` 的 main 指向 dist，冷启动未 build 时 tsx 直跑 src 会 MODULE_NOT_FOUND（实现阶段修订，原文缺此字段）；
+1. `turbo.json` 加 `"dev:worker": { "dependsOn": ["^build"], "cache": false, "persistent": true }`——`dependsOn` 必须有：`@codecrush/otel` 的 main 指向 dist，冷启动未 build 时 worker 编译会 MODULE_NOT_FOUND（实现阶段修订，原文缺此字段）；
 2. root `package.json` 的 `dev` 脚本改为 `turbo run dev dev:worker`（对没有该脚本的包 turbo 自动跳过）。
 
 ### D6 部署形态

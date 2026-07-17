@@ -1,0 +1,18 @@
+{
+  // 019 D5：worker 的 dev watch 专用 tsconfig——只改 outDir，其余全继承。
+  //
+  // 为什么需要它：`pnpm dev` 会同时跑 `dev`（api）与 `dev:worker`（worker）两个
+  // `nest start --watch`。二者若共用 ./dist，nest-cli.json 的 `deleteOutDir: true`
+  // 会让它们互删对方的编译产物（外加 Windows 上并发写同一批 .js 的 EBUSY/EPERM）。
+  // 各自独立 outDir 后，两个 tsc watch 完全隔离。
+  //
+  // 为什么不用 tsx（原实现）：tsx 基于 esbuild，**不支持 emitDecoratorMetadata**，
+  // 不发射 `design:paramtypes` ⇒ NestJS DI 解析不出构造器参数，启动即
+  // `UndefinedDependencyException: Nest can't resolve dependencies of the ModelsService`
+  // （E-W2b QA 实测；与 PROCESS_ROLE 无关，裸 `tsx src/main.ts` 同样崩）。
+  // 生产走 `node dist/main.js`（tsc 产物）不受影响。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist-worker"
+  }
+}
