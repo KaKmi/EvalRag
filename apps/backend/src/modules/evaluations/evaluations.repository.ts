@@ -3,11 +3,21 @@ import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
+  evalCandidateLedger,
   evalWatermarks,
   onlineEvalSettings,
   type EvalWatermarkRow,
   type OnlineEvalSettingsRow,
 } from "./schema";
+
+/** 游标越过一条 trace 时记下的一笔账。对应 evalCandidateLedger 的一行。 */
+export interface LedgerEntry {
+  targetTraceId: string;
+  traceStartTime: Date;
+  agentId: string;
+  outcome: string;
+  lastError?: string | null;
+}
 
 export type OnlineEvalSettingsUpdate = Partial<Omit<OnlineEvalSettingsRow, "id" | "updatedAt">>;
 
@@ -24,6 +34,12 @@ export interface FinishEvaluationCycle {
    */
   consecutiveFailures?: number;
   lastError?: string | null;
+  /** 本轮游标是否真的前进了——决定要不要更新 lastCursorMoveAt。 */
+  cursorMoved?: boolean;
+  /** 本轮游标越过的每一条。与游标推进**同事务**写入，见 finishCycle 的注释。 */
+  ledger?: LedgerEntry[];
+  /** 账本行归属的 judgeVersion（同一 trace 换版本重评是另一笔账）。有 ledger 时必给。 */
+  judgeVersion?: string;
 }
 
 function utcDate(value: Date): string {
@@ -147,35 +163,81 @@ export class EvaluationsRepository {
     return rows.length === 1;
   }
 
+  /**
+   * 游标推进与账本记账**必须原子**：崩在两者之间会造出「游标过了但没记账」——那正是本设计
+   * 要消灭的黑洞，而半修只会造成「已加固」的错觉。故整段包事务。
+   *
+   * 账本记的是「worker 对这条 trace 做了什么」，**不是「游标越过了哪些」**——两者不等价：
+   * `cap_deferred`/`circuit_deferred` 之后的候选照样被处理（循环用 `continue` 不是 `break`，
+   * 只有游标的推进循环才 break），它们有终态 outcome 但游标这轮够不着。那些行照记，
+   * 下一轮重新扫到时 `seenCount` 累加。
+   */
   async finishCycle(
     workerName: string,
     owner: string,
     result: FinishEvaluationCycle,
   ): Promise<void> {
     const today = utcDate(result.now);
-    await this.db
-      .update(evalWatermarks)
-      .set({
-        lastTs: result.lastTs,
-        lastTraceId: result.lastTraceId,
-        dailyDate: today,
-        dailyCount: sql`CASE
+    await this.db.transaction(async (tx) => {
+      if (result.ledger?.length) {
+        if (!result.judgeVersion) throw new Error("ledger entries require a judgeVersion");
+        await tx
+          .insert(evalCandidateLedger)
+          .values(
+            result.ledger.map((entry) => ({
+              targetTraceId: entry.targetTraceId,
+              judgeVersion: result.judgeVersion!,
+              workerName,
+              outcome: entry.outcome,
+              traceStartTime: entry.traceStartTime,
+              agentId: entry.agentId,
+              seenCount: 1,
+              firstSeenAt: result.now,
+              lastSeenAt: result.now,
+              lastError: entry.lastError ?? null,
+            })),
+          )
+          .onConflictDoUpdate({
+            target: [evalCandidateLedger.targetTraceId, evalCandidateLedger.judgeVersion],
+            set: {
+              // 同一条被重复扫到（cap/circuit 前缀之后的候选会这样）：累加而非覆盖计数，
+              // 但 outcome/lastError 取最新——最后一次的判定才是当前事实。
+              seenCount: sql`${evalCandidateLedger.seenCount} + 1`,
+              outcome: sql`excluded.outcome`,
+              lastSeenAt: sql`excluded.last_seen_at`,
+              lastError: sql`excluded.last_error`,
+              workerName: sql`excluded.worker_name`,
+            },
+          });
+      }
+      await tx
+        .update(evalWatermarks)
+        .set({
+          lastTs: result.lastTs,
+          lastTraceId: result.lastTraceId,
+          dailyDate: today,
+          dailyCount: sql`CASE
           WHEN ${evalWatermarks.dailyDate} = ${today}
             THEN ${evalWatermarks.dailyCount} + ${result.evaluatedIncrement}
           ELSE ${result.evaluatedIncrement}
         END`,
-        leaseOwner: null,
-        leaseUntil: null,
-        lastRunAt: result.now,
-        lastSuccessAt: result.now,
-        // 没动过裁判就不碰这两列——见 FinishEvaluationCycle 的注释。
-        ...(result.consecutiveFailures === undefined
-          ? {}
-          : { consecutiveFailures: result.consecutiveFailures }),
-        ...(result.lastError === undefined ? {} : { lastError: result.lastError }),
-        updatedAt: result.now,
-      })
-      .where(and(eq(evalWatermarks.workerName, workerName), eq(evalWatermarks.leaseOwner, owner)));
+          leaseOwner: null,
+          leaseUntil: null,
+          lastRunAt: result.now,
+          lastSuccessAt: result.now,
+          // 「跑过」与「走过」是两件事：空转一轮也更新 lastRunAt，但游标可能几天没动。
+          ...(result.cursorMoved ? { lastCursorMoveAt: result.now } : {}),
+          // 没动过裁判就不碰这两列——见 FinishEvaluationCycle 的注释。
+          ...(result.consecutiveFailures === undefined
+            ? {}
+            : { consecutiveFailures: result.consecutiveFailures }),
+          ...(result.lastError === undefined ? {} : { lastError: result.lastError }),
+          updatedAt: result.now,
+        })
+        .where(
+          and(eq(evalWatermarks.workerName, workerName), eq(evalWatermarks.leaseOwner, owner)),
+        );
+    });
   }
 
   async releaseLease(workerName: string, owner: string, now = new Date()): Promise<void> {

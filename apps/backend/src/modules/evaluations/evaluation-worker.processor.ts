@@ -41,8 +41,10 @@ export type CandidateOutcomeKind =
 export interface CandidateOutcome {
   traceId: string;
   startTime: Date;
+  agentId: string;
   kind: CandidateOutcomeKind;
   advancesCursor: boolean;
+  error?: string | null;
 }
 
 export interface CycleResult {
@@ -58,8 +60,16 @@ function outcome(
   candidate: EvaluationCandidate,
   kind: CandidateOutcomeKind,
   advancesCursor = true,
+  error: string | null = null,
 ): CandidateOutcome {
-  return { traceId: candidate.traceId, startTime: candidate.startTime, kind, advancesCursor };
+  return {
+    traceId: candidate.traceId,
+    startTime: candidate.startTime,
+    agentId: candidate.agentId,
+    kind,
+    advancesCursor,
+    error,
+  };
 }
 
 @Injectable()
@@ -202,7 +212,7 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
           });
           consecutiveJudgeFailures += 1;
           lastError = normalized.message;
-          outcomes.push(outcome(candidate, "processed_failed"));
+          outcomes.push(outcome(candidate, "processed_failed", true, normalized.message));
         }
       }
 
@@ -216,6 +226,23 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
         ...cursor,
         evaluatedIncrement: evaluatedCount,
         now,
+        // 「跑过」≠「走过」：空转一轮也更新 lastRunAt，游标却可能几天没动。
+        cursorMoved:
+          cursor.lastTraceId !== watermark.lastTraceId ||
+          cursor.lastTs.getTime() !== watermark.lastTs.getTime(),
+        // 账本记「worker 对这条 trace 做了什么」——即全部**终态** outcome（6 种推进的），
+        // 与游标够不够得着无关（cap/circuit 之后的候选照样被处理，见 finishCycle 注释）。
+        // 两个 deferred 不记：它们下一轮会重来，记了就是假账。
+        judgeVersion: settings.judgeVersion,
+        ledger: outcomes
+          .filter((item) => item.advancesCursor)
+          .map((item) => ({
+            targetTraceId: item.traceId,
+            traceStartTime: item.startTime,
+            agentId: item.agentId,
+            outcome: item.kind,
+            lastError: item.error,
+          })),
         // 没动过裁判就不上报裁判健康状态（传 undefined ⇒ finishCycle 不碰那两列），
         // 否则空轮会把上一次真实故障擦成 0/null。
         ...(judgeAttempted ? { consecutiveFailures: consecutiveJudgeFailures, lastError } : {}),

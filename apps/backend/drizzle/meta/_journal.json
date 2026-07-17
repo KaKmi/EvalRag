@@ -141,6 +141,13 @@
       "when": 1784173750228,
       "tag": "0019_outgoing_wendell_rand",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1784272083900,
+      "tag": "0020_secret_nightmare",
+      "breakpoints": true
     }
   ]
 }

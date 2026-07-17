@@ -187,4 +187,158 @@ describeDb("EvaluationsRepository", () => {
     // 否则 0 行更新会让上面两条断言因为「什么都没发生」而假绿。
     expect(saved?.lastSuccessAt).toEqual(later);
   });
+
+  // ── 账本（游标的审计轨迹）────────────────────────────────────────────────
+
+  async function ledgerRows(traceId?: string) {
+    const { rows } = await pool.query<{
+      target_trace_id: string;
+      outcome: string;
+      seen_count: number;
+      last_error: string | null;
+      agent_id: string;
+    }>(
+      traceId
+        ? "SELECT * FROM eval_candidate_ledger WHERE target_trace_id=$1"
+        : "SELECT * FROM eval_candidate_ledger ORDER BY trace_start_time",
+      traceId ? [traceId] : [],
+    );
+    return rows;
+  }
+
+  it("records every terminal outcome the worker produced, not just the skips", async () => {
+    const workerName = "ledger-worker";
+    const at = new Date("2026-07-15T06:00:00.000Z");
+    await repo.getOrCreateWatermark(workerName, at);
+    expect(await repo.tryAcquireLease(workerName, "owner-1", at, 20 * 60_000)).toBe(true);
+    const entry = (id: string, outcome: string, lastError: string | null = null) => ({
+      targetTraceId: id.repeat(32).slice(0, 32),
+      traceStartTime: at,
+      agentId: "agent-1",
+      outcome,
+      lastError,
+    });
+    await repo.finishCycle(workerName, "owner-1", {
+      lastTs: at,
+      lastTraceId: "1".repeat(32),
+      evaluatedIncrement: 1,
+      now: at,
+      cursorMoved: true,
+      judgeVersion: "online-v1",
+      ledger: [
+        entry("1", "success"),
+        entry("2", "sampled_out"),
+        entry("3", "processed_failed", "JudgeUnavailable: down"),
+      ],
+    });
+    const rows = await ledgerRows();
+    // 记全 6 种（这里覆盖 3 种代表）——账本是唯一不依赖 span 投递的证据，
+    // 与 codecrush_eval_targets 的差集正是丢包的量化手段。只记跳过拿不到这个能力。
+    expect(rows.map((r) => r.outcome).sort()).toEqual([
+      "processed_failed",
+      "sampled_out",
+      "success",
+    ]);
+    expect(rows.find((r) => r.outcome === "processed_failed")?.last_error).toBe(
+      "JudgeUnavailable: down",
+    );
+    expect((await repo.findWatermark(workerName))?.lastCursorMoveAt).toEqual(at);
+  });
+
+  it("counts repeat sightings instead of duplicating the row", async () => {
+    const workerName = "ledger-repeat-worker";
+    const at = new Date("2026-07-15T07:00:00.000Z");
+    const later = new Date("2026-07-15T07:15:00.000Z");
+    const traceId = "7".repeat(32);
+    await repo.getOrCreateWatermark(workerName, at);
+    const cycle = async (now: Date, owner: string, outcome: string) => {
+      expect(await repo.tryAcquireLease(workerName, owner, now, 20 * 60_000)).toBe(true);
+      await repo.finishCycle(workerName, owner, {
+        lastTs: at,
+        lastTraceId: traceId,
+        evaluatedIncrement: 0,
+        now,
+        judgeVersion: "online-v1",
+        ledger: [{ targetTraceId: traceId, traceStartTime: at, agentId: "a", outcome }],
+      });
+    };
+    // cap/circuit 前缀之后的候选会被重复扫到——那是既有的 continue 语义，不是 bug。
+    // 账本必须累加 seen_count 而非插重复行（复合主键 (trace, judgeVersion) 保证）。
+    await cycle(at, "owner-1", "success");
+    await cycle(later, "owner-2", "already_scored");
+    const rows = await ledgerRows(traceId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].seen_count).toBe(2);
+    // outcome 取最新——最后一次的判定才是当前事实
+    expect(rows[0].outcome).toBe("already_scored");
+  });
+
+  it("keeps ledger and cursor atomic: a failed write advances neither", async () => {
+    const workerName = "ledger-atomic-worker";
+    const at = new Date("2026-07-15T08:00:00.000Z");
+    await repo.getOrCreateWatermark(workerName, at);
+    expect(await repo.tryAcquireLease(workerName, "owner-1", at, 20 * 60_000)).toBe(true);
+    const before = await repo.findWatermark(workerName);
+
+    // agent_id 超长 → 账本 INSERT 在事务内炸 → 游标推进必须一起回滚。
+    // 崩在两者之间会造出「游标过了但没记账」，正是本设计要消灭的黑洞。
+    await expect(
+      repo.finishCycle(workerName, "owner-1", {
+        lastTs: new Date("2026-07-15T09:00:00.000Z"),
+        lastTraceId: "9".repeat(32),
+        evaluatedIncrement: 1,
+        now: at,
+        cursorMoved: true,
+        judgeVersion: "online-v1",
+        ledger: [
+          {
+            targetTraceId: "9".repeat(32),
+            traceStartTime: at,
+            agentId: "x".repeat(200),
+            outcome: "success",
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    const after = await repo.findWatermark(workerName);
+    expect(after?.lastTs).toEqual(before?.lastTs);
+    expect(after?.lastTraceId).toBe(before?.lastTraceId);
+    expect(after?.lastCursorMoveAt).toBeNull();
+    expect(await ledgerRows("9".repeat(32))).toHaveLength(0);
+  });
+
+  it("refuses ledger entries without a judgeVersion", async () => {
+    const workerName = "ledger-guard-worker";
+    const at = new Date("2026-07-15T10:00:00.000Z");
+    await repo.getOrCreateWatermark(workerName, at);
+    await repo.tryAcquireLease(workerName, "owner-1", at, 20 * 60_000);
+    await expect(
+      repo.finishCycle(workerName, "owner-1", {
+        lastTs: at,
+        lastTraceId: "",
+        evaluatedIncrement: 0,
+        now: at,
+        ledger: [{ targetTraceId: "b".repeat(32), traceStartTime: at, agentId: "a", outcome: "x" }],
+      }),
+    ).rejects.toThrow(/judgeVersion/);
+  });
+
+  it("leaves lastCursorMoveAt alone when the cursor did not move", async () => {
+    const workerName = "ledger-idle-worker";
+    const at = new Date("2026-07-15T11:00:00.000Z");
+    await repo.getOrCreateWatermark(workerName, at);
+    await repo.tryAcquireLease(workerName, "owner-1", at, 20 * 60_000);
+    await repo.finishCycle(workerName, "owner-1", {
+      lastTs: at,
+      lastTraceId: "",
+      evaluatedIncrement: 0,
+      now: at,
+      cursorMoved: false,
+    });
+    const saved = await repo.findWatermark(workerName);
+    // 「跑过」与「走过」必须分开：空转一轮 lastRunAt 走、lastCursorMoveAt 不走
+    expect(saved?.lastRunAt).toEqual(at);
+    expect(saved?.lastCursorMoveAt).toBeNull();
+  });
 });
