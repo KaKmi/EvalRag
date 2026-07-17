@@ -5,7 +5,10 @@ import { ClickHouseEvaluationsRepository } from "../src/modules/evaluations/clic
 const enabled = process.env.RUN_CLICKHOUSE_TESTS === "1";
 const describeClickHouse = enabled ? describe : describe.skip;
 const marker = "ew1-task7-pagination";
-const targetIds = Array.from({ length: 45 }, (_, index) => `c0de${index.toString(16).padStart(28, "0")}`);
+const targetIds = Array.from(
+  { length: 45 },
+  (_, index) => `c0de${index.toString(16).padStart(28, "0")}`,
+);
 const unscoredTraceId = "cafe" + "0".repeat(28);
 
 function rawSpan(
@@ -56,12 +59,18 @@ describeClickHouse("Trace quality pagination", () => {
       }),
     );
     roots.push(
-      rawSpan(unscoredTraceId, unscoredTraceId.slice(0, 16), "2026-07-15 01:00:00.000000000", "rag.pipeline", {
-        "codecrush.span.kind": "chain",
-        "gen_ai.agent.id": "ew1-task7-agent",
-        "gen_ai.agent.name": "E-W1 Task 7 Agent",
-        "codecrush.io.input": "unscored question",
-      }),
+      rawSpan(
+        unscoredTraceId,
+        unscoredTraceId.slice(0, 16),
+        "2026-07-15 01:00:00.000000000",
+        "rag.pipeline",
+        {
+          "codecrush.span.kind": "chain",
+          "gen_ai.agent.id": "ew1-task7-agent",
+          "gen_ai.agent.name": "E-W1 Task 7 Agent",
+          "codecrush.io.input": "unscored question",
+        },
+      ),
     );
     const evaluationSpans = targetIds.flatMap((targetTraceId, index) => {
       const score = index % 5;
@@ -85,16 +94,22 @@ describeClickHouse("Trace quality pagination", () => {
       ];
       if (index === 0) {
         base.push(
-          rawSpan("e0de" + "0".repeat(28), "e0de" + "0".repeat(12), "2026-07-15 02:00:00.000000000", "rag.eval", {
-            "rag.eval.target_trace_id": targetTraceId,
-            "rag.eval.version": "online-v2",
-            "rag.eval.status": "success",
-            "rag.eval.faithfulness": "90",
-            "rag.eval.answer_relevancy": "90",
-            "rag.eval.context_precision": "90",
-            "gen_ai.agent.id": "ew1-task7-agent",
-            "gen_ai.request.model": "generation-1",
-          }),
+          rawSpan(
+            "e0de" + "0".repeat(28),
+            "e0de" + "0".repeat(12),
+            "2026-07-15 02:00:00.000000000",
+            "rag.eval",
+            {
+              "rag.eval.target_trace_id": targetTraceId,
+              "rag.eval.version": "online-v2",
+              "rag.eval.status": "success",
+              "rag.eval.faithfulness": "-1",
+              "rag.eval.answer_relevancy": "90",
+              "rag.eval.context_precision": "90",
+              "gen_ai.agent.id": "ew1-task7-agent",
+              "gen_ai.request.model": "generation-1",
+            },
+          ),
         );
       }
       return base;
@@ -109,7 +124,8 @@ describeClickHouse("Trace quality pagination", () => {
 
   afterAll(async () => {
     await client.command({
-      query: "ALTER TABLE otel_traces DELETE WHERE SpanAttributes['codecrush.test.run'] = {marker:String}",
+      query:
+        "ALTER TABLE otel_traces DELETE WHERE SpanAttributes['codecrush.test.run'] = {marker:String}",
       query_params: { marker },
       clickhouse_settings: { mutations_sync: 2 },
     });
@@ -120,7 +136,7 @@ describeClickHouse("Trace quality pagination", () => {
     await client.close();
   });
 
-  it("keeps 45 tied rows stable and picks the latest judge version", async () => {
+  it("keeps scored rows stable and excludes null faithfulness from metric filtering", async () => {
     const query = {
       pageSize: 20,
       agentId: "ew1-task7-agent",
@@ -131,18 +147,29 @@ describeClickHouse("Trace quality pagination", () => {
       [1, 2, 3].map((page) => repository.listTraces({ ...query, page })),
     );
     const rows = pages.flatMap((page) => page.items);
-    expect(pages.map((page) => page.items.length)).toEqual([20, 20, 5]);
-    expect(pages.every((page) => page.total === 45)).toBe(true);
-    expect(new Set(rows.map((row) => row.traceId)).size).toBe(45);
+    expect(pages.map((page) => page.items.length)).toEqual([20, 20, 4]);
+    expect(pages.every((page) => page.total === 44)).toBe(true);
+    expect(new Set(rows.map((row) => row.traceId)).size).toBe(44);
     expect(rows.some((row) => row.traceId === unscoredTraceId)).toBe(false);
-    expect(rows.find((row) => row.traceId === targetIds[0])?.evaluation).toMatchObject({
-      status: "scored",
-      judgeVersion: "online-v2",
-      scores: { faithfulness: 90 },
-    });
+    expect(rows.some((row) => row.traceId === targetIds[0])).toBe(false);
     await expect(evaluations.getLatestSuccess(targetIds[0])).resolves.toMatchObject({
       judgeVersion: "online-v2",
-      faithfulness: 90,
+      faithfulness: null,
+    });
+  });
+
+  it("maps the v2 faithfulness sentinel to null without hiding other scores", async () => {
+    const page = await repository.listTraces({
+      page: 1,
+      pageSize: 100,
+      agentId: "ew1-task7-agent",
+    });
+    expect(page.items.find((row) => row.traceId === targetIds[0])?.evaluation).toMatchObject({
+      status: "scored",
+      judgeVersion: "online-v2",
+      scores: { faithfulness: null, answerRelevancy: 90, contextPrecision: 90 },
+      minMetric: "answerRelevancy",
+      minScore: 90,
     });
   });
 });

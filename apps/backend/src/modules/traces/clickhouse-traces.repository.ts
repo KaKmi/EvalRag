@@ -41,7 +41,7 @@ const EVAL_CTES = `
   eval_by_version AS (
     SELECT target_trace_id, judge_version,
       argMaxMerge(evaluated_at_state) AS evaluated_at,
-      argMaxMerge(faithfulness_state) AS faithfulness,
+      nullIf(argMaxMerge(faithfulness_state), -1) AS faithfulness,
       argMaxMerge(answer_relevancy_state) AS answer_relevancy,
       argMaxMerge(context_precision_state) AS context_precision
     FROM codecrush_eval_targets
@@ -139,7 +139,8 @@ function buildTraceMeta(spans: TraceSpan[]): TraceDetailMeta {
       ? "fallback"
       : "success";
   const reply = spans.find(
-    (s) => s.kind === "llm" && (s.attributes as Record<string, unknown>)["rag.node.name"] === "reply",
+    (s) =>
+      s.kind === "llm" && (s.attributes as Record<string, unknown>)["rag.node.name"] === "reply",
   );
   const lastLlm = [...spans].reverse().find((s) => s.kind === "llm");
   const rootGenModel = a[GEN_AI.REQUEST_MODEL];
@@ -156,9 +157,7 @@ function buildTraceMeta(spans: TraceSpan[]): TraceDetailMeta {
     }
     return spans.reduce(
       (sum, s) =>
-        s.kind === "llm"
-          ? sum + Number((s.attributes as Record<string, unknown>)[key] ?? 0)
-          : sum,
+        s.kind === "llm" ? sum + Number((s.attributes as Record<string, unknown>)[key] ?? 0) : sum,
       0,
     );
   };
@@ -228,9 +227,7 @@ function mapTraceRow(r: TracesViewRow): TraceListRow {
   if (chTruthy(r.refusal)) signals.push("refusal");
   if (chTruthy(r.timeout)) signals.push("timeout");
   const evaluation =
-    r.evaluated_at && r.judge_version
-      ? evaluationSummary(r)
-      : ({ status: "unscored" } as const);
+    r.evaluated_at && r.judge_version ? evaluationSummary(r) : ({ status: "unscored" } as const);
   return {
     traceId: r.trace_id,
     sessionId: r.session_id ?? "",
@@ -250,15 +247,20 @@ function mapTraceRow(r: TracesViewRow): TraceListRow {
 }
 
 function evaluationSummary(r: TracesViewRow): NonNullable<TraceListRow["evaluation"]> {
+  const faithfulness = nullableEvaluationScore(r.faithfulness);
   const scores = {
-    faithfulness: Math.round(Number(r.faithfulness)),
+    faithfulness,
     answerRelevancy: Math.round(Number(r.answer_relevancy)),
     contextPrecision: Math.round(Number(r.context_precision)),
   };
-  const entries = Object.entries(scores) as Array<[
-    "faithfulness" | "answerRelevancy" | "contextPrecision",
-    number,
-  ]>;
+  const entries = (
+    Object.entries(scores) as Array<
+      ["faithfulness" | "answerRelevancy" | "contextPrecision", number | null]
+    >
+  ).filter(
+    (entry): entry is ["faithfulness" | "answerRelevancy" | "contextPrecision", number] =>
+      entry[1] !== null,
+  );
   const [minMetric, minScore] = entries.reduce((lowest, current) =>
     current[1] < lowest[1] ? current : lowest,
   );
@@ -270,6 +272,12 @@ function evaluationSummary(r: TracesViewRow): NonNullable<TraceListRow["evaluati
     judgeVersion: r.judge_version!,
     evaluatedAt: toIsoUtc(r.evaluated_at!),
   };
+}
+
+function nullableEvaluationScore(value: number | string | null): number | null {
+  if (value === null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : null;
 }
 
 function mapSessionRow(r: SessionsViewRow): SessionListRow {
@@ -347,25 +355,27 @@ export class ClickHouseTracesRepository {
       format: "JSONEachRow",
     });
     const rows = await result.json<ClickHouseTraceRow>();
-    const spans = rows.map(
-      (row): TraceSpan => ({
-        traceId: row.trace_id,
-        spanId: row.span_id,
-        parentSpanId: row.parent_span_id || null,
-        name: row.name,
-        kind: row.kind,
-        startTime: toIsoUtc(row.start_time),
-        durationMs: Number(row.duration_ms),
-        statusCode: row.status_code,
-        statusMessage: row.status_message || null,
-        attributes: row.attributes ?? {},
-      }),
-    );
+    const spans = rows.map((row): TraceSpan => ({
+      traceId: row.trace_id,
+      spanId: row.span_id,
+      parentSpanId: row.parent_span_id || null,
+      name: row.name,
+      kind: row.kind,
+      startTime: toIsoUtc(row.start_time),
+      durationMs: Number(row.duration_ms),
+      statusCode: row.status_code,
+      statusMessage: row.status_message || null,
+      attributes: row.attributes ?? {},
+    }));
     return { traceId, meta: buildTraceMeta(spans), spans };
   }
 
   private async runView<T>(query: string, params: Record<string, unknown>): Promise<T[]> {
-    const result = await this.clickhouse.query({ query, query_params: params, format: "JSONEachRow" });
+    const result = await this.clickhouse.query({
+      query,
+      query_params: params,
+      format: "JSONEachRow",
+    });
     return await result.json<T>();
   }
 
@@ -389,7 +399,9 @@ export class ClickHouseTracesRepository {
       } else if (q.quick === "低分召回") conds.push("low_recall");
     }
     if (q.stage) {
-      conds.push(`trace_id IN (SELECT trace_id FROM codecrush_trace_spans WHERE ${STAGE_WHERE[q.stage]})`);
+      conds.push(
+        `trace_id IN (SELECT trace_id FROM codecrush_trace_spans WHERE ${STAGE_WHERE[q.stage]})`,
+      );
     }
     if (q.model) {
       conds.push(`trace_id IN (
@@ -400,7 +412,8 @@ export class ClickHouseTracesRepository {
       params.model = q.model;
     }
     if (q.signal) {
-      const root = "trace_id IN (SELECT trace_id FROM codecrush_trace_spans WHERE kind = 'chain' AND ";
+      const root =
+        "trace_id IN (SELECT trace_id FROM codecrush_trace_spans WHERE kind = 'chain' AND ";
       const signalWhere: Record<NonNullable<TraceListQuery["signal"]>, string> = {
         repair: `${root}toUInt64OrZero(attributes['rag.repair.attempt_count']) > 0)`,
         keyword_degraded: `${root}toUInt64OrZero(attributes['rag.degraded.keyword_recall.count']) > 0)`,
@@ -431,16 +444,23 @@ export class ClickHouseTracesRepository {
       params.to = q.to;
     }
     const metricColumn = q.evalMetric
-      ? ({ faithfulness: "faithfulness", relevancy: "answer_relevancy", precision: "context_precision" } as const)[q.evalMetric]
+      ? (
+          {
+            faithfulness: "faithfulness",
+            relevancy: "answer_relevancy",
+            precision: "context_precision",
+          } as const
+        )[q.evalMetric]
       : undefined;
     if (metricColumn) conds.push("notEmpty(ifNull(judge_version, ''))");
+    if (metricColumn === "faithfulness") conds.push("faithfulness IS NOT NULL");
     if (metricColumn && q.evalMax !== undefined) {
       conds.push(`${metricColumn} <= {evalMax:Float64}`);
       params.evalMax = q.evalMax;
     }
     if (q.evalVerdict === "low") {
       if (!metricColumn) conds.push("notEmpty(ifNull(judge_version, ''))");
-      conds.push("least(faithfulness, answer_relevancy, context_precision) < 70");
+      conds.push("least(ifNull(faithfulness, 101), answer_relevancy, context_precision) < 70");
     }
     return { where: `WHERE ${conds.join(" AND ")}`, params };
   }
@@ -455,7 +475,13 @@ export class ClickHouseTracesRepository {
     const { where, params } = this.buildTraceWhere(q);
     const offset = (q.page - 1) * q.pageSize;
     const metricColumn = q.evalMetric
-      ? ({ faithfulness: "faithfulness", relevancy: "answer_relevancy", precision: "context_precision" } as const)[q.evalMetric]
+      ? (
+          {
+            faithfulness: "faithfulness",
+            relevancy: "answer_relevancy",
+            precision: "context_precision",
+          } as const
+        )[q.evalMetric]
       : undefined;
     const order = metricColumn
       ? `${metricColumn} ${q.evalSort === "desc" ? "DESC" : "ASC"} NULLS LAST, start_time DESC, trace_id DESC`
@@ -504,7 +530,13 @@ export class ClickHouseTracesRepository {
    * 冷库/未落库返回空 rounds（页面占位）。
    */
   async findSessionById(sessionId: string): Promise<SessionDetailResponse> {
-    const empty: SessionDetailResponse = { sessionId, userId: null, agentId: "", agentName: "", rounds: [] };
+    const empty: SessionDetailResponse = {
+      sessionId,
+      userId: null,
+      agentId: "",
+      agentName: "",
+      rounds: [],
+    };
     if (!(await this.ensureTraceViews())) return empty;
     const rows = await this.runView<TracesViewRow>(
       `SELECT * FROM ${TRACES_VIEW_NAME} WHERE session_id = {sid:String} AND preview = 0 ORDER BY start_time ASC`,
