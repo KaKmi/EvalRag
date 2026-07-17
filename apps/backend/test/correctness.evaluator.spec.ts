@@ -25,7 +25,9 @@ function models(content: string, usage?: { inputTokens: number; outputTokens: nu
 
 /** 判定按 index 指回 gold 要点（模型不回显原文——见 evaluator docstring）。 */
 const judged = (...rows: Array<[number, "hit" | "missing" | "contradicted"]>) =>
-  JSON.stringify({ points: rows.map(([index, status]) => ({ index, status, reason: `r${index}` })) });
+  JSON.stringify({
+    points: rows.map(([index, status]) => ({ index, status, reason: `r${index}` })),
+  });
 
 /** 全部 hit 的合规响应。 */
 const allHit = (n: number) =>
@@ -62,7 +64,10 @@ describe("CorrectnessEvaluator · 计分", () => {
 
   it("透传 usage（决策 G）", async () => {
     const m = models(allHit(1), { inputTokens: 12, outputTokens: 4 });
-    const result = await new CorrectnessEvaluator(m).score({ ...base, goldPoints: ["a"] }, "m-judge");
+    const result = await new CorrectnessEvaluator(m).score(
+      { ...base, goldPoints: ["a"] },
+      "m-judge",
+    );
     expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 4 });
   });
 
@@ -71,14 +76,43 @@ describe("CorrectnessEvaluator · 计分", () => {
     await new CorrectnessEvaluator(m).score({ ...base, goldPoints: ["a"] }, "m-judge");
     const opts = (m.chat as jest.Mock).mock.calls[0][2];
     expect(opts.temperature).toBe(0);
-    expect(opts.structuredOutput).toBeDefined();
+    expect(opts.structuredOutput).toMatchObject({
+      name: "evaluation_correctness_v2",
+      schema: {
+        properties: {
+          points: {
+            items: { properties: { reason: { maxLength: 500 } } },
+          },
+        },
+      },
+    });
   });
 
   it("gold 要点 >20 条仍可评（分母随 gold 数动态，无固定上限）", async () => {
     const gold = Array.from({ length: 21 }, (_, i) => `p${i}`);
     const m = models(allHit(21));
-    const result = await new CorrectnessEvaluator(m).score({ ...base, goldPoints: gold }, "m-judge");
+    const result = await new CorrectnessEvaluator(m).score(
+      { ...base, goldPoints: gold },
+      "m-judge",
+    );
     expect(result.score).toBe(100);
+  });
+
+  it("reason 接受 500 字，501 字重试后拒绝", async () => {
+    const accepted = models(
+      JSON.stringify({ points: [{ index: 0, status: "hit", reason: "r".repeat(500) }] }),
+    );
+    await expect(
+      new CorrectnessEvaluator(accepted).score({ ...base, goldPoints: ["a"] }, "m-judge"),
+    ).resolves.toMatchObject({ score: 100 });
+
+    const rejected = models(
+      JSON.stringify({ points: [{ index: 0, status: "hit", reason: "r".repeat(501) }] }),
+    );
+    await expect(
+      new CorrectnessEvaluator(rejected).score({ ...base, goldPoints: ["a"] }, "m-judge"),
+    ).rejects.toThrow(/correctness/);
+    expect(rejected.chat).toHaveBeenCalledTimes(2);
   });
 });
 

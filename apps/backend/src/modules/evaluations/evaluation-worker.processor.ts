@@ -24,7 +24,12 @@ import { EvaluationJudgeService } from "./evaluation-judge.service";
 import { EvaluationSpanEmitter } from "./evaluation-span.emitter";
 import { normalizeEvaluationError } from "./evaluation-worker.errors";
 import { EvaluationsRepository } from "./evaluations.repository";
-import { classifyRisk, effectiveNormalRate, stableSample } from "./sampling";
+import {
+  classifyRisk,
+  effectiveNormalRate,
+  isFaithfulnessEligible,
+  stableSample,
+} from "./sampling";
 
 const WorkerPayloadSchema = z.strictObject({ workerName: z.string().min(1).max(100) });
 
@@ -185,10 +190,16 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
         }
         judgeAttempted = true;
         try {
-          const result = await this.judge.score(assembled.input, {
-            judgeModelId: settings.judgeModelId!,
-            embeddingModelId: settings.embeddingModelId!,
-          });
+          const result = await this.judge.score(
+            assembled.input,
+            {
+              judgeModelId: settings.judgeModelId!,
+              embeddingModelId: settings.embeddingModelId!,
+            },
+            {
+              skipFaithfulness: !isFaithfulnessEligible(candidate),
+            },
+          );
           await this.emitter.emitSuccess({
             candidate,
             input: assembled.input,
@@ -278,10 +289,14 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
   private async pruneLedger(now: Date): Promise<void> {
     const days = this.config.onlineEvalLedgerRetentionDays;
     try {
-      const removed = await this.repo.pruneLedger(new Date(now.getTime() - days * 24 * 60 * 60 * 1000));
+      const removed = await this.repo.pruneLedger(
+        new Date(now.getTime() - days * 24 * 60 * 60 * 1000),
+      );
       if (removed > 0) this.logger.log(`账本清理：删除 ${removed} 行（早于 ${days} 天）`);
     } catch (error) {
-      this.logger.warn(`账本清理失败（不影响本轮评测）：${normalizeEvaluationError(error).message}`);
+      this.logger.warn(
+        `账本清理失败（不影响本轮评测）：${normalizeEvaluationError(error).message}`,
+      );
     }
   }
 

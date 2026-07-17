@@ -1,5 +1,8 @@
 import { EvaluationJudgeService } from "../src/modules/evaluations/evaluation-judge.service";
-import type { EvaluationInput, EvaluationModelIds } from "../src/modules/evaluations/evaluation.types";
+import type {
+  EvaluationInput,
+  EvaluationModelIds,
+} from "../src/modules/evaluations/evaluation.types";
 
 /**
  * 018 决策 D：`scoreOffline` 是**单指标隔离**语义（原型 §6：单指标失败记「未评」，
@@ -15,12 +18,15 @@ const input: EvaluationInput = {
 };
 const modelIds: EvaluationModelIds = { judgeModelId: "m-judge", embeddingModelId: "m-embed" };
 
-const ok = (score: number, evidence: string[] = ["ok"]) => ({ score: async () => ({ score, evidence } as never) });
+const ok = (score: number, evidence: string[] = ["ok"]) => ({
+  score: async () => ({ score, evidence }) as never,
+});
 const boom = () => ({
   score: async () => {
     throw new Error("judge down");
   },
 });
+const unscored = () => ({ score: async () => null });
 
 describe("EvaluationJudgeService.scoreOffline（离线：单指标隔离）", () => {
   it("单指标失败 → 该指标 null，其余照常出分（绝不写 0）", async () => {
@@ -83,9 +89,27 @@ describe("EvaluationJudgeService.scoreOffline（离线：单指标隔离）", ()
     expect(out.evidence.correctness).toEqual(["正确理由"]);
   });
 
+  it("faithfulness fulfilled-null → 仅该指标未评，其余分数与 evidence 保留", async () => {
+    const judge = new EvaluationJudgeService(
+      unscored() as never,
+      ok(88, ["相关"]) as never,
+      ok(78, ["精确"]) as never,
+      ok(82, ["正确"]) as never,
+    );
+    const out = await judge.scoreOffline(input, modelIds, ["要点"]);
+    expect(out).toMatchObject({
+      faithfulness: null,
+      answerRelevancy: 88,
+      contextPrecision: 78,
+      correctness: 82,
+    });
+    expect(out.evidence).not.toHaveProperty("faithfulness");
+    expect(out.evidence.answerRelevancy).toEqual(["相关"]);
+  });
+
   it("usage 累加各裁判已上报的部分；缺失计 0（决策 G 的尽力而为口径）", async () => {
     const withUsage = (score: number, inputTokens: number, outputTokens: number) => ({
-      score: async () => ({ score, evidence: [], usage: { inputTokens, outputTokens } } as never),
+      score: async () => ({ score, evidence: [], usage: { inputTokens, outputTokens } }) as never,
     });
     const judge = new EvaluationJudgeService(
       withUsage(90, 10, 5) as never,

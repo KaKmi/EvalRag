@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { EvaluationCandidate } from "./clickhouse-evaluations.repository";
 
 export interface RiskCandidate {
   status: "success" | "fallback" | "failed";
@@ -13,6 +14,10 @@ export function classifyRisk(candidate: RiskCandidate): boolean {
     candidate.noCitations ||
     (candidate.confidence !== null && candidate.confidence < 0.6)
   );
+}
+
+export function isFaithfulnessEligible(candidate: EvaluationCandidate): boolean {
+  return candidate.status === "success" && !candidate.noCitations;
 }
 
 export function stableSample(traceId: string, judgeVersion: string, rate: number): boolean {

@@ -1,7 +1,7 @@
 import { AnswerRelevancyEvaluator } from "../src/modules/evaluations/answer-relevancy.evaluator";
 import { ContextPrecisionEvaluator } from "../src/modules/evaluations/context-precision.evaluator";
 import { EvaluationJudgeService } from "../src/modules/evaluations/evaluation-judge.service";
-import { withJudgeRetry } from "../src/modules/evaluations/evaluation-judge.utils";
+import { limitedEvidence, withJudgeRetry } from "../src/modules/evaluations/evaluation-judge.utils";
 import { FaithfulnessEvaluator } from "../src/modules/evaluations/faithfulness.evaluator";
 import type { ModelsService } from "../src/modules/models/models.service";
 
@@ -76,6 +76,7 @@ describe("EvaluationJudgeService", () => {
     );
 
     const faithfulnessSchema = models.chat.mock.calls[0][2].structuredOutput.schema;
+    expect(models.chat.mock.calls[0][2].structuredOutput.name).toBe("evaluation_faithfulness_v2");
     expect(faithfulnessSchema).toMatchObject({
       type: "object",
       additionalProperties: false,
@@ -83,27 +84,36 @@ describe("EvaluationJudgeService", () => {
       properties: {
         claims: {
           type: "array",
-          maxItems: 20,
+          maxItems: 100,
           items: {
             type: "object",
             additionalProperties: false,
-            properties: { reason: { type: "string", minLength: 1, maxLength: 300 } },
+            properties: {
+              claim: { type: "string", minLength: 1, maxLength: 500 },
+              reason: { type: "string", minLength: 1, maxLength: 500 },
+            },
           },
         },
       },
     });
     const relevancySchema = models.chat.mock.calls[1][2].structuredOutput.schema;
+    expect(models.chat.mock.calls[1][2].structuredOutput.name).toBe(
+      "evaluation_answer_relevancy_v2",
+    );
     expect(relevancySchema).toMatchObject({
       properties: {
         questions: {
           type: "array",
           minItems: 1,
           maxItems: 3,
-          items: { type: "string", minLength: 1, maxLength: 300 },
+          items: { type: "string", minLength: 1, maxLength: 500 },
         },
       },
     });
     const precisionSchema = models.chat.mock.calls[2][2].structuredOutput.schema;
+    expect(models.chat.mock.calls[2][2].structuredOutput.name).toBe(
+      "evaluation_context_precision_v2",
+    );
     expect(precisionSchema).toMatchObject({
       properties: {
         judgments: {
@@ -113,14 +123,14 @@ describe("EvaluationJudgeService", () => {
           items: {
             type: "object",
             additionalProperties: false,
-            properties: { reason: { type: "string", minLength: 1, maxLength: 300 } },
+            properties: { reason: { type: "string", minLength: 1, maxLength: 500 } },
           },
         },
       },
     });
   });
 
-  it("returns 100 faithfulness for no factual claims and zero precision for no contexts", async () => {
+  it("leaves faithfulness unscored for no factual claims", async () => {
     models.chat.mockResolvedValueOnce({ content: JSON.stringify({ claims: [] }) });
     models.chat.mockResolvedValueOnce({ content: JSON.stringify({ questions: ["你好"] }) });
     models.embedTexts.mockResolvedValue([
@@ -130,9 +140,9 @@ describe("EvaluationJudgeService", () => {
 
     const result = await judge.score(inputWithoutContexts, modelIds);
 
-    expect(result.faithfulness).toBe(100);
+    expect(result.faithfulness).toBeNull();
     expect(result.contextPrecision).toBe(0);
-    expect(result.evidence.faithfulness).toHaveLength(1);
+    expect(result.evidence).not.toHaveProperty("faithfulness");
     expect(result.evidence.contextPrecision).toHaveLength(1);
     expect(models.chat).toHaveBeenCalledTimes(2);
   });
@@ -164,9 +174,11 @@ describe("EvaluationJudgeService", () => {
   });
 
   it("retries a provider rejection and succeeds on the second attempt", async () => {
-    models.chat
-      .mockRejectedValueOnce(new Error("provider timeout"))
-      .mockResolvedValueOnce({ content: JSON.stringify({ claims: [] }) });
+    models.chat.mockRejectedValueOnce(new Error("provider timeout")).mockResolvedValueOnce({
+      content: JSON.stringify({
+        claims: [{ claim: "七天内可退款", supported: true, reason: "context 1" }],
+      }),
+    });
     const evaluator = new FaithfulnessEvaluator(models as unknown as ModelsService);
 
     await expect(evaluator.score(inputWithThreeContexts, "judge-1")).resolves.toMatchObject({
@@ -186,10 +198,10 @@ describe("EvaluationJudgeService", () => {
     expect(attempt).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects overlong evidence after one retry", async () => {
+  it("rejects generated strings above the v2 bound after one retry", async () => {
     models.chat.mockResolvedValue({
       content: JSON.stringify({
-        claims: [{ claim: "x", supported: true, reason: "x".repeat(301) }],
+        claims: [{ claim: "x", supported: true, reason: "x".repeat(501) }],
       }),
     });
 
@@ -197,6 +209,126 @@ describe("EvaluationJudgeService", () => {
       "faithfulness judge output invalid after retry",
     );
     expect(models.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts 100 claims and 500-character generated strings", async () => {
+    const claims = Array.from({ length: 100 }, (_, index) => ({
+      claim: `${index}:${"c".repeat(500)}`.slice(0, 500),
+      supported: true,
+      reason: "r".repeat(500),
+    }));
+    models.chat.mockResolvedValueOnce({ content: JSON.stringify({ claims }) });
+    const evaluator = new FaithfulnessEvaluator(models as unknown as ModelsService);
+
+    await expect(evaluator.score(inputWithThreeContexts, "judge-1")).resolves.toMatchObject({
+      score: 100,
+    });
+    expect(models.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "101 claims",
+      Array.from({ length: 101 }, () => ({ claim: "x", supported: true, reason: "x" })),
+    ],
+    ["501-character claim", [{ claim: "x".repeat(501), supported: true, reason: "x" }]],
+    ["501-character reason", [{ claim: "x", supported: true, reason: "x".repeat(501) }]],
+  ])("rejects %s after one retry", async (_label, claims) => {
+    models.chat.mockResolvedValue({ content: JSON.stringify({ claims }) });
+    const evaluator = new FaithfulnessEvaluator(models as unknown as ModelsService);
+
+    await expect(evaluator.score(inputWithThreeContexts, "judge-1")).rejects.toThrow(
+      "faithfulness judge output invalid after retry",
+    );
+    expect(models.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds persisted evidence independently of the parser", () => {
+    const values = ["a".repeat(500), "b".repeat(500), "c".repeat(500), "d".repeat(500)];
+    expect(limitedEvidence(values, "empty")).toEqual(
+      values.slice(0, 3).map((value) => value.slice(0, 300)),
+    );
+  });
+
+  it("accepts 500-character relevancy questions and precision reasons", async () => {
+    models.chat.mockResolvedValueOnce({
+      content: JSON.stringify({ questions: ["q".repeat(500)] }),
+    });
+    models.embedTexts.mockResolvedValueOnce([
+      [1, 0],
+      [1, 0],
+    ]);
+    const relevancy = new AnswerRelevancyEvaluator(models as unknown as ModelsService);
+    await expect(relevancy.score(inputWithThreeContexts, modelIds)).resolves.toMatchObject({
+      score: 100,
+    });
+
+    models.chat.mockReset().mockResolvedValueOnce({
+      content: JSON.stringify({
+        judgments: inputWithThreeContexts.contexts.map((context) => ({
+          chunkId: context.chunkId,
+          relevant: true,
+          reason: "r".repeat(500),
+        })),
+      }),
+    });
+    const precision = new ContextPrecisionEvaluator(models as unknown as ModelsService);
+    const result = await precision.score(inputWithThreeContexts, "judge-1");
+    expect(result.score).toBe(100);
+    expect(result.evidence.every((item) => item.length === 300)).toBe(true);
+  });
+
+  it("rejects 501-character relevancy questions and precision reasons after retry", async () => {
+    models.chat.mockResolvedValue({
+      content: JSON.stringify({ questions: ["q".repeat(501)] }),
+    });
+    const relevancy = new AnswerRelevancyEvaluator(models as unknown as ModelsService);
+    await expect(relevancy.score(inputWithThreeContexts, modelIds)).rejects.toThrow(
+      "answer relevancy judge output invalid after retry",
+    );
+    expect(models.chat).toHaveBeenCalledTimes(2);
+
+    models.chat.mockReset().mockResolvedValue({
+      content: JSON.stringify({
+        judgments: inputWithThreeContexts.contexts.map((context) => ({
+          chunkId: context.chunkId,
+          relevant: true,
+          reason: "r".repeat(501),
+        })),
+      }),
+    });
+    const precision = new ContextPrecisionEvaluator(models as unknown as ModelsService);
+    await expect(precision.score(inputWithThreeContexts, "judge-1")).rejects.toThrow(
+      "context precision judge output invalid after retry",
+    );
+    expect(models.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips only faithfulness when the candidate is ineligible", async () => {
+    const faithfulness = { score: jest.fn() };
+    const relevancy = {
+      score: jest.fn().mockResolvedValue({ score: 81, evidence: ["relevant"] }),
+    };
+    const precision = {
+      score: jest.fn().mockResolvedValue({ score: 73, evidence: ["ranked"] }),
+    };
+    const service = new EvaluationJudgeService(
+      faithfulness as never,
+      relevancy as never,
+      precision as never,
+    );
+
+    await expect(
+      service.score(inputWithThreeContexts, modelIds, { skipFaithfulness: true }),
+    ).resolves.toEqual({
+      faithfulness: null,
+      answerRelevancy: 81,
+      contextPrecision: 73,
+      evidence: { answerRelevancy: ["relevant"], contextPrecision: ["ranked"] },
+    });
+    expect(faithfulness.score).not.toHaveBeenCalled();
+    expect(relevancy.score).toHaveBeenCalledTimes(1);
+    expect(precision.score).toHaveBeenCalledTimes(1);
   });
 
   it("rejects context judgments that do not preserve ranked input order", async () => {

@@ -14,7 +14,7 @@ import {
 const JudgmentSchema = z.strictObject({
   chunkId: z.string().min(1).max(300),
   relevant: z.boolean(),
-  reason: z.string().min(1).max(300),
+  reason: z.string().min(1).max(500),
 });
 
 @Injectable()
@@ -29,7 +29,7 @@ export class ContextPrecisionEvaluator {
     const OutputSchema = z.strictObject({
       judgments: z.array(JudgmentSchema).length(input.contexts.length),
     });
-    const outputSpec = structuredOutput("evaluation_context_precision_v1", OutputSchema);
+    const outputSpec = structuredOutput("evaluation_context_precision_v2", OutputSchema);
     // 018 决策 G：透传 response.usage（原先丢弃）。在线不读，离线用于预算熔断。
     const { output, usage } = await withJudgeRetry("context precision", async () => {
       const response = await callJudgeProvider(() =>

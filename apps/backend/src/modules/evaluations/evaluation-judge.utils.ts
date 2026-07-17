@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { StructuredOutputSpec } from "../models/ports/model-provider.port";
+import { EVALUATION_EVIDENCE_MAX_LENGTH } from "./evaluation.constants";
 
 const MAX_ATTEMPTS = 2;
 
@@ -56,5 +57,6 @@ export async function withJudgeRetry<T>(
 }
 
 export function limitedEvidence(values: string[], emptyMessage: string): string[] {
-  return values.length === 0 ? [emptyMessage] : values.slice(0, 3);
+  const limited = values.slice(0, 3).map((value) => value.slice(0, EVALUATION_EVIDENCE_MAX_LENGTH));
+  return limited.length === 0 ? [emptyMessage] : limited;
 }

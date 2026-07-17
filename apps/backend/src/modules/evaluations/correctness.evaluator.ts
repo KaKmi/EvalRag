@@ -29,7 +29,7 @@ import {
 const PointJudgmentSchema = z.strictObject({
   index: z.number().int().min(0),
   status: z.enum(["hit", "missing", "contradicted"]),
-  reason: z.string().min(1).max(300),
+  reason: z.string().min(1).max(500),
 });
 
 @Injectable()
@@ -54,7 +54,7 @@ export class CorrectnessEvaluator {
     const OutputSchema = z.strictObject({
       points: z.array(PointJudgmentSchema).length(input.goldPoints.length),
     });
-    const outputSpec = structuredOutput("evaluation_correctness_v1", OutputSchema);
+    const outputSpec = structuredOutput("evaluation_correctness_v2", OutputSchema);
 
     const { output, usage } = await withJudgeRetry("correctness", async () => {
       const response = await callJudgeProvider(() =>
@@ -87,7 +87,10 @@ export class CorrectnessEvaluator {
       // 否则模型可以回 n 条**全指向同一个要点**且 hit（条数合法）→ 把 5 选 1 中算成 100 分。
       // 这是 round 1 那个虚高缺陷的残余向量，round 2 一并堵死。
       const seen = new Set(parsed.points.map((p) => p.index));
-      if (seen.size !== input.goldPoints.length || [...seen].some((i) => i >= input.goldPoints.length)) {
+      if (
+        seen.size !== input.goldPoints.length ||
+        [...seen].some((i) => i >= input.goldPoints.length)
+      ) {
         invalidJudgeOutput("correctness judgments must cover each gold point exactly once");
       }
       return { output: parsed, usage: response.usage };

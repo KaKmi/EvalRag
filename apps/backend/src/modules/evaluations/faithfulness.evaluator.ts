@@ -14,16 +14,16 @@ const FaithfulnessOutputSchema = z.strictObject({
   claims: z
     .array(
       z.strictObject({
-        claim: z.string().min(1).max(300),
+        claim: z.string().min(1).max(500),
         supported: z.boolean(),
-        reason: z.string().min(1).max(300),
+        reason: z.string().min(1).max(500),
       }),
     )
-    .max(20),
+    .max(100),
 });
 
 const FAITHFULNESS_OUTPUT = structuredOutput(
-  "evaluation_faithfulness_v1",
+  "evaluation_faithfulness_v2",
   FaithfulnessOutputSchema,
 );
 
@@ -31,7 +31,7 @@ const FAITHFULNESS_OUTPUT = structuredOutput(
 export class FaithfulnessEvaluator {
   constructor(private readonly models: ModelsService) {}
 
-  async score(input: EvaluationInput, judgeModelId: string): Promise<MetricResult> {
+  async score(input: EvaluationInput, judgeModelId: string): Promise<MetricResult | null> {
     // 018 决策 G：透传 response.usage（原先丢弃）。在线路径不读它（score() 与
     // EvaluationScores 结构不变 → E-W1 零影响）；离线用于预算熔断。
     const { output, usage } = await withJudgeRetry("faithfulness", async () => {
@@ -42,7 +42,7 @@ export class FaithfulnessEvaluator {
             {
               role: "system",
               content:
-                "Extract every factual claim in the answer and decide whether the supplied contexts support it. Return strict JSON only. If there are no factual claims, return an empty claims array.",
+                "Extract every factual claim in the answer and decide whether the supplied contexts support it. Return at most 100 claims; merge minor claims when needed. Return strict JSON only. If there are no factual claims, return an empty claims array.",
             },
             {
               role: "user",
@@ -52,11 +52,14 @@ export class FaithfulnessEvaluator {
           { temperature: 0, structuredOutput: FAITHFULNESS_OUTPUT },
         ),
       );
-      return { output: parseJudgeOutput(response.content, FaithfulnessOutputSchema), usage: response.usage };
+      return {
+        output: parseJudgeOutput(response.content, FaithfulnessOutputSchema),
+        usage: response.usage,
+      };
     });
 
     if (output.claims.length === 0) {
-      return { score: 100, evidence: ["No factual claims were identified."], usage };
+      return null;
     }
 
     const supported =

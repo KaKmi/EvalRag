@@ -178,7 +178,12 @@ describe("EvaluationWorkerProcessor", () => {
 
   it("leaves judge health untouched when every candidate is sampled out", async () => {
     repo.getSettings.mockResolvedValue({ ...enabledSettings, sampleRate: 0.0001 });
-    const normal = { ...makeRisk(0), status: "success" as const, noCitations: false, confidence: 0.9 };
+    const normal = {
+      ...makeRisk(0),
+      status: "success" as const,
+      noCitations: false,
+      confidence: 0.9,
+    };
     clickhouse.listCandidates.mockResolvedValue([normal]);
     const cycle = await processor.processCycle("online-quality-v1", fixedNow);
     expect(cycle.outcomes.map((item) => item.kind)).toEqual(["sampled_out"]);
@@ -198,25 +203,54 @@ describe("EvaluationWorkerProcessor", () => {
     );
   });
 
+  it.each([
+    ["success with citations", { status: "success", noCitations: false, confidence: 0.9 }, false],
+    ["low-confidence success", { status: "success", noCitations: false, confidence: 0.2 }, false],
+    ["fallback", { status: "fallback", noCitations: false, confidence: 0.2 }, true],
+    ["failed", { status: "failed", noCitations: false, confidence: 0.2 }, true],
+    ["no citations", { status: "success", noCitations: true, confidence: 0.9 }, true],
+  ] as const)("sets the faithfulness gate for %s", async (_label, patch, skipFaithfulness) => {
+    repo.getSettings.mockResolvedValue({ ...enabledSettings, sampleRate: 1 });
+    const candidate = { ...makeRisk(0), ...patch };
+    clickhouse.listCandidates.mockResolvedValue([candidate]);
+
+    await processor.processCycle("online-quality-v1", fixedNow);
+
+    expect(judge.score).toHaveBeenCalledWith(
+      evaluationInput,
+      { judgeModelId: "judge-1", embeddingModelId: "embed-1" },
+      { skipFaithfulness },
+    );
+    expect(emitter.emitSuccess).toHaveBeenCalledTimes(1);
+    expect(repo.finishCycle).toHaveBeenCalledWith(
+      "online-quality-v1",
+      expect.any(String),
+      expect.objectContaining({ consecutiveFailures: 0, evaluatedIncrement: 1 }),
+    );
+  });
+
   // 冷启动播种点只在水位线那行不存在时生效，而**行是在 tryAcquireLease 里诞生的** ——
   // 只把 seedFrom 传给 getOrCreateWatermark 是够不着的。
   it.each([
     ["默认 24 小时（017:26 原行为）", 24, new Date("2026-07-14T02:00:00.000Z")],
     ["0 = 只评此后的新问答", 0, fixedNow],
     ["-1 = 回看全部历史", -1, new Date(0)],
-  ])("seeds a fresh watermark per ONLINE_EVAL_BACKFILL_WINDOW_HOURS: %s", async (_l, hours, seed) => {
-    config.onlineEvalBackfillWindowHours = hours;
-    clickhouse.listCandidates.mockResolvedValue([]);
-    await processor.processCycle("online-quality-v1", fixedNow);
-    expect(repo.tryAcquireLease).toHaveBeenCalledWith(
-      "online-quality-v1",
-      expect.any(String),
-      fixedNow,
-      20 * 60_000,
-      seed,
-    );
-    expect(repo.getOrCreateWatermark).toHaveBeenCalledWith("online-quality-v1", fixedNow, seed);
-  });
+  ])(
+    "seeds a fresh watermark per ONLINE_EVAL_BACKFILL_WINDOW_HOURS: %s",
+    async (_l, hours, seed) => {
+      config.onlineEvalBackfillWindowHours = hours;
+      clickhouse.listCandidates.mockResolvedValue([]);
+      await processor.processCycle("online-quality-v1", fixedNow);
+      expect(repo.tryAcquireLease).toHaveBeenCalledWith(
+        "online-quality-v1",
+        expect.any(String),
+        fixedNow,
+        20 * 60_000,
+        seed,
+      );
+      expect(repo.getOrCreateWatermark).toHaveBeenCalledWith("online-quality-v1", fixedNow, seed);
+    },
+  );
 
   it("does not query candidates when disabled or lease is owned elsewhere", async () => {
     repo.getSettings.mockResolvedValueOnce({ ...enabledSettings, enabled: false });

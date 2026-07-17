@@ -11,11 +11,11 @@ import {
 } from "./evaluation-judge.utils";
 
 const AnswerRelevancyOutputSchema = z.strictObject({
-  questions: z.array(z.string().min(1).max(300)).min(1).max(3),
+  questions: z.array(z.string().min(1).max(500)).min(1).max(3),
 });
 
 const ANSWER_RELEVANCY_OUTPUT = structuredOutput(
-  "evaluation_answer_relevancy_v1",
+  "evaluation_answer_relevancy_v2",
   AnswerRelevancyOutputSchema,
 );
 
