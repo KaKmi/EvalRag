@@ -20,5 +20,6 @@
 | design | 014 | draft | 两级意图表与知识库外挂意图路由 | 意图节点只做静态闭集大分类，路由靠 KB↔意图绑定映射；替换 013 的 KB-UUID 路由方案。 | 2026-07-12 | [014](docs/design/014-intent-routing.md) |
 | design | 015 | draft | M9 Trace 追踪（完整版）读模型 | M9 落地：根 span 补 session/agent/user 身份 → 纯 VIEW 读模型（列表/Session/详情）+ 只读 API + 前端四屏；out-flow 延后 M11。 | 2026-07-13 | [015](docs/design/015-m9-trace-read-model.md) |
 | design | 016 | draft | 指标读模型：ClickHouse 汇总层 + 第一批运行看板 | 在 otel_traces 之上加一层 AggregatingMergeTree 预聚合（物化视图增量卷积）作为指标读模型；第一批 8 指标全部复用已有埋点，纯读侧增量；产品做总览→应用→样本三层下钻。触发 004 演进第 2 步，喂 M10 运行看板。 | 2026-07-14 | [016](docs/design/016-metrics-rollup-dashboard.md) |
-| design | 018 | draft | 离线评测 run 与评测集（E-W2a） | gold 题库 + 对指定配置版本发起离线 run（真实走编排产出 preview trace）+ 屏3 报告；结果存 Postgres 与在线 rag.eval 读模型物理隔离。 | 2026-07-16 | [018](docs/design/018-offline-eval-runs.md) |
+| design | 018 | draft | 离线评测 run 与评测集（E-W2a） | gold 题库 + 对指定配置版本发起离线 run（真实走编排产出 preview trace）+ 屏3 报告；结果存 Postgres 与在线 rag.eval 读模型物理隔离。 | 2026-07-17 | [018](docs/design/018-offline-eval-runs.md) |
+| design | 019 | draft | 评测 worker 独立部署物（PROCESS_ROLE 分流） | 把 eval-run + online-eval 两个 pg-boss 消费者拆到独立 worker 进程：同一代码按 PROCESS_ROLE 分流，租约代码零改动。 | 2026-07-17 | [019](docs/design/019-eval-worker-split.md) |
 
