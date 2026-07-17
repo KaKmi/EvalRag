@@ -36,7 +36,7 @@ const LATEST_EVAL_SQL = `
     argMaxMerge(evaluated_at_state) AS evaluated_at,
     argMaxMerge(agent_id_state) AS agent_id,
     argMaxMerge(generation_model_state) AS generation_model,
-    argMaxMerge(faithfulness_state) AS faithfulness,
+    nullIf(argMaxMerge(faithfulness_state), -1) AS faithfulness,
     argMaxMerge(answer_relevancy_state) AS answer_relevancy,
     argMaxMerge(context_precision_state) AS context_precision
   FROM codecrush_eval_targets
@@ -68,6 +68,7 @@ export interface EvaluationReadWindow {
 
 export interface EvaluationAggregate {
   sampleCount: number;
+  faithfulnessSampleCount: number;
   faithfulness: number | null;
   answerRelevancy: number | null;
   contextPrecision: number | null;
@@ -87,7 +88,7 @@ export interface LatestEvaluationSuccess {
   judgeVersion: string;
   evaluatedAt: string;
   judgeModel: string;
-  faithfulness: number;
+  faithfulness: number | null;
   answerRelevancy: number;
   contextPrecision: number;
   evidence: string;
@@ -102,7 +103,7 @@ export interface LatestEvaluationFailure {
 export interface EvaluationLowSample {
   targetTraceId: string;
   question: string;
-  faithfulness: number;
+  faithfulness: number | null;
   answerRelevancy: number;
   contextPrecision: number;
   evidence: string;
@@ -280,14 +281,15 @@ export class ClickHouseEvaluationsRepository {
         SELECT
           toStartOfMinute(evaluated_at) AS bucket,
           count() AS sample_count,
-          avg(faithfulness) AS faithfulness,
-          avg(answer_relevancy) AS answer_relevancy,
-          avg(context_precision) AS context_precision
-        FROM (${LATEST_EVAL_SQL})
-        WHERE judge_version = {judgeVersion:String}
-          AND evaluated_at >= {from:DateTime64(9)}
-          AND evaluated_at < {to:DateTime64(9)}
-          AND ({agentId:String} = '' OR agent_id = {agentId:String})
+          count(latest.faithfulness) AS faithfulness_sample_count,
+          if(count(latest.faithfulness) = 0, NULL, avg(latest.faithfulness)) AS faithfulness,
+          avg(latest.answer_relevancy) AS answer_relevancy,
+          avg(latest.context_precision) AS context_precision
+        FROM (${LATEST_EVAL_SQL}) AS latest
+        WHERE latest.judge_version = {judgeVersion:String}
+          AND latest.evaluated_at >= {from:DateTime64(9)}
+          AND latest.evaluated_at < {to:DateTime64(9)}
+          AND ({agentId:String} = '' OR latest.agent_id = {agentId:String})
         GROUP BY bucket
         ORDER BY bucket
       `,
@@ -304,7 +306,8 @@ export class ClickHouseEvaluationsRepository {
       query: `
         SELECT
           count() AS sample_count,
-          avg(faithfulness) AS faithfulness,
+          count(faithfulness_score) AS faithfulness_sample_count,
+          if(count(faithfulness_score) = 0, NULL, avg(faithfulness_score)) AS faithfulness,
           avg(answer_relevancy) AS answer_relevancy,
           avg(context_precision) AS context_precision
         FROM (
@@ -314,7 +317,7 @@ export class ClickHouseEvaluationsRepository {
             argMaxMerge(evaluated_at_state) AS evaluated_at,
             toStartOfMinute(argMaxMerge(evaluated_at_state)) AS bucket,
             argMaxMerge(agent_id_state) AS agent_id,
-            argMaxMerge(faithfulness_state) AS faithfulness,
+            nullIf(argMaxMerge(faithfulness_state), -1) AS faithfulness_score,
             argMaxMerge(answer_relevancy_state) AS answer_relevancy,
             argMaxMerge(context_precision_state) AS context_precision
           FROM codecrush_eval_targets
@@ -338,7 +341,8 @@ export class ClickHouseEvaluationsRepository {
       query: `
         SELECT eligible.agent_id, eligible.agent_name,
           coalesce(evaluated.sample_count, 0) AS sample_count,
-          if(coalesce(evaluated.sample_count, 0) = 0, NULL, evaluated.faithfulness) AS faithfulness,
+          coalesce(evaluated.faithfulness_sample_count, 0) AS faithfulness_sample_count,
+          evaluated.faithfulness AS faithfulness,
           if(coalesce(evaluated.sample_count, 0) = 0, NULL, evaluated.answer_relevancy) AS answer_relevancy,
           if(coalesce(evaluated.sample_count, 0) = 0, NULL, evaluated.context_precision) AS context_precision
         FROM (
@@ -350,15 +354,16 @@ export class ClickHouseEvaluationsRepository {
           GROUP BY agent_id
         ) AS eligible
         LEFT JOIN (
-          SELECT agent_id, count() AS sample_count,
-            avg(faithfulness) AS faithfulness,
-            avg(answer_relevancy) AS answer_relevancy,
-            avg(context_precision) AS context_precision
-          FROM (${LATEST_EVAL_SQL})
-          WHERE judge_version = {judgeVersion:String}
-            AND evaluated_at >= {from:DateTime64(9)} AND evaluated_at < {to:DateTime64(9)}
-            AND ({agentId:String} = '' OR agent_id = {agentId:String})
-          GROUP BY agent_id
+          SELECT latest.agent_id, count() AS sample_count,
+            count(latest.faithfulness) AS faithfulness_sample_count,
+            if(count(latest.faithfulness) = 0, NULL, avg(latest.faithfulness)) AS faithfulness,
+            avg(latest.answer_relevancy) AS answer_relevancy,
+            avg(latest.context_precision) AS context_precision
+          FROM (${LATEST_EVAL_SQL}) AS latest
+          WHERE latest.judge_version = {judgeVersion:String}
+            AND latest.evaluated_at >= {from:DateTime64(9)} AND latest.evaluated_at < {to:DateTime64(9)}
+            AND ({agentId:String} = '' OR latest.agent_id = {agentId:String})
+          GROUP BY latest.agent_id
         ) AS evaluated USING (agent_id)
         ORDER BY sample_count DESC, agent_id
       `,
@@ -382,6 +387,46 @@ export class ClickHouseEvaluationsRepository {
       query_params: {
         from: toClickHouseDateTime(from),
         to: toClickHouseDateTime(to),
+        agentId: agentId ?? "",
+      },
+      format: "JSONEachRow",
+    });
+    const [row] = await result.json<{ count: number | string }>();
+    return Number(row?.count ?? 0);
+  }
+
+  /**
+   * 窗口内**有分数**的 trace 数——按 **trace 发生时间**切窗（不是 evaluated_at），
+   * 好与 PG 账本的 `trace_start_time` 同基准，两者相减即可对账。
+   *
+   * 为什么要对账：`forceFlushTelemetry` 被有意设计成吞掉一切导出失败
+   * （`packages/otel/src/trace.ts`）⇒「worker 认为评了」与「分数真的可查」是两件事。
+   * 账本在 PG、与游标同事务，是唯一不依赖 span 投递的证据；本查询是它的对照面。
+   *
+   * 注意与 `getOverview` 的 `evaluatedCount` **口径不同**：那个按 `evaluated_at` 切窗
+   * （「这段时间评了多少」），本查询按 trace 发生时间（「这批问答里多少有分」）。
+   * 两者都对，但只有后者能跟账本比。
+   */
+  async countScoredInWindow(
+    from: Date,
+    to: Date,
+    judgeVersion: string,
+    agentId?: string,
+  ): Promise<number> {
+    if (!(await this.ensureEvalViews())) return 0;
+    const result = await this.clickhouse.query({
+      query: `SELECT count() AS count FROM codecrush_traces AS t
+        WHERE t.preview = 0
+          AND t.start_time >= {from:DateTime64(9)} AND t.start_time < {to:DateTime64(9)}
+          AND ({agentId:String} = '' OR t.agent_id = {agentId:String})
+          AND t.trace_id IN (
+            SELECT target_trace_id FROM (${LATEST_EVAL_SQL})
+            WHERE judge_version = {judgeVersion:String}
+          )`,
+      query_params: {
+        from: toClickHouseDateTime(from),
+        to: toClickHouseDateTime(to),
+        judgeVersion,
         agentId: agentId ?? "",
       },
       format: "JSONEachRow",
@@ -469,7 +514,7 @@ export class ClickHouseEvaluationsRepository {
       judgeVersion: row.judge_version,
       evaluatedAt: toIsoUtc(row.evaluated_at),
       judgeModel: row.judge_model,
-      faithfulness: Number(row.faithfulness),
+      faithfulness: nullableFaithfulness(row.faithfulness),
       answerRelevancy: Number(row.answer_relevancy),
       contextPrecision: Number(row.context_precision),
       evidence: row.evidence ?? "",
@@ -521,11 +566,12 @@ export class ClickHouseEvaluationsRepository {
           AND latest.evaluated_at >= {from:DateTime64(9)} AND latest.evaluated_at < {to:DateTime64(9)}
           AND ({agentId:String} = '' OR latest.agent_id = {agentId:String})
           AND (
-            latest.faithfulness < {faithfulnessThreshold:Float64}
+            (latest.faithfulness IS NOT NULL
+              AND latest.faithfulness < {faithfulnessThreshold:Float64})
             OR latest.answer_relevancy < {answerRelevancyThreshold:Float64}
             OR latest.context_precision < {contextPrecisionThreshold:Float64}
           )
-        ORDER BY least(latest.faithfulness, latest.answer_relevancy, latest.context_precision), latest.evaluated_at DESC
+        ORDER BY least(ifNull(latest.faithfulness, 101), latest.answer_relevancy, latest.context_precision), latest.evaluated_at DESC
         LIMIT {limit:UInt32}
       `,
       query_params: {
@@ -541,7 +587,7 @@ export class ClickHouseEvaluationsRepository {
     return rows.map((row) => ({
       targetTraceId: row.target_trace_id,
       question: row.question ?? "",
-      faithfulness: Number(row.faithfulness),
+      faithfulness: nullableFaithfulness(row.faithfulness),
       answerRelevancy: Number(row.answer_relevancy),
       contextPrecision: Number(row.context_precision),
       evidence: row.evidence ?? "",
@@ -560,6 +606,7 @@ export class ClickHouseEvaluationsRepository {
 
 type AggregateRow = {
   sample_count: number | string;
+  faithfulness_sample_count: number | string;
   faithfulness: number | string | null;
   answer_relevancy: number | string | null;
   context_precision: number | string | null;
@@ -571,37 +618,56 @@ type LatestSuccessRow = {
   evaluated_at: string;
   generation_model: string;
   judge_model: string;
-  faithfulness: number | string;
+  faithfulness: number | string | null;
   answer_relevancy: number | string;
   context_precision: number | string;
   evidence: string;
 };
 
-type FailureRow = { failed_at: string; judge_version: string; error_type: string; error_message: string };
+type FailureRow = {
+  failed_at: string;
+  judge_version: string;
+  error_type: string;
+  error_message: string;
+};
 type LowSampleRow = {
   target_trace_id: string;
   question: string;
-  faithfulness: number | string;
+  faithfulness: number | string | null;
   answer_relevancy: number | string;
   context_precision: number | string;
   evidence: string;
 };
 
 function nullableNumber(value: number | string | null): number | null {
-  return value === null || value === "" ? null : Number(value);
+  if (value === null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function nullableFaithfulness(value: number | string | null): number | null {
+  const parsed = nullableNumber(value);
+  return parsed === null || parsed < 0 ? null : parsed;
 }
 
 function toAggregate(row: AggregateRow): EvaluationAggregate {
   return {
     sampleCount: Number(row.sample_count),
-    faithfulness: nullableNumber(row.faithfulness),
+    faithfulnessSampleCount: Number(row.faithfulness_sample_count ?? 0),
+    faithfulness: nullableFaithfulness(row.faithfulness),
     answerRelevancy: nullableNumber(row.answer_relevancy),
     contextPrecision: nullableNumber(row.context_precision),
   };
 }
 
 function emptyAggregate(): EvaluationAggregate {
-  return { sampleCount: 0, faithfulness: null, answerRelevancy: null, contextPrecision: null };
+  return {
+    sampleCount: 0,
+    faithfulnessSampleCount: 0,
+    faithfulness: null,
+    answerRelevancy: null,
+    contextPrecision: null,
+  };
 }
 
 function toClickHouseDateTime(value: Date | string): string {

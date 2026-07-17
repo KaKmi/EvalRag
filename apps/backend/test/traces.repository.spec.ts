@@ -50,9 +50,7 @@ describe("ClickHouseTracesRepository E-W1 quality list", () => {
     await repo.listTraces({ page: 1, pageSize: 20, evalMetric: "precision", evalMax: 70 });
     const sql = qualityListSql(raw);
     expect(sql).toContain("context_precision <= {evalMax:Float64}");
-    expect(sql).toContain(
-      "argMax(tuple(faithfulness, answer_relevancy, context_precision, judge_version, evaluated_at), evaluated_at)",
-    );
+    expect(sql).toContain("nullIf(argMaxMerge(faithfulness_state), -1) AS faithfulness");
     expect(sql).toContain(
       "ORDER BY context_precision ASC NULLS LAST, start_time DESC, trace_id DESC",
     );
@@ -62,7 +60,7 @@ describe("ClickHouseTracesRepository E-W1 quality list", () => {
     const { repo, raw } = setupQualityList();
     await repo.listTraces({ page: 1, pageSize: 20, evalVerdict: "low" });
     expect(qualityListSql(raw)).toContain(
-      "least(faithfulness, answer_relevancy, context_precision) < 70",
+      "least(ifNull(faithfulness, 101), answer_relevancy, context_precision) < 70",
     );
   });
 
@@ -79,6 +77,7 @@ describe("ClickHouseTracesRepository E-W1 quality list", () => {
     );
     expect(qualityCountSql(raw)).toContain("LEFT JOIN eval_latest USING (trace_id)");
     expect(qualityCountSql(raw)).toContain("GROUP BY target_trace_id");
+    expect(qualityListSql(raw)).toContain("faithfulness IS NOT NULL");
   });
 
   it("ignores evalSort without a selected metric", async () => {
@@ -285,7 +284,8 @@ function buildRoutingClient(opts: {
       if (query.startsWith("EXISTS TABLE"))
         return { json: async () => [{ result: opts.tableExists ? 1 : 0 }] };
       if (query.includes("codecrush_sessions")) return { json: async () => opts.sessionRows ?? [] };
-      if (query.includes("quantile(0.95)")) return { json: async () => (opts.summaryRow ? [opts.summaryRow] : []) };
+      if (query.includes("quantile(0.95)"))
+        return { json: async () => (opts.summaryRow ? [opts.summaryRow] : []) };
       if (query.includes("codecrush_traces")) return { json: async () => opts.tracesRows ?? [] };
       return { json: async () => [] };
     }),
@@ -298,11 +298,67 @@ function buildRoutingClient(opts: {
 
 const emptySummary = { sampledTotal: 0, failRate: 0, failCount: 0, p95Ms: 0, timeoutCount: 0 };
 
+describe("ClickHouseTracesRepository score normalization", () => {
+  it.each([
+    [null, null],
+    ["-1", null],
+    [-1, null],
+    ["NaN", null],
+    [Infinity, null],
+    [0, 0],
+  ])("normalizes trace faithfulness %p to %p", async (faithfulness, expected) => {
+    const { client } = buildRoutingClient({
+      tableExists: true,
+      tracesRows: [
+        {
+          trace_id: "a".repeat(32),
+          session_id: "session-1",
+          agent_id: "agent-1",
+          agent_name: "Agent",
+          user_id: "user-1",
+          user_input: "question",
+          output: "answer",
+          start_time: "2026-07-15 02:01:00.000000000",
+          total_duration_ms: 1,
+          total_input_tokens: 1,
+          total_output_tokens: 1,
+          status: "success",
+          low_recall: 0,
+          no_citations: 0,
+          refusal: 0,
+          timeout: 0,
+          prompt_version_id: "prompt-1",
+          preview: 0,
+          evaluated_at: "2026-07-15 02:02:00.000000000",
+          judge_version: "online-v2",
+          faithfulness,
+          answer_relevancy: 80,
+          context_precision: 90,
+        },
+      ],
+      summaryRow: { total: 1, failCount: 0, p95Ms: 1, timeoutCount: 0 },
+    });
+
+    const result = await new ClickHouseTracesRepository(client).listTraces({
+      page: 1,
+      pageSize: 20,
+    });
+    expect(result.items[0].evaluation).toMatchObject({
+      status: "scored",
+      scores: { faithfulness: expected, answerRelevancy: 80, contextPrecision: 90 },
+    });
+  });
+});
+
 describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
   it("cold DB → empty list/sessions, no DDL", async () => {
     const { client, raw } = buildRoutingClient({ tableExists: false });
     const repo = new ClickHouseTracesRepository(client);
-    expect(await repo.listTraces({ page: 1, pageSize: 20 })).toEqual({ items: [], total: 0, summary: emptySummary });
+    expect(await repo.listTraces({ page: 1, pageSize: 20 })).toEqual({
+      items: [],
+      total: 0,
+      summary: emptySummary,
+    });
     expect(await repo.listSessions()).toEqual([]);
     expect(raw.command).not.toHaveBeenCalled();
   });
@@ -362,7 +418,13 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
       userId: "u1",
       promptVersionId: "pv1",
     });
-    expect(res.summary).toEqual({ sampledTotal: 1, failRate: 0, failCount: 0, p95Ms: 2410, timeoutCount: 0 });
+    expect(res.summary).toEqual({
+      sampledTotal: 1,
+      failRate: 0,
+      failCount: 0,
+      p95Ms: 2410,
+      timeoutCount: 0,
+    });
   });
 
   it("listTraces empty user_id → null; failRate computed", async () => {
@@ -370,11 +432,24 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
       tableExists: true,
       tracesRows: [
         {
-          trace_id: "b".repeat(32), session_id: "conv2", agent_id: "app1", agent_name: "退款助手",
-          user_id: "", user_input: "x", output: "y", start_time: "2026-07-13 10:00:00.000",
-          total_duration_ms: 6000, total_input_tokens: null, total_output_tokens: null,
-          status: "failed", low_recall: 1, no_citations: 1, refusal: 1, timeout: 1,
-          prompt_version_id: "", preview: 0,
+          trace_id: "b".repeat(32),
+          session_id: "conv2",
+          agent_id: "app1",
+          agent_name: "退款助手",
+          user_id: "",
+          user_input: "x",
+          output: "y",
+          start_time: "2026-07-13 10:00:00.000",
+          total_duration_ms: 6000,
+          total_input_tokens: null,
+          total_output_tokens: null,
+          status: "failed",
+          low_recall: 1,
+          no_citations: 1,
+          refusal: 1,
+          timeout: 1,
+          prompt_version_id: "",
+          preview: 0,
         },
       ],
       summaryRow: { total: "4", failCount: "1", p95Ms: "6000", timeoutCount: "1" },
@@ -384,7 +459,12 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
     expect(res.items[0].userId).toBeNull();
     expect(res.items[0].promptVersionId).toBeNull();
     expect(res.items[0].inputTokens).toBe(0);
-    expect(res.items[0].qualitySignals).toEqual(["low_recall", "no_citations", "refusal", "timeout"]);
+    expect(res.items[0].qualitySignals).toEqual([
+      "low_recall",
+      "no_citations",
+      "refusal",
+      "timeout",
+    ]);
     expect(res.summary.failRate).toBeCloseTo(0.25);
   });
 
@@ -392,9 +472,12 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
     const { client, raw } = buildRoutingClient({ tableExists: true });
     const repo = new ClickHouseTracesRepository(client);
     await repo.listTraces({
-      stage: "rerank", agentId: "app1",
-      from: "2026-07-01T00:00:00Z", to: "2026-07-08T00:00:00Z",
-      page: 1, pageSize: 20,
+      stage: "rerank",
+      agentId: "app1",
+      from: "2026-07-01T00:00:00Z",
+      to: "2026-07-08T00:00:00Z",
+      page: 1,
+      pageSize: 20,
     });
     const sql = raw.query.mock.calls
       .map(([call]: [{ query: string }]) => call.query)
@@ -428,8 +511,17 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
       .map(([call]: [{ query: string; query_params?: Record<string, unknown> }]) => call)
       .filter((call: { query: string }) => call.query.includes("codecrush_traces"));
     expect(calls.every((call: { query: string }) => call.query.includes(attribute))).toBe(true);
-    expect(calls.every((call: { query: string }) => call.query.includes("attributes['gen_ai.request.model'] = {model:String}"))).toBe(true);
-    expect(calls.every((call: { query_params?: Record<string, unknown> }) => call.query_params?.model === "deepseek-chat")).toBe(true);
+    expect(
+      calls.every((call: { query: string }) =>
+        call.query.includes("attributes['gen_ai.request.model'] = {model:String}"),
+      ),
+    ).toBe(true);
+    expect(
+      calls.every(
+        (call: { query_params?: Record<string, unknown> }) =>
+          call.query_params?.model === "deepseek-chat",
+      ),
+    ).toBe(true);
   });
 
   it("uses stable ordering for candidate pagination", async () => {
@@ -446,18 +538,30 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
       tableExists: true,
       sessionRows: [
         {
-          session_id: "conv1", user_id: "u1", agent_id: "app1", agent_name: "退款助手",
-          round_count: "3", first_question: "怎么退款", first_ts: "2026-07-13 09:11:00.000",
-          last_ts: "2026-07-13 09:20:00.000", status: "has_fallback",
+          session_id: "conv1",
+          user_id: "u1",
+          agent_id: "app1",
+          agent_name: "退款助手",
+          round_count: "3",
+          first_question: "怎么退款",
+          first_ts: "2026-07-13 09:11:00.000",
+          last_ts: "2026-07-13 09:20:00.000",
+          status: "has_fallback",
         },
       ],
     });
     const repo = new ClickHouseTracesRepository(client);
     const rows = await repo.listSessions();
     expect(rows[0]).toEqual({
-      sessionId: "conv1", userId: "u1", agentId: "app1", agentName: "退款助手",
-      roundCount: 3, firstQuestion: "怎么退款",
-      firstTs: "2026-07-13T09:11:00.000Z", lastTs: "2026-07-13T09:20:00.000Z", status: "has_fallback",
+      sessionId: "conv1",
+      userId: "u1",
+      agentId: "app1",
+      agentName: "退款助手",
+      roundCount: 3,
+      firstQuestion: "怎么退款",
+      firstTs: "2026-07-13T09:11:00.000Z",
+      lastTs: "2026-07-13T09:20:00.000Z",
+      status: "has_fallback",
     });
   });
 
@@ -466,15 +570,49 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
     const { client } = buildClient({
       tableExists: true,
       rows: [
-        { trace_id: "a".repeat(32), session_id: "conv1", agent_id: "app1", agent_name: "退款助手", user_id: "u1", user_input: "怎么退款", output: "答案A[1]", start_time: "2026-07-13 09:11:00.000", total_duration_ms: "2410", status: "success" },
-        { trace_id: "b".repeat(32), session_id: "conv1", agent_id: "app1", agent_name: "退款助手", user_id: "u1", user_input: "多久到账", output: "很抱歉，暂时无法回答。", start_time: "2026-07-13 09:12:00.000", total_duration_ms: "1500", status: "fallback" },
+        {
+          trace_id: "a".repeat(32),
+          session_id: "conv1",
+          agent_id: "app1",
+          agent_name: "退款助手",
+          user_id: "u1",
+          user_input: "怎么退款",
+          output: "答案A[1]",
+          start_time: "2026-07-13 09:11:00.000",
+          total_duration_ms: "2410",
+          status: "success",
+        },
+        {
+          trace_id: "b".repeat(32),
+          session_id: "conv1",
+          agent_id: "app1",
+          agent_name: "退款助手",
+          user_id: "u1",
+          user_input: "多久到账",
+          output: "很抱歉，暂时无法回答。",
+          start_time: "2026-07-13 09:12:00.000",
+          total_duration_ms: "1500",
+          status: "fallback",
+        },
       ],
     });
     const repo = new ClickHouseTracesRepository(client);
     const res = await repo.findSessionById("conv1");
-    expect(res).toMatchObject({ sessionId: "conv1", userId: "u1", agentId: "app1", agentName: "退款助手" });
+    expect(res).toMatchObject({
+      sessionId: "conv1",
+      userId: "u1",
+      agentId: "app1",
+      agentName: "退款助手",
+    });
     expect(res.rounds).toHaveLength(2);
-    expect(res.rounds[0]).toEqual({ traceId: "a".repeat(32), userInput: "怎么退款", output: "答案A[1]", status: "success", durationMs: 2410, startTime: "2026-07-13T09:11:00.000Z" });
+    expect(res.rounds[0]).toEqual({
+      traceId: "a".repeat(32),
+      userInput: "怎么退款",
+      output: "答案A[1]",
+      status: "success",
+      durationMs: 2410,
+      startTime: "2026-07-13T09:11:00.000Z",
+    });
     expect(res.rounds[1].status).toBe("fallback");
   });
 
@@ -482,7 +620,11 @@ describe("ClickHouseTracesRepository · M9 W1 list/session", () => {
     const { client, raw } = buildClient({ tableExists: false });
     const repo = new ClickHouseTracesRepository(client);
     await expect(repo.findSessionById("conv1")).resolves.toEqual({
-      sessionId: "conv1", userId: null, agentId: "", agentName: "", rounds: [],
+      sessionId: "conv1",
+      userId: null,
+      agentId: "",
+      agentName: "",
+      rounds: [],
     });
     expect(raw.command).not.toHaveBeenCalled();
   });

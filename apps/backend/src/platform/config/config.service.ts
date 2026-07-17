@@ -57,4 +57,12 @@ export class AppConfigService {
   get processRole(): ProcessRole {
     return this.config.get("PROCESS_ROLE", { infer: true });
   }
+  /** E-W1 冷启动回看窗口（小时，默认 24 = 原行为；0=从现在起，-1=全部历史）。见 config.schema.ts。 */
+  get onlineEvalBackfillWindowHours(): number {
+    return this.config.get("ONLINE_EVAL_BACKFILL_WINDOW_HOURS", { infer: true });
+  }
+  /** 候选账本保留天数（按 trace 发生时间，默认 30 = 屏1 最长窗口）。 */
+  get onlineEvalLedgerRetentionDays(): number {
+    return this.config.get("ONLINE_EVAL_LEDGER_RETENTION_DAYS", { infer: true });
+  }
 }

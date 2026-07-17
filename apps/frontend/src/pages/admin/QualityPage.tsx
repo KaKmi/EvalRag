@@ -87,19 +87,23 @@ const TREND_SERIES = [
 
 function TrendChart({ points }: { points: QualityOverviewResponse["trend"] }) {
   const option = useMemo<EChartsCoreOption>(() => {
-    const counts = points.map((point) => point.sampleCount);
+    const counts = points.map((point) => ({
+      faithfulness: point.faithfulnessSampleCount,
+      other: point.sampleCount,
+    }));
     return {
       color: TREND_SERIES.map((series) => series.color),
       tooltip: {
         trigger: "axis",
         formatter: (params: TrendTooltipParam[]) => {
           const index = params[0]?.dataIndex ?? 0;
-          const sampleCount = counts[index] ?? 0;
+          const sampleCounts = counts[index] ?? { faithfulness: 0, other: 0 };
           const lines = params
             .map((param) => `${param.marker}${param.seriesName}：${param.value ?? "—"}`)
             .join("<br/>");
-          const note = sampleCount < 10 ? "（样本不足）" : "";
-          return `${params[0]?.axisValue ?? ""}<br/>${lines}<br/>样本数 ${sampleCount}${note}`;
+          const faithfulnessNote = sampleCounts.faithfulness < 20 ? "（样本不足）" : "";
+          const otherNote = sampleCounts.other < 20 ? "（样本不足）" : "";
+          return `${params[0]?.axisValue ?? ""}<br/>${lines}<br/>事实一致性 n=${sampleCounts.faithfulness}${faithfulnessNote}<br/>其余指标 n=${sampleCounts.other}${otherNote}`;
         },
       },
       legend: { top: 0, right: 0, textStyle: { color: "#64748b" } },
@@ -139,7 +143,17 @@ function TrendChart({ points }: { points: QualityOverviewResponse["trend"] }) {
   if (points.length === 0) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无趋势数据" />;
   }
-  return <MetricChart ariaLabel="三项质量指标趋势" option={option} height={240} />;
+  return (
+    <>
+      <MetricChart ariaLabel="三项质量指标趋势" option={option} height={240} />
+      <span style={{ position: "absolute", width: 1, height: 1, overflow: "hidden" }}>
+        {points.map(
+          (point) =>
+            `事实一致性 n=${point.faithfulnessSampleCount}；其余指标 n=${point.sampleCount}`,
+        )}
+      </span>
+    </>
+  );
 }
 
 export default function QualityPage() {
@@ -187,13 +201,18 @@ export default function QualityPage() {
     return rows;
   }, [overview, agentId]);
 
-  // 窗口内既没评过、水位线又已越过的 trace —— 永久错过。三个计数同窗口同过滤，故可直接相减。
-  const missedCount = overview
-    ? Math.max(
-        0,
-        overview.meta.eligibleCount - overview.meta.evaluatedCount - overview.meta.evaluableCount,
-      )
-    : 0;
+  // 「已错过」按原因拆开——后端从 PG 账本 + 算术算好，前端只负责说人话。
+  const missedDetail = useMemo(() => {
+    const missed = overview?.meta.missed;
+    if (!missed?.total) return null;
+    const parts: string[] = [];
+    if (missed.neverSeen) parts.push(`${missed.neverSeen} 条从没被看过（游标起点之前）`);
+    if (missed.sampledOut) parts.push(`${missed.sampledOut} 条抽样未命中`);
+    if (missed.quotaSkipped) parts.push(`${missed.quotaSkipped} 条让位给高风险样本`);
+    if (missed.incomplete) parts.push(`${missed.incomplete} 条找不到问答原文`);
+    if (missed.judgeFailed) parts.push(`${missed.judgeFailed} 条裁判失败`);
+    return `${parts.join("；")}。水位线已越过它们，不会再被评测；调高抽样率也不会回补。`;
+  }, [overview]);
 
   const updateUrl = (key: string, value?: string) => {
     const next = new URLSearchParams(searchParams);
@@ -324,14 +343,21 @@ export default function QualityPage() {
                 <Text type="secondary">
                   已评测 {overview.meta.evaluatedCount} / 窗口内 {overview.meta.eligibleCount}
                 </Text>
-                {missedCount > 0 && (
-                  <Tooltip title="水位线已越过这些 trace，它们不会再被评测；调高抽样率也不会回补。">
+                {missedDetail && (
+                  <Tooltip title={missedDetail}>
                     <Text type="secondary" style={{ borderBottom: "1px dotted", cursor: "help" }}>
-                      已错过 {missedCount}
+                      已错过 {overview.meta.missed.total}
                     </Text>
                   </Tooltip>
                 )}
                 <Text type="secondary">待处理 {overview.meta.backlog}</Text>
+                {overview.meta.scoresNotPersisted > 0 && (
+                  <Tooltip title="worker 记录评过这些 trace，但 ClickHouse 里查不到它们的分数——分数在上报途中丢了。记分卡因此少算，趋势会偏高或偏低。">
+                    <Text type="danger" style={{ borderBottom: "1px dotted", cursor: "help" }}>
+                      分数丢失 {overview.meta.scoresNotPersisted}
+                    </Text>
+                  </Tooltip>
+                )}
               </Space>
             }
             action={
@@ -397,7 +423,14 @@ export default function QualityPage() {
                         <Flex justify="space-between" gap={12}>
                           <Text>{agent.agentName}</Text>
                           <Text>
-                            {agent.scores ? Math.min(...Object.values(agent.scores)) : "—"} · n=
+                            {agent.scores
+                              ? Math.min(
+                                  ...Object.values(agent.scores).filter(
+                                    (value): value is number => typeof value === "number",
+                                  ),
+                                )
+                              : "—"}{" "}
+                            · n=
                             {agent.sampleCount}
                           </Text>
                         </Flex>

@@ -34,7 +34,8 @@ SELECT
   agent_id,
   judge_version,
   count() AS sample_count,
-  avg(faithfulness) AS faithfulness,
+  count(faithfulness_score) AS faithfulness_sample_count,
+  if(count(faithfulness_score) = 0, NULL, avg(faithfulness_score)) AS faithfulness,
   avg(answer_relevancy) AS answer_relevancy,
   avg(context_precision) AS context_precision
 FROM (
@@ -43,7 +44,7 @@ FROM (
     judge_version,
     argMaxMerge(evaluated_at_state) AS evaluated_at,
     argMaxMerge(agent_id_state) AS agent_id,
-    argMaxMerge(faithfulness_state) AS faithfulness,
+    nullIf(argMaxMerge(faithfulness_state), -1) AS faithfulness_score,
     argMaxMerge(answer_relevancy_state) AS answer_relevancy,
     argMaxMerge(context_precision_state) AS context_precision
   FROM codecrush_eval_targets

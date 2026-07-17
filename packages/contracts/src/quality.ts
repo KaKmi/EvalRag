@@ -10,20 +10,24 @@ export const QualityScoreSchema = z.number().int().min(0).max(100);
 export type QualityScore = z.infer<typeof QualityScoreSchema>;
 
 export const QualityScoresSchema = z.object({
-  faithfulness: QualityScoreSchema,
+  faithfulness: QualityScoreSchema.nullable(),
   answerRelevancy: QualityScoreSchema,
   contextPrecision: QualityScoreSchema,
 });
 export type QualityScores = z.infer<typeof QualityScoresSchema>;
 
 export const QualityEvidenceSchema = z.object({
-  faithfulness: z.array(z.string().max(300)).min(1).max(5),
+  faithfulness: z.array(z.string().max(300)).min(1).max(5).optional(),
   answerRelevancy: z.array(z.string().max(300)).min(1).max(5),
   contextPrecision: z.array(z.string().max(300)).min(1).max(5),
 });
 export type QualityEvidence = z.infer<typeof QualityEvidenceSchema>;
 
-export const QualityThresholdsSchema = QualityScoresSchema;
+export const QualityThresholdsSchema = z.object({
+  faithfulness: QualityScoreSchema,
+  answerRelevancy: QualityScoreSchema,
+  contextPrecision: QualityScoreSchema,
+});
 export type QualityThresholds = z.infer<typeof QualityThresholdsSchema>;
 
 export const TraceQualityDetailSchema = z.discriminatedUnion("status", [
@@ -93,6 +97,7 @@ const qualityPoint = z.object({
   faithfulness: QualityScoreSchema.nullable(),
   answerRelevancy: QualityScoreSchema.nullable(),
   contextPrecision: QualityScoreSchema.nullable(),
+  faithfulnessSampleCount: count,
   sampleCount: count,
   insufficientSample: z.boolean(),
 });
@@ -120,9 +125,31 @@ export const QualityOverviewResponseSchema = z.object({
     // 窗口内非 preview trace 总数。与 evaluatedCount 同窗口，故「已评测/窗口内」是可比的覆盖率。
     eligibleCount: count,
     // 窗口内且仍在游标之后的 trace 数 —— 只有这些还有机会被评。
-    // 游标已越过的 trace 永不回头（listCandidates 用严格元组游标），
-    // 故「已错过」= eligibleCount - evaluatedCount - evaluableCount，由前端派生。
+    // 游标已越过的 trace 永不回头（listCandidates 用严格元组游标）。
     evaluableCount: count,
+    /**
+     * 游标已越过、却没有分数的那些——按原因拆开。
+     *
+     * `total` 是**算术**得来（窗口内 − 已评 − 仍可评），前四项来自 **PG 账本**（worker 真的
+     * 看过并做了判定的）。两者的差就是 `neverSeen`：**从没进过候选集**的——冷启动播种把
+     * 游标钉在 `now-N 小时`，更早的 trace 一眼都没被看过，故账本里没有它们的行。
+     * 这一类通常是最大的一类，也是最容易被误读成「抽样刷掉」的一类（018 §12 缺口 20 正是
+     * 这么误判的）。
+     */
+    missed: z.object({
+      total: count,
+      sampledOut: count,
+      quotaSkipped: count,
+      incomplete: count,
+      judgeFailed: count,
+      neverSeen: count,
+    }),
+    /**
+     * 账本说评过、ClickHouse 里却查不到分数的条数（同窗口、同 judgeVersion）。
+     * 恒 0 才正常；> 0 = span 投递丢包 —— `forceFlushTelemetry` 吞掉导出失败，故
+     * 「worker 认为评了」不蕴含「分数可查」。这个数是账本存在的核心理由之一。
+     */
+    scoresNotPersisted: count,
     judgeModel: z.string().nullable(),
     judgeVersion: z.string().min(1),
     // worker_stalled 排在 backlog 判定之前：worker 没在跑时，backlog 是多少都不重要，

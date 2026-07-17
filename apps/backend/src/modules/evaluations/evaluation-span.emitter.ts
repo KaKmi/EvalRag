@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { forceFlushTelemetry, withSpan } from "@codecrush/otel";
-import { CODECRUSH_IO, GEN_AI, RAG } from "@codecrush/otel-conventions";
+import { CODECRUSH_IO, EVALUATION_UNSCORED_SCORE, GEN_AI, RAG } from "@codecrush/otel-conventions";
 import type { EvaluationInput, EvaluationScores } from "./evaluation.types";
 import type { EvaluationCandidate } from "./clickhouse-evaluations.repository";
 import { evalDedupeKey } from "./sampling";
@@ -27,7 +27,7 @@ export class EvaluationSpanEmitter {
           [RAG.EVAL_STATUS]: "success",
           [RAG.EVAL_TARGET_TRACE_ID]: input.targetTraceId,
           [RAG.EVAL_DEDUPE_KEY]: evalDedupeKey(input.targetTraceId, settings.judgeVersion),
-          [RAG.EVAL_FAITHFULNESS]: result.faithfulness,
+          [RAG.EVAL_FAITHFULNESS]: result.faithfulness ?? EVALUATION_UNSCORED_SCORE,
           [RAG.EVAL_ANSWER_RELEVANCY]: result.answerRelevancy,
           [RAG.EVAL_CONTEXT_PRECISION]: result.contextPrecision,
           [RAG.EVAL_JUDGE_MODEL]: settings.judgeModelId,

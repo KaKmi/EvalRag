@@ -4,7 +4,7 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { CODECRUSH_IO, GEN_AI, RAG } from "@codecrush/otel-conventions";
+import { CODECRUSH_IO, EVALUATION_UNSCORED_SCORE, GEN_AI, RAG } from "@codecrush/otel-conventions";
 import { EvaluationSpanEmitter } from "../src/modules/evaluations/evaluation-span.emitter";
 import { evalDedupeKey } from "../src/modules/evaluations/sampling";
 
@@ -83,5 +83,26 @@ describe("EvaluationSpanEmitter", () => {
     expect(attributes[RAG.EVAL_FAITHFULNESS]).toBeUndefined();
     expect(attributes[CODECRUSH_IO.OUTPUT]).toBeUndefined();
     expect(attributes["rag.eval.error"]).toBeUndefined();
+  });
+
+  it("emits the transport sentinel when faithfulness is intentionally unscored", async () => {
+    await new EvaluationSpanEmitter().emitSuccess({
+      candidate,
+      input,
+      settings: { ...settings, judgeVersion: "online-v2" },
+      result: {
+        faithfulness: null,
+        answerRelevancy: 80,
+        contextPrecision: 70,
+        evidence: {
+          answerRelevancy: ["relevant"],
+          contextPrecision: ["rank 1"],
+        },
+      },
+    });
+
+    const attributes = exporter.getFinishedSpans()[0].attributes;
+    expect(attributes[RAG.EVAL_FAITHFULNESS]).toBe(EVALUATION_UNSCORED_SCORE);
+    expect(JSON.parse(String(attributes[CODECRUSH_IO.OUTPUT]))).not.toHaveProperty("faithfulness");
   });
 });

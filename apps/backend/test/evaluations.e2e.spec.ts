@@ -50,6 +50,7 @@ describe("EvaluationsService", () => {
     const control = {
       getSettings: jest.fn().mockResolvedValue(settings),
       updateSettings: jest.fn().mockResolvedValue(settings),
+      countLedgerByOutcome: jest.fn().mockResolvedValue({}),
       findWatermark: jest.fn().mockResolvedValue({
         lastTs: new Date("2026-07-15T01:55:00.000Z"),
         lastTraceId: "",
@@ -60,6 +61,7 @@ describe("EvaluationsService", () => {
     const clickhouse = {
       getOverview: jest.fn().mockResolvedValue({
         sampleCount: 0,
+        faithfulnessSampleCount: 0,
         faithfulness: null,
         answerRelevancy: null,
         contextPrecision: null,
@@ -70,6 +72,7 @@ describe("EvaluationsService", () => {
       countEligible: jest.fn().mockResolvedValue(0),
       countEvaluable: jest.fn().mockResolvedValue(0),
       countBacklog: jest.fn().mockResolvedValue(0),
+      countScoredInWindow: jest.fn().mockResolvedValue(0),
       getLatestSuccess: jest.fn().mockResolvedValue(undefined),
       getLatestFailure: jest.fn().mockResolvedValue(undefined),
     };
@@ -122,12 +125,14 @@ describe("EvaluationsService", () => {
     clickhouse.getOverview
       .mockResolvedValueOnce({
         sampleCount: 19,
+        faithfulnessSampleCount: 19,
         faithfulness: 90,
         answerRelevancy: 85,
         contextPrecision: 80,
       })
       .mockResolvedValueOnce({
         sampleCount: 100,
+        faithfulnessSampleCount: 100,
         faithfulness: 80,
         answerRelevancy: 80,
         contextPrecision: 80,
@@ -160,6 +165,7 @@ describe("EvaluationsService", () => {
         agentId: "agent-empty",
         agentName: "Empty Agent",
         sampleCount: 0,
+        faithfulnessSampleCount: 0,
         faithfulness: 0,
         answerRelevancy: 0,
         contextPrecision: 0,
@@ -169,6 +175,116 @@ describe("EvaluationsService", () => {
     expect(result.byAgent).toEqual([
       { agentId: "agent-empty", agentName: "Empty Agent", sampleCount: 0, scores: null },
     ]);
+  });
+
+  it("uses faithfulness coverage for its card and trend only", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getOverview
+      .mockResolvedValueOnce({
+        sampleCount: 12,
+        faithfulnessSampleCount: 3,
+        faithfulness: 90,
+        answerRelevancy: 85,
+        contextPrecision: 80,
+      })
+      .mockResolvedValueOnce({
+        sampleCount: 12,
+        faithfulnessSampleCount: 2,
+        faithfulness: 80,
+        answerRelevancy: 75,
+        contextPrecision: 70,
+      });
+    clickhouse.getMinuteAggregates.mockResolvedValue([
+      {
+        bucket: "2026-07-15T01:00:00.000Z",
+        sampleCount: 12,
+        faithfulnessSampleCount: 3,
+        faithfulness: 90,
+        answerRelevancy: 85,
+        contextPrecision: 80,
+      },
+    ]);
+
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.metrics.faithfulness).toMatchObject({ sampleCount: 3, previousDelta: null });
+    expect(result.metrics.answerRelevancy.sampleCount).toBe(12);
+    expect(result.trend[0]).toMatchObject({ faithfulnessSampleCount: 3, sampleCount: 12 });
+  });
+
+  it("preserves a partial agent score and chooses a scored minimum", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getByAgent.mockResolvedValue([
+      {
+        agentId: "app-1",
+        agentName: "Refund Bot",
+        sampleCount: 12,
+        faithfulnessSampleCount: 0,
+        faithfulness: null,
+        answerRelevancy: 72,
+        contextPrecision: 88,
+      },
+    ]);
+    clickhouse.getLowSamples.mockResolvedValue([
+      {
+        targetTraceId: "b".repeat(32),
+        question: "refund",
+        faithfulness: null,
+        answerRelevancy: 72,
+        contextPrecision: 88,
+        evidence: "{}",
+      },
+    ]);
+
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.byAgent[0]?.scores).toEqual({
+      faithfulness: null,
+      answerRelevancy: 72,
+      contextPrecision: 88,
+    });
+    expect(result.lowSamples[0]).toMatchObject({
+      minMetric: "answerRelevancy",
+      minScore: 72,
+    });
+  });
+
+  it("rejects a leaked sentinel at the service boundary", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getOverview.mockResolvedValue({
+      sampleCount: 1,
+      faithfulnessSampleCount: 1,
+      faithfulness: -1,
+      answerRelevancy: 80,
+      contextPrecision: 80,
+    });
+    await expect(service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"))).rejects.toThrow(
+      new RangeError("evaluation score out of range: expected 0..100"),
+    );
+  });
+
+  it("preserves nullable faithfulness and optional evidence in trace quality", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getLatestSuccess.mockResolvedValue({
+      targetTraceId: "a".repeat(32),
+      judgeVersion: "online-v2",
+      evaluatedAt: "2026-07-15T02:00:00.000Z",
+      judgeModel: "judge-1",
+      faithfulness: null,
+      answerRelevancy: 80,
+      contextPrecision: 70,
+      evidence: JSON.stringify({
+        answerRelevancy: ["relevant"],
+        contextPrecision: ["one noisy chunk"],
+      }),
+    });
+
+    await expect(service.getTraceQuality("a".repeat(32))).resolves.toMatchObject({
+      status: "scored",
+      scores: { faithfulness: null, answerRelevancy: 80, contextPrecision: 70 },
+      evidence: {
+        answerRelevancy: ["relevant"],
+        contextPrecision: ["one noisy chunk"],
+      },
+    });
   });
 
   // 一个 GET 绝不能推进/播种游标：getOrCreateWatermark 会把它钉在 now-24h，
@@ -203,7 +319,12 @@ describe("EvaluationsService", () => {
     ["水位线行还不存在（worker 一轮都没跑过）", undefined],
     [
       "lastRunAt 为空",
-      { lastTs: new Date("2026-07-15T01:55:00.000Z"), lastTraceId: "", dailyCount: 0, lastRunAt: null },
+      {
+        lastTs: new Date("2026-07-15T01:55:00.000Z"),
+        lastTraceId: "",
+        dailyCount: 0,
+        lastRunAt: null,
+      },
     ],
     [
       "lastRunAt 超过两轮 cron 没动",
@@ -227,6 +348,69 @@ describe("EvaluationsService", () => {
     const { service } = setupRunning();
     const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
     expect(result.meta.status).toBe("healthy");
+  });
+
+  // 账本只覆盖「worker 看过的」。冷启动播种孤儿化的 trace 从没进过候选集、没有账本行——
+  // 它们是「已错过」减去账本之后剩下的那部分。把「已错过」直接换成查账本会让它显示 0
+  // 而不是真实的数（018 §12 缺口 20 的那 31 条正是 neverSeen，账本一行都没有）。
+  it("attributes cursor-passed traces the ledger never saw to neverSeen", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    clickhouse.countEligible.mockResolvedValue(32);
+    clickhouse.countEvaluable.mockResolvedValue(0);
+    control.countLedgerByOutcome.mockResolvedValue({}); // worker 一条都没看过
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.meta.missed).toEqual({
+      total: 32,
+      sampledOut: 0,
+      quotaSkipped: 0,
+      incomplete: 0,
+      judgeFailed: 0,
+      neverSeen: 32,
+    });
+  });
+
+  it("splits missed traces by what the ledger recorded", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    clickhouse.countEligible.mockResolvedValue(20);
+    clickhouse.countEvaluable.mockResolvedValue(2);
+    control.countLedgerByOutcome.mockResolvedValue({
+      success: 3,
+      already_scored: 1,
+      sampled_out: 6,
+      quota_skipped_normal: 1,
+      incomplete: 2,
+      processed_failed: 1,
+    });
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    // 20 窗口内 − 2 仍可评 − (3 success + 1 already_scored) = 14 已错过
+    // 账本认领 6+1+2+1 = 10 ⇒ 剩 4 条从没被看过
+    expect(result.meta.missed).toEqual({
+      total: 14,
+      sampledOut: 6,
+      quotaSkipped: 1,
+      incomplete: 2,
+      judgeFailed: 1,
+      neverSeen: 4,
+    });
+  });
+
+  // 账本说评过、CH 查不到 ⇒ span 丢了。forceFlushTelemetry 吞掉导出失败，故
+  // 「worker 认为评了」不蕴含「分数可查」——账本是唯一不依赖 span 投递的证据。
+  it("reports scores the ledger claims but ClickHouse cannot show", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    control.countLedgerByOutcome.mockResolvedValue({ success: 5, already_scored: 2 });
+    clickhouse.countScoredInWindow.mockResolvedValue(4);
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.meta.scoresNotPersisted).toBe(3);
+  });
+
+  it("never reports negative loss when ClickHouse leads the ledger", async () => {
+    const { service, control, clickhouse } = setupRunning();
+    // 账本被保留期清理过、CH 还留着旧分数 ⇒ CH 多于账本，这不是丢包
+    control.countLedgerByOutcome.mockResolvedValue({ success: 1 });
+    clickhouse.countScoredInWindow.mockResolvedValue(9);
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.meta.scoresNotPersisted).toBe(0);
   });
 
   // 游标不存在 ⇒ 此刻还没有任何 trace 被越过 ⇒ 全窗口都仍可评，「已错过」为 0。
@@ -387,6 +571,7 @@ describeInfra("E-W1 infrastructure flow", () => {
       judge,
       emitter as never,
       fakeModels as never,
+      { onlineEvalBackfillWindowHours: 24 } as never,
     );
     service = new EvaluationsService(evaluationsRepo, clickhouseEvaluations, fakeModels as never);
     traces = new TracesService(new ClickHouseTracesRepository(harness.clickhouse));

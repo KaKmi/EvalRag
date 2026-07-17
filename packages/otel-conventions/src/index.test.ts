@@ -4,6 +4,7 @@ import {
   CODECRUSH_REDACTED,
   CODECRUSH_SPAN_KIND,
   ENDUSER_ID,
+  EVALUATION_UNSCORED_SCORE,
   GEN_AI,
   OTEL_OPERATIONS,
   RAG,
@@ -26,6 +27,10 @@ describe("otel conventions", () => {
     expect(RAG.EVAL_VERSION).toBe("rag.eval.version");
     expect(RAG.EVAL_DEDUPE_KEY).toBe("rag.eval.dedupe_key");
     expect(RAG.EVAL_STATUS).toBe("rag.eval.status");
+  });
+
+  it("reserves -1 for an unscored evaluation metric", () => {
+    expect(EVALUATION_UNSCORED_SCORE).toBe(-1);
   });
 
   it("exposes generic operation and span kind names", () => {

@@ -5,17 +5,20 @@ import type { EvaluationInput, EvaluationModelIds, MetricResult } from "./evalua
 import {
   callJudgeProvider,
   invalidJudgeOutput,
+  limitedEvidence,
   parseJudgeOutput,
+  repairInstruction,
   structuredOutput,
   withJudgeRetry,
+  type PriorJudgeFailure,
 } from "./evaluation-judge.utils";
 
 const AnswerRelevancyOutputSchema = z.strictObject({
-  questions: z.array(z.string().min(1).max(300)).min(1).max(3),
+  questions: z.array(z.string().min(1).max(500)).min(1).max(3),
 });
 
 const ANSWER_RELEVANCY_OUTPUT = structuredOutput(
-  "evaluation_answer_relevancy_v1",
+  "evaluation_answer_relevancy_v2",
   AnswerRelevancyOutputSchema,
 );
 
@@ -24,7 +27,7 @@ export class AnswerRelevancyEvaluator {
   constructor(private readonly models: ModelsService) {}
 
   async score(input: EvaluationInput, modelIds: EvaluationModelIds): Promise<MetricResult> {
-    return withJudgeRetry("answer relevancy", async () => {
+    return withJudgeRetry("answer relevancy", async (priorFailure?: PriorJudgeFailure) => {
       const response = await callJudgeProvider(() =>
         this.models.chat(
           modelIds.judgeModelId,
@@ -32,9 +35,12 @@ export class AnswerRelevancyEvaluator {
             {
               role: "system",
               content:
-                "Generate one to three concise questions that the supplied answer directly answers. Return strict JSON only.",
+                "Generate one to three concise questions that the supplied answer directly answers. Return JSON only, no markdown code fences.",
             },
             { role: "user", content: JSON.stringify({ answer: input.answer }) },
+            ...(priorFailure
+              ? [{ role: "user" as const, content: repairInstruction(priorFailure) }]
+              : []),
           ],
           { temperature: 0, structuredOutput: ANSWER_RELEVANCY_OUTPUT },
         ),
@@ -50,7 +56,7 @@ export class AnswerRelevancyEvaluator {
         similarities.reduce((sum, value) => sum + Math.max(0, value), 0) / similarities.length;
       return {
         score: Math.round(Math.max(0, Math.min(1, mean)) * 100),
-        evidence: output.questions,
+        evidence: limitedEvidence(output.questions, "No reverse questions were returned."),
         // 018 决策 G：透传 chat 的 usage（embedTexts 不返回 usage → 该部分计 0，不猜）。
         usage: response.usage,
       };

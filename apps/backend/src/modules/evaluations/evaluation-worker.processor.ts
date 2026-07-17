@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { Inject, Injectable, type OnModuleInit } from "@nestjs/common";
+import { Inject, Injectable, Logger, type OnModuleInit } from "@nestjs/common";
 import { z } from "zod";
+import { AppConfigService } from "../../platform/config/config.service";
 import {
   EVALUATION_QUEUE,
   ONLINE_EVALUATION_JOB,
@@ -23,7 +24,12 @@ import { EvaluationJudgeService } from "./evaluation-judge.service";
 import { EvaluationSpanEmitter } from "./evaluation-span.emitter";
 import { normalizeEvaluationError } from "./evaluation-worker.errors";
 import { EvaluationsRepository } from "./evaluations.repository";
-import { classifyRisk, effectiveNormalRate, stableSample } from "./sampling";
+import {
+  classifyRisk,
+  effectiveNormalRate,
+  isFaithfulnessEligible,
+  stableSample,
+} from "./sampling";
 
 const WorkerPayloadSchema = z.strictObject({ workerName: z.string().min(1).max(100) });
 
@@ -40,8 +46,10 @@ export type CandidateOutcomeKind =
 export interface CandidateOutcome {
   traceId: string;
   startTime: Date;
+  agentId: string;
   kind: CandidateOutcomeKind;
   advancesCursor: boolean;
+  error?: string | null;
 }
 
 export interface CycleResult {
@@ -57,12 +65,22 @@ function outcome(
   candidate: EvaluationCandidate,
   kind: CandidateOutcomeKind,
   advancesCursor = true,
+  error: string | null = null,
 ): CandidateOutcome {
-  return { traceId: candidate.traceId, startTime: candidate.startTime, kind, advancesCursor };
+  return {
+    traceId: candidate.traceId,
+    startTime: candidate.startTime,
+    agentId: candidate.agentId,
+    kind,
+    advancesCursor,
+    error,
+  };
 }
 
 @Injectable()
 export class EvaluationWorkerProcessor implements OnModuleInit {
+  private readonly logger = new Logger(EvaluationWorkerProcessor.name);
+
   constructor(
     @Inject(EVALUATION_QUEUE) private readonly queue: Queue,
     private readonly repo: EvaluationsRepository,
@@ -71,7 +89,17 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
     private readonly judge: EvaluationJudgeService,
     private readonly emitter: EvaluationSpanEmitter,
     private readonly models: ModelsService,
+    private readonly config: AppConfigService,
   ) {}
+
+  /**
+   * 冷启动播种点——只在水位线那行不存在时生效。`-1` = 全部历史（epoch）。
+   * 注意 `dailyCap` 仍然封顶：历史多时分多天评完，不会一次灌爆预算。
+   */
+  private seedFrom(now: Date): Date {
+    const hours = this.config.onlineEvalBackfillWindowHours;
+    return hours < 0 ? new Date(0) : new Date(now.getTime() - hours * 60 * 60 * 1000);
+  }
 
   async onModuleInit(): Promise<void> {
     await this.queue.subscribe(ONLINE_EVALUATION_JOB, async (data) => {
@@ -106,12 +134,13 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
     }
 
     const owner = randomUUID();
-    if (!(await this.repo.tryAcquireLease(workerName, owner, now, EVALUATION_LEASE_MS))) {
+    const seedFrom = this.seedFrom(now);
+    if (!(await this.repo.tryAcquireLease(workerName, owner, now, EVALUATION_LEASE_MS, seedFrom))) {
       return this.emptyResult("lease_busy");
     }
 
     try {
-      const watermark = await this.repo.getOrCreateWatermark(workerName, now);
+      const watermark = await this.repo.getOrCreateWatermark(workerName, now, seedFrom);
       const candidates = await this.clickhouse.listCandidates(
         watermark,
         new Date(now.getTime() - EVALUATION_LAG_BUFFER_MS),
@@ -122,6 +151,9 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
       let dailyCount = watermark.dailyCount;
       let consecutiveJudgeFailures = 0;
       let lastError: string | null = null;
+      // 本轮有没有真的调过裁判。判据不能用「有没有候选」——一轮 500 条全 sampled_out 同样
+      // 没碰过裁判，同样无权改写裁判的健康状态。
+      let judgeAttempted = false;
 
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index];
@@ -156,11 +188,18 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
           outcomes.push(outcome(candidate, "incomplete"));
           continue;
         }
+        judgeAttempted = true;
         try {
-          const result = await this.judge.score(assembled.input, {
-            judgeModelId: settings.judgeModelId!,
-            embeddingModelId: settings.embeddingModelId!,
-          });
+          const result = await this.judge.score(
+            assembled.input,
+            {
+              judgeModelId: settings.judgeModelId!,
+              embeddingModelId: settings.embeddingModelId!,
+            },
+            {
+              skipFaithfulness: !isFaithfulnessEligible(candidate),
+            },
+          );
           await this.emitter.emitSuccess({
             candidate,
             input: assembled.input,
@@ -186,7 +225,7 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
           });
           consecutiveJudgeFailures += 1;
           lastError = normalized.message;
-          outcomes.push(outcome(candidate, "processed_failed"));
+          outcomes.push(outcome(candidate, "processed_failed", true, normalized.message));
         }
       }
 
@@ -200,9 +239,28 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
         ...cursor,
         evaluatedIncrement: evaluatedCount,
         now,
-        consecutiveFailures: consecutiveJudgeFailures,
-        lastError,
+        // 「跑过」≠「走过」：空转一轮也更新 lastRunAt，游标却可能几天没动。
+        cursorMoved:
+          cursor.lastTraceId !== watermark.lastTraceId ||
+          cursor.lastTs.getTime() !== watermark.lastTs.getTime(),
+        // 账本记「worker 对这条 trace 做了什么」——即全部**终态** outcome（6 种推进的），
+        // 与游标够不够得着无关（cap/circuit 之后的候选照样被处理，见 finishCycle 注释）。
+        // 两个 deferred 不记：它们下一轮会重来，记了就是假账。
+        judgeVersion: settings.judgeVersion,
+        ledger: outcomes
+          .filter((item) => item.advancesCursor)
+          .map((item) => ({
+            targetTraceId: item.traceId,
+            traceStartTime: item.startTime,
+            agentId: item.agentId,
+            outcome: item.kind,
+            lastError: item.error,
+          })),
+        // 没动过裁判就不上报裁判健康状态（传 undefined ⇒ finishCycle 不碰那两列），
+        // 否则空轮会把上一次真实故障擦成 0/null。
+        ...(judgeAttempted ? { consecutiveFailures: consecutiveJudgeFailures, lastError } : {}),
       });
+      await this.pruneLedger(now);
       const status =
         dailyCount >= Math.floor(settings.dailyCap * 0.8) ? "budget_reduced" : "healthy";
       return {
@@ -219,6 +277,26 @@ export class EvaluationWorkerProcessor implements OnModuleInit {
       };
     } finally {
       await this.repo.releaseLease(workerName, owner, now);
+    }
+  }
+
+  /**
+   * 账本清理搭本轮的车，不新建 cron（多一个周期任务就多一个要盯的东西）。
+   * **绝不让清理失败带垮整轮**：这一轮的评分与游标此时已经落库，为了一次删除失败而把
+   * 整个 handler 抛出去，只会让 pg-boss 重投、`recordFailure` 记一笔与评测无关的错，
+   * 把「裁判到底健不健康」这个信号搅浑。
+   */
+  private async pruneLedger(now: Date): Promise<void> {
+    const days = this.config.onlineEvalLedgerRetentionDays;
+    try {
+      const removed = await this.repo.pruneLedger(
+        new Date(now.getTime() - days * 24 * 60 * 60 * 1000),
+      );
+      if (removed > 0) this.logger.log(`账本清理：删除 ${removed} 行（早于 ${days} 天）`);
+    } catch (error) {
+      this.logger.warn(
+        `账本清理失败（不影响本轮评测）：${normalizeEvaluationError(error).message}`,
+      );
     }
   }
 

@@ -33,19 +33,25 @@ export class EvaluationJudgeService {
    * 在线判分（E-W1 基线，017:39 的**整体失败**不变式）：三个 await 顺序执行、无 try/catch，
    * 任一 evaluator 抛错整条 evaluation 失败，不聚合部分分数。
    *
-   * ⚠️ **一行不许动**（Global Constraints）。离线的单指标隔离语义与此**相反**，
-   * 故 `scoreOffline` 绝不复用本方法——见其 docstring。
+   * 020 v2 只允许通过显式 option 跳过 faithfulness；实际调用的 evaluator 仍保持整体失败。
+   * 离线的单指标隔离语义与此**相反**，故 `scoreOffline` 绝不复用本方法——见其 docstring。
    */
-  async score(input: EvaluationInput, modelIds: EvaluationModelIds): Promise<EvaluationScores> {
-    const faithfulness = await this.faithfulness.score(input, modelIds.judgeModelId);
+  async score(
+    input: EvaluationInput,
+    modelIds: EvaluationModelIds,
+    options: { skipFaithfulness?: boolean } = {},
+  ): Promise<EvaluationScores> {
+    const faithfulness = options.skipFaithfulness
+      ? null
+      : await this.faithfulness.score(input, modelIds.judgeModelId);
     const answerRelevancy = await this.answerRelevancy.score(input, modelIds);
     const contextPrecision = await this.contextPrecision.score(input, modelIds.judgeModelId);
     return {
-      faithfulness: faithfulness.score,
+      faithfulness: faithfulness?.score ?? null,
       answerRelevancy: answerRelevancy.score,
       contextPrecision: contextPrecision.score,
       evidence: {
-        faithfulness: faithfulness.evidence,
+        ...(faithfulness ? { faithfulness: faithfulness.evidence } : {}),
         answerRelevancy: answerRelevancy.evidence,
         contextPrecision: contextPrecision.evidence,
       },

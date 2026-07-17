@@ -35,7 +35,8 @@ export interface CorrectnessInput extends EvaluationInput {
 /**
  * 018 决策 D：离线判分结果——四个指标各自可空。
  * NULL = 未评（裁判失败 / 无 gold）——**绝不写 0**（原型 §6：不拉低均值）。
- * 与在线 `EvaluationScores`（三个必填 number，整体失败语义）刻意分开，互不影响。
+ * 与在线 `EvaluationScores`（faithfulness 可 intentional null，另外两项必填；实际调用的
+ * evaluator 仍是整体失败语义）刻意分开，互不影响。
  */
 export interface OfflineEvaluationScores {
   faithfulness: number | null;
@@ -49,11 +50,11 @@ export interface OfflineEvaluationScores {
 }
 
 export interface EvaluationScores {
-  faithfulness: number;
+  faithfulness: number | null;
   answerRelevancy: number;
   contextPrecision: number;
   evidence: {
-    faithfulness: string[];
+    faithfulness?: string[];
     answerRelevancy: string[];
     contextPrecision: string[];
   };

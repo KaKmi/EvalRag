@@ -29,6 +29,7 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
           jsonResult([
             {
               sample_count: "1",
+              faithfulness_sample_count: "1",
               faithfulness: 92,
               answer_relevancy: 85,
               context_precision: 78,
@@ -39,13 +40,15 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
     const repo = new ClickHouseEvaluationsRepository(clickhouse as never);
     await expect(repo.getOverview({ from, to, judgeVersion: "online-v1" })).resolves.toMatchObject({
       sampleCount: 1,
+      faithfulnessSampleCount: 1,
       faithfulness: 92,
     });
 
     const sql = clickhouse.query.mock.calls.at(-1)?.[0].query as string;
-    expect(sql).toContain("argMaxMerge(faithfulness_state)");
+    expect(sql).toContain("nullIf(argMaxMerge(faithfulness_state), -1) AS faithfulness");
     expect(sql).toContain("GROUP BY target_trace_id, judge_version");
-    expect(sql).toContain("avg(faithfulness)");
+    expect(sql).toContain("count(faithfulness_score) AS faithfulness_sample_count");
+    expect(sql).toContain("if(count(faithfulness_score) = 0, NULL, avg(faithfulness_score))");
     expect(sql).toContain("judge_version = {judgeVersion:String}");
   });
 
@@ -77,6 +80,44 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
     expect(sql).not.toContain("rag.eval.error");
   });
 
+  it.each([
+    [null, null],
+    ["-1", null],
+    [-1, null],
+    ["NaN", null],
+    [Infinity, null],
+    [0, 0],
+  ])("normalizes latest faithfulness %p to %p", async (faithfulness, expected) => {
+    const clickhouse = {
+      command: jest.fn().mockResolvedValue(undefined),
+      query: jest
+        .fn()
+        .mockResolvedValueOnce(jsonResult([{ result: 1 }]))
+        .mockResolvedValueOnce(jsonResult([{ count: "1" }]))
+        .mockResolvedValueOnce(
+          jsonResult([
+            {
+              target_trace_id: "a".repeat(32),
+              judge_version: "online-v2",
+              evaluated_at: "2026-07-15 02:01:00.000000000",
+              generation_model: "generation-1",
+              judge_model: "judge-1",
+              faithfulness,
+              answer_relevancy: 80,
+              context_precision: 90,
+              evidence: "{}",
+            },
+          ]),
+        ),
+    };
+    const repo = new ClickHouseEvaluationsRepository(clickhouse as never);
+    await expect(repo.getLatestSuccess("a".repeat(32))).resolves.toMatchObject({
+      faithfulness: expected,
+      answerRelevancy: 80,
+      contextPrecision: 90,
+    });
+  });
+
   it("keeps eligible agents with no successful evaluations", async () => {
     const clickhouse = {
       command: jest.fn().mockResolvedValue(undefined),
@@ -90,6 +131,7 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
               agent_id: "agent-empty",
               agent_name: "Empty Agent",
               sample_count: "0",
+              faithfulness_sample_count: "0",
               faithfulness: null,
               answer_relevancy: null,
               context_precision: null,
@@ -103,6 +145,7 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
         agentId: "agent-empty",
         agentName: "Empty Agent",
         sampleCount: 0,
+        faithfulnessSampleCount: 0,
         faithfulness: null,
         answerRelevancy: null,
         contextPrecision: null,
@@ -176,6 +219,8 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
     expect(sql.indexOf("latest.faithfulness < {faithfulnessThreshold:Float64}")).toBeLessThan(
       sql.indexOf("LIMIT {limit:UInt32}"),
     );
+    expect(sql).toContain("latest.faithfulness IS NOT NULL");
+    expect(sql).toContain("least(ifNull(latest.faithfulness, 101)");
     expect(call.query_params).toMatchObject({
       faithfulnessThreshold: 85,
       answerRelevancyThreshold: 80,
@@ -224,6 +269,7 @@ describe("ClickHouseEvaluationsRepository SQL", () => {
 const enabled = process.env.RUN_CLICKHOUSE_TESTS === "1";
 const describeClickHouse = enabled ? describe : describe.skip;
 const target = "a".repeat(32);
+const scoredTarget = "b".repeat(32);
 const failedTarget = "f".repeat(32);
 const emptyTarget = "e".repeat(32);
 
@@ -235,6 +281,7 @@ async function insertEvalSpan(
     version: string;
     status: "success" | "failed";
     score?: number;
+    faithfulnessScore?: number;
   },
 ) {
   const attributes: Record<string, string> = {
@@ -246,7 +293,7 @@ async function insertEvalSpan(
   };
   if (row.status === "success") {
     Object.assign(attributes, {
-      "rag.eval.faithfulness": String(row.score),
+      "rag.eval.faithfulness": String(row.faithfulnessScore ?? row.score),
       "rag.eval.answer_relevancy": String(row.score),
       "rag.eval.context_precision": String(row.score),
       "rag.eval.judge_model": "judge-1",
@@ -376,14 +423,14 @@ describeClickHouse("evaluation read model", () => {
   afterEach(async () => {
     await client.command({
       query:
-        "ALTER TABLE otel_traces DELETE WHERE TraceId IN ({target:String},{failed:String},{empty:String})",
-      query_params: { target, failed: failedTarget, empty: emptyTarget },
+        "ALTER TABLE otel_traces DELETE WHERE TraceId IN ({target:String},{scored:String},{failed:String},{empty:String})",
+      query_params: { target, scored: scoredTarget, failed: failedTarget, empty: emptyTarget },
       clickhouse_settings: { mutations_sync: 2 },
     });
     await client.command({
       query:
-        "ALTER TABLE codecrush_eval_targets DELETE WHERE target_trace_id IN ({target:String},{failed:String})",
-      query_params: { target, failed: failedTarget },
+        "ALTER TABLE codecrush_eval_targets DELETE WHERE target_trace_id IN ({target:String},{scored:String},{failed:String})",
+      query_params: { target, scored: scoredTarget, failed: failedTarget },
       clickhouse_settings: { mutations_sync: 2 },
     });
   });
@@ -424,6 +471,7 @@ describeClickHouse("evaluation read model", () => {
       {
         bucket: "2026-07-15T02:00:00.000Z",
         sampleCount: 1,
+        faithfulnessSampleCount: 1,
         faithfulness: 90,
         answerRelevancy: 90,
         contextPrecision: 90,
@@ -467,6 +515,7 @@ describeClickHouse("evaluation read model", () => {
         agentId: "agent-empty",
         agentName: "Empty Agent",
         sampleCount: 0,
+        faithfulnessSampleCount: 0,
         faithfulness: null,
         answerRelevancy: null,
         contextPrecision: null,
@@ -498,6 +547,100 @@ describeClickHouse("evaluation read model", () => {
     expect(rows[0].faithfulness).toBe(40);
   });
 
+  it("keeps unscored faithfulness out of aggregates while preserving other v2 metrics", async () => {
+    await insertAgentRoot(client, {
+      traceId: target,
+      agentId: "agent-1",
+      agentName: "Evaluation Agent",
+      at: "2026-07-15 02:00:00.000000000",
+    });
+    await insertAgentRoot(client, {
+      traceId: scoredTarget,
+      agentId: "agent-1",
+      agentName: "Evaluation Agent",
+      at: "2026-07-15 02:01:00.000000000",
+    });
+    await insertEvalSpan(client, {
+      target,
+      at: "2026-07-15 02:00:01.000000000",
+      version: "online-v2",
+      status: "success",
+      score: 60,
+      faithfulnessScore: -1,
+    });
+    await insertEvalSpan(client, {
+      target: scoredTarget,
+      at: "2026-07-15 02:01:01.000000000",
+      version: "online-v2",
+      status: "success",
+      score: 80,
+      faithfulnessScore: 90,
+    });
+    await repository.backfillForTest();
+
+    const window = {
+      from: "2026-07-15T02:00:00.000Z",
+      to: "2026-07-15T03:00:00.000Z",
+      judgeVersion: "online-v2",
+    };
+    await expect(repository.getOverview(window)).resolves.toEqual({
+      sampleCount: 2,
+      faithfulnessSampleCount: 1,
+      faithfulness: 90,
+      answerRelevancy: 70,
+      contextPrecision: 70,
+    });
+    await expect(repository.getMinuteAggregates(window)).resolves.toEqual([
+      {
+        bucket: "2026-07-15T02:00:00.000Z",
+        sampleCount: 1,
+        faithfulnessSampleCount: 0,
+        faithfulness: null,
+        answerRelevancy: 60,
+        contextPrecision: 60,
+      },
+      {
+        bucket: "2026-07-15T02:01:00.000Z",
+        sampleCount: 1,
+        faithfulnessSampleCount: 1,
+        faithfulness: 90,
+        answerRelevancy: 80,
+        contextPrecision: 80,
+      },
+    ]);
+    await expect(repository.getByAgent(window)).resolves.toEqual([
+      {
+        agentId: "agent-1",
+        agentName: "Evaluation Agent",
+        sampleCount: 2,
+        faithfulnessSampleCount: 1,
+        faithfulness: 90,
+        answerRelevancy: 70,
+        contextPrecision: 70,
+      },
+    ]);
+    await expect(repository.getLatestSuccess(target)).resolves.toMatchObject({
+      judgeVersion: "online-v2",
+      faithfulness: null,
+      answerRelevancy: 60,
+      contextPrecision: 60,
+    });
+    await expect(
+      repository.getLowSamples(
+        window,
+        { faithfulness: 75, answerRelevancy: 75, contextPrecision: 75 },
+        10,
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        targetTraceId: target,
+        faithfulness: null,
+        answerRelevancy: 60,
+        contextPrecision: 60,
+      }),
+    ]);
+  });
+
   it("reports zero backlog when the watermark sits exactly on the last processed trace", async () => {
     const at = "2026-07-15 02:03:00.000000000";
     await insertAgentRoot(client, {
@@ -526,7 +669,10 @@ describeClickHouse("evaluation read model", () => {
       agentName: "Real Agent",
       at: "2026-07-15 02:03:00.000000000",
     });
-    const window = { from: new Date("2026-07-15T02:00:00.000Z"), to: new Date("2026-07-15T03:00:00.000Z") };
+    const window = {
+      from: new Date("2026-07-15T02:00:00.000Z"),
+      to: new Date("2026-07-15T03:00:00.000Z"),
+    };
 
     // 游标之前：窗口内合格，但永远不会被评 ⇒ 不算「仍可评」。这正是屏1 那 31 条的处境。
     await expect(

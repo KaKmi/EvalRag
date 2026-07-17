@@ -34,6 +34,30 @@ export const envSchema = z.object({
    * 调大它是**安全网不是解药**：根因是模型的思考 token（018 §12 缺口 17）。
    */
   EVAL_RUN_CASE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  /**
+   * E-W1 在线评测**冷启动回看窗口**（小时）——只在 `eval_watermarks` 那行**第一次被创建**时
+   * 起作用：游标播种在 `now - N 小时`，更早的 trace 从此**永不进候选集**（`listCandidates`
+   * 用严格元组游标只往前看）。
+   *
+   * 默认 24 = `017:26`「首次启用最多回看 24 小时」的原行为，**不设此变量的部署零变化**。
+   * `0` = 只评此后的新问答；`-1` = 回看全部历史。
+   *
+   * ⚠️ 该窗口是**一次性**的：`onConflictDoNothing` 保护重启（保住原游标），但保护不了**诞生**。
+   * 行建好之后改这个值不会有任何效果——要重新播种必须先删那行。
+   * ⚠️ `-1` 不解除 `dailyCap`（默认 500/天）：历史多时会分多天评完，而非一次灌爆预算。
+   *
+   * 之所以要可配：24 这个值原先**不可见也不可配**，而它一声不响吃掉的历史在屏1 上曾被
+   * 显示成「可评测」（018 §12 缺口 20 的真因，该缺口原把成因误判为抽样）。
+   */
+  ONLINE_EVAL_BACKFILL_WINDOW_HOURS: z.coerce.number().int().min(-1).default(24),
+  /**
+   * `eval_candidate_ledger` 的保留天数（按 trace 发生时间）。默认 30 = 屏1 最长窗口，
+   * 更旧的账本行没有读者。
+   *
+   * 容量：017 设计上限 ≤10 QPS，最坏每天约 86 万行 ⇒ 30 天约 2600 万行。单表能扛，
+   * 但要靠 `trace_start_time` 索引 + 本清理，两者缺一不可。真实流量更高时下调此值。
+   */
+  ONLINE_EVAL_LEDGER_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
   // M4.1 文档处理 Profile 特性开关：默认开；置 "false" 回退 legacy chunkTemplate 入库路径
   // （不建 Run、payload 无 processingRunId），供灰度/回滚。
   PROCESSING_PROFILES_ENABLED: z
