@@ -8,6 +8,7 @@ import type {
   QualityOverviewQuery,
   QualityOverviewResponse,
   QualityScores,
+  QualityThresholds,
   TraceQualityDetail,
   UpdateOnlineEvalSettingsRequest,
 } from "@codecrush/contracts";
@@ -37,7 +38,10 @@ export class EvaluationsService {
     private readonly models: ModelsService,
   ) {}
 
-  async getOverview(query: QualityOverviewQuery, now = new Date()): Promise<QualityOverviewResponse> {
+  async getOverview(
+    query: QualityOverviewQuery,
+    now = new Date(),
+  ): Promise<QualityOverviewResponse> {
     const settings = await this.controlRepo.getSettings();
     const to = query.to ? new Date(query.to) : now;
     const from = query.from ? new Date(query.from) : new Date(to.getTime() - 7 * DAY_MS);
@@ -120,25 +124,37 @@ export class EvaluationsService {
         backlog,
       },
       metrics: {
-        faithfulness: metricValue("faithfulness", aggregate, previousAggregate, settings.faithfulnessThreshold),
+        faithfulness: metricValue(
+          "faithfulness",
+          aggregate,
+          previousAggregate,
+          settings.faithfulnessThreshold,
+          aggregate.faithfulnessSampleCount,
+          previousAggregate.faithfulnessSampleCount,
+        ),
         answerRelevancy: metricValue(
           "answerRelevancy",
           aggregate,
           previousAggregate,
           settings.answerRelevancyThreshold,
+          aggregate.sampleCount,
+          previousAggregate.sampleCount,
         ),
         contextPrecision: metricValue(
           "contextPrecision",
           aggregate,
           previousAggregate,
           settings.contextPrecisionThreshold,
+          aggregate.sampleCount,
+          previousAggregate.sampleCount,
         ),
       },
       trend: trend.map((point) => ({
         bucket: point.bucket,
-        faithfulness: score(point.faithfulness),
-        answerRelevancy: score(point.answerRelevancy),
-        contextPrecision: score(point.contextPrecision),
+        faithfulness: normalizeScore(point.faithfulness),
+        answerRelevancy: normalizeScore(point.answerRelevancy),
+        contextPrecision: normalizeScore(point.contextPrecision),
+        faithfulnessSampleCount: point.faithfulnessSampleCount,
         sampleCount: point.sampleCount,
         insufficientSample: point.sampleCount < LOW_SAMPLE_COUNT,
       })),
@@ -148,25 +164,32 @@ export class EvaluationsService {
         scores: aggregateScores(item),
         sampleCount: item.sampleCount,
       })),
-      lowSamples: lowSamples.filter((item) =>
-        item.faithfulness < settings.faithfulnessThreshold ||
-        item.answerRelevancy < settings.answerRelevancyThreshold ||
-        item.contextPrecision < settings.contextPrecisionThreshold,
-      ).map((item) => {
-        const scores = {
-          faithfulness: score(item.faithfulness) ?? 0,
-          answerRelevancy: score(item.answerRelevancy) ?? 0,
-          contextPrecision: score(item.contextPrecision) ?? 0,
-        };
-        const minMetric = minimumMetric(scores);
-        return {
-          targetTraceId: item.targetTraceId,
-          question: item.question,
-          minMetric,
-          minScore: scores[minMetric],
-          evidenceSummary: evidenceSummary(item.evidence),
-        };
-      }),
+      lowSamples: lowSamples
+        .filter(
+          (item) =>
+            (item.faithfulness !== null && item.faithfulness < settings.faithfulnessThreshold) ||
+            item.answerRelevancy < settings.answerRelevancyThreshold ||
+            item.contextPrecision < settings.contextPrecisionThreshold,
+        )
+        .map((item) => {
+          const scores = {
+            faithfulness: normalizeScore(item.faithfulness),
+            answerRelevancy: normalizeScore(item.answerRelevancy),
+            contextPrecision: normalizeScore(item.contextPrecision),
+          };
+          const minMetric = minimumMetric(scores);
+          const minScore = scores[minMetric];
+          if (typeof minScore !== "number") {
+            throw new RangeError("evaluation score out of range: expected 0..100");
+          }
+          return {
+            targetTraceId: item.targetTraceId,
+            question: item.question,
+            minMetric,
+            minScore,
+            evidenceSummary: evidenceSummary(item.evidence),
+          };
+        }),
     };
   }
 
@@ -176,11 +199,7 @@ export class EvaluationsService {
     if (success) {
       return {
         status: "scored",
-        scores: {
-          faithfulness: score(success.faithfulness) ?? 0,
-          answerRelevancy: score(success.answerRelevancy) ?? 0,
-          contextPrecision: score(success.contextPrecision) ?? 0,
-        },
+        scores: requiredScores(success),
         thresholds: thresholds(settings),
         judgeModel: success.judgeModel || "unknown",
         judgeVersion: success.judgeVersion,
@@ -220,7 +239,9 @@ export class EvaluationsService {
     };
   }
 
-  async updateSettings(update: UpdateOnlineEvalSettingsRequest): Promise<OnlineEvalSettingsResponse> {
+  async updateSettings(
+    update: UpdateOnlineEvalSettingsRequest,
+  ): Promise<OnlineEvalSettingsResponse> {
     const current = await this.controlRepo.getSettings();
     const merged = { ...current, ...update };
     if (merged.enabled) {
@@ -296,8 +317,26 @@ function workerStalled(lastRunAt: Date | null | undefined, now: Date): boolean {
   return now.getTime() - lastRunAt.getTime() > WORKER_STALE_MS;
 }
 
-function score(value: number | null): number | null {
-  return value === null || !Number.isFinite(value) ? null : Math.max(0, Math.min(100, Math.round(value)));
+function normalizeScore(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  if (value < 0 || value > 100) {
+    throw new RangeError("evaluation score out of range: expected 0..100");
+  }
+  return Math.round(value);
+}
+
+function requiredScores(values: {
+  faithfulness: number | null;
+  answerRelevancy: number;
+  contextPrecision: number;
+}): QualityScores {
+  const faithfulness = normalizeScore(values.faithfulness);
+  const answerRelevancy = normalizeScore(values.answerRelevancy);
+  const contextPrecision = normalizeScore(values.contextPrecision);
+  if (answerRelevancy === null || contextPrecision === null) {
+    throw new RangeError("evaluation score out of range: expected 0..100");
+  }
+  return { faithfulness, answerRelevancy, contextPrecision };
 }
 
 function metricValue(
@@ -305,16 +344,21 @@ function metricValue(
   current: EvaluationAggregate,
   previous: EvaluationAggregate,
   threshold: number,
+  currentCount: number,
+  previousCount: number,
 ) {
-  const value = score(current[metric]);
-  const previousValue = score(previous[metric]);
+  const value = normalizeScore(current[metric]);
+  const previousValue = normalizeScore(previous[metric]);
   return {
     value,
     previousDelta:
-      current.sampleCount < LOW_SAMPLE_COUNT || previous.sampleCount < LOW_SAMPLE_COUNT || value === null || previousValue === null
+      currentCount < LOW_SAMPLE_COUNT ||
+      previousCount < LOW_SAMPLE_COUNT ||
+      value === null ||
+      previousValue === null
         ? null
         : value - previousValue,
-    sampleCount: current.sampleCount,
+    sampleCount: currentCount,
     threshold,
     low: value !== null && value < threshold,
   };
@@ -322,15 +366,15 @@ function metricValue(
 
 function aggregateScores(aggregate: EvaluationAggregate): QualityScores | null {
   if (aggregate.sampleCount === 0) return null;
-  const faithfulness = score(aggregate.faithfulness);
-  const answerRelevancy = score(aggregate.answerRelevancy);
-  const contextPrecision = score(aggregate.contextPrecision);
-  return faithfulness === null || answerRelevancy === null || contextPrecision === null
+  const faithfulness = normalizeScore(aggregate.faithfulness);
+  const answerRelevancy = normalizeScore(aggregate.answerRelevancy);
+  const contextPrecision = normalizeScore(aggregate.contextPrecision);
+  return answerRelevancy === null || contextPrecision === null
     ? null
     : { faithfulness, answerRelevancy, contextPrecision };
 }
 
-function thresholds(settings: OnlineEvalSettingsRow): QualityScores {
+function thresholds(settings: OnlineEvalSettingsRow): QualityThresholds {
   return {
     faithfulness: settings.faithfulnessThreshold,
     answerRelevancy: settings.answerRelevancyThreshold,
@@ -338,17 +382,18 @@ function thresholds(settings: OnlineEvalSettingsRow): QualityScores {
   };
 }
 
-function minimumMetric(scores: QualityScores): QualityMetric {
-  return (Object.entries(scores) as Array<[QualityMetric, number]>).reduce((lowest, current) =>
-    current[1] < lowest[1] ? current : lowest,
-  )[0];
+function minimumMetric(scores: Record<QualityMetric, number | null>): QualityMetric {
+  return (Object.entries(scores) as Array<[QualityMetric, number | null]>)
+    .filter((entry): entry is [QualityMetric, number] => typeof entry[1] === "number")
+    .reduce((lowest, current) => (current[1] < lowest[1] ? current : lowest))[0];
 }
 
 function parseEvidence(raw: string): QualityEvidence {
   try {
     const value = JSON.parse(raw) as Partial<Record<QualityMetric, unknown>>;
+    const faithfulness = evidenceItems(value.faithfulness);
     return {
-      faithfulness: evidenceList(value.faithfulness),
+      ...(faithfulness.length > 0 ? { faithfulness } : {}),
       answerRelevancy: evidenceList(value.answerRelevancy),
       contextPrecision: evidenceList(value.contextPrecision),
     };
@@ -358,14 +403,20 @@ function parseEvidence(raw: string): QualityEvidence {
 }
 
 function evidenceList(value: unknown): string[] {
-  if (!Array.isArray(value)) return ["No evidence returned"];
-  const items = value.filter((item): item is string => typeof item === "string").map((item) => item.slice(0, 300)).slice(0, 5);
+  const items = evidenceItems(value);
   return items.length ? items : ["No evidence returned"];
+}
+
+function evidenceItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string" && item.length > 0)
+    .map((item) => item.slice(0, 300))
+    .slice(0, 5);
 }
 
 function emptyEvidence(): QualityEvidence {
   return {
-    faithfulness: ["No evidence returned"],
     answerRelevancy: ["No evidence returned"],
     contextPrecision: ["No evidence returned"],
   };
@@ -373,7 +424,11 @@ function emptyEvidence(): QualityEvidence {
 
 function evidenceSummary(raw: string): string {
   const evidence = parseEvidence(raw);
-  return [...evidence.faithfulness, ...evidence.answerRelevancy, ...evidence.contextPrecision][0].slice(0, 300);
+  return [
+    ...(evidence.faithfulness ?? []),
+    ...evidence.answerRelevancy,
+    ...evidence.contextPrecision,
+  ][0].slice(0, 300);
 }
 
 function toSettings(row: OnlineEvalSettingsRow): OnlineEvalSettings {

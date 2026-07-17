@@ -87,19 +87,23 @@ const TREND_SERIES = [
 
 function TrendChart({ points }: { points: QualityOverviewResponse["trend"] }) {
   const option = useMemo<EChartsCoreOption>(() => {
-    const counts = points.map((point) => point.sampleCount);
+    const counts = points.map((point) => ({
+      faithfulness: point.faithfulnessSampleCount,
+      other: point.sampleCount,
+    }));
     return {
       color: TREND_SERIES.map((series) => series.color),
       tooltip: {
         trigger: "axis",
         formatter: (params: TrendTooltipParam[]) => {
           const index = params[0]?.dataIndex ?? 0;
-          const sampleCount = counts[index] ?? 0;
+          const sampleCounts = counts[index] ?? { faithfulness: 0, other: 0 };
           const lines = params
             .map((param) => `${param.marker}${param.seriesName}：${param.value ?? "—"}`)
             .join("<br/>");
-          const note = sampleCount < 10 ? "（样本不足）" : "";
-          return `${params[0]?.axisValue ?? ""}<br/>${lines}<br/>样本数 ${sampleCount}${note}`;
+          const faithfulnessNote = sampleCounts.faithfulness < 20 ? "（样本不足）" : "";
+          const otherNote = sampleCounts.other < 20 ? "（样本不足）" : "";
+          return `${params[0]?.axisValue ?? ""}<br/>${lines}<br/>事实一致性 n=${sampleCounts.faithfulness}${faithfulnessNote}<br/>其余指标 n=${sampleCounts.other}${otherNote}`;
         },
       },
       legend: { top: 0, right: 0, textStyle: { color: "#64748b" } },
@@ -139,7 +143,17 @@ function TrendChart({ points }: { points: QualityOverviewResponse["trend"] }) {
   if (points.length === 0) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无趋势数据" />;
   }
-  return <MetricChart ariaLabel="三项质量指标趋势" option={option} height={240} />;
+  return (
+    <>
+      <MetricChart ariaLabel="三项质量指标趋势" option={option} height={240} />
+      <span style={{ position: "absolute", width: 1, height: 1, overflow: "hidden" }}>
+        {points.map(
+          (point) =>
+            `事实一致性 n=${point.faithfulnessSampleCount}；其余指标 n=${point.sampleCount}`,
+        )}
+      </span>
+    </>
+  );
 }
 
 export default function QualityPage() {
@@ -409,7 +423,14 @@ export default function QualityPage() {
                         <Flex justify="space-between" gap={12}>
                           <Text>{agent.agentName}</Text>
                           <Text>
-                            {agent.scores ? Math.min(...Object.values(agent.scores)) : "—"} · n=
+                            {agent.scores
+                              ? Math.min(
+                                  ...Object.values(agent.scores).filter(
+                                    (value): value is number => typeof value === "number",
+                                  ),
+                                )
+                              : "—"}{" "}
+                            · n=
                             {agent.sampleCount}
                           </Text>
                         </Flex>

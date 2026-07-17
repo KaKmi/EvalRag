@@ -50,7 +50,14 @@ const detail: TraceDetailResponse = {
       statusMessage: "上游超时",
       attributes: {
         "rag.chunk.scores": JSON.stringify([
-          { chunkId: "c1", doc: "退款政策 V3.2 · 第二条", vec: 0.9, kw: 0.1, rerank: 0.94, final: 0.9 },
+          {
+            chunkId: "c1",
+            doc: "退款政策 V3.2 · 第二条",
+            vec: 0.9,
+            kw: 0.1,
+            rerank: 0.94,
+            final: 0.9,
+          },
         ]),
       },
     },
@@ -75,7 +82,11 @@ beforeEach(() => {
 describe("TraceDetailPage (M9 W2)", () => {
   it("uses a wider responsive call-chain column", async () => {
     renderAt("a".repeat(32));
-    expect(await screen.findByTestId("trace-call-chain")).toHaveStyle({ width: "34vw", minWidth: "560px", maxWidth: "680px" });
+    expect(await screen.findByTestId("trace-call-chain")).toHaveStyle({
+      width: "34vw",
+      minWidth: "560px",
+      maxWidth: "680px",
+    });
   });
   it("renders head meta from real detail", async () => {
     renderAt("a".repeat(32));
@@ -112,5 +123,56 @@ describe("TraceDetailPage (M9 W2)", () => {
     renderAt("a".repeat(32));
     expect(await screen.findByText("未抽样评测")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /立即评测|重试/ })).not.toBeInTheDocument();
+  });
+
+  it("renders partial scored quality with neutral unscored faithfulness", async () => {
+    mocked.getTraceQuality.mockResolvedValueOnce({
+      status: "scored",
+      scores: { faithfulness: null, answerRelevancy: 80, contextPrecision: 70 },
+      thresholds: { faithfulness: 85, answerRelevancy: 80, contextPrecision: 80 },
+      judgeModel: "judge-1",
+      judgeVersion: "online-v2",
+      scoredAt: "2026-07-15T02:00:00.000Z",
+      currentVersion: true,
+      evidence: {
+        answerRelevancy: ["relevant"],
+        contextPrecision: ["one noisy chunk"],
+      },
+    });
+    renderAt("a".repeat(32));
+
+    expect(await screen.findByText("未评")).toBeInTheDocument();
+    expect(screen.getByTestId("quality-score-faithfulness")).toHaveAttribute(
+      "data-quality-state",
+      "unscored",
+    );
+  });
+
+  it("keeps complete scored quality pass and low states", async () => {
+    mocked.getTraceQuality.mockResolvedValueOnce({
+      status: "scored",
+      scores: { faithfulness: 90, answerRelevancy: 80, contextPrecision: 70 },
+      thresholds: { faithfulness: 85, answerRelevancy: 80, contextPrecision: 80 },
+      judgeModel: "judge-1",
+      judgeVersion: "online-v2",
+      scoredAt: "2026-07-15T02:00:00.000Z",
+      currentVersion: true,
+      evidence: {
+        faithfulness: ["grounded"],
+        answerRelevancy: ["relevant"],
+        contextPrecision: ["one noisy chunk"],
+      },
+    });
+    renderAt("a".repeat(32));
+
+    await screen.findByText("90");
+    expect(screen.getByTestId("quality-score-faithfulness")).toHaveAttribute(
+      "data-quality-state",
+      "pass",
+    );
+    expect(screen.getByTestId("quality-score-contextPrecision")).toHaveAttribute(
+      "data-quality-state",
+      "low",
+    );
   });
 });

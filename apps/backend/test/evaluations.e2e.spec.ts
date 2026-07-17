@@ -61,6 +61,7 @@ describe("EvaluationsService", () => {
     const clickhouse = {
       getOverview: jest.fn().mockResolvedValue({
         sampleCount: 0,
+        faithfulnessSampleCount: 0,
         faithfulness: null,
         answerRelevancy: null,
         contextPrecision: null,
@@ -124,12 +125,14 @@ describe("EvaluationsService", () => {
     clickhouse.getOverview
       .mockResolvedValueOnce({
         sampleCount: 19,
+        faithfulnessSampleCount: 19,
         faithfulness: 90,
         answerRelevancy: 85,
         contextPrecision: 80,
       })
       .mockResolvedValueOnce({
         sampleCount: 100,
+        faithfulnessSampleCount: 100,
         faithfulness: 80,
         answerRelevancy: 80,
         contextPrecision: 80,
@@ -162,6 +165,7 @@ describe("EvaluationsService", () => {
         agentId: "agent-empty",
         agentName: "Empty Agent",
         sampleCount: 0,
+        faithfulnessSampleCount: 0,
         faithfulness: 0,
         answerRelevancy: 0,
         contextPrecision: 0,
@@ -171,6 +175,116 @@ describe("EvaluationsService", () => {
     expect(result.byAgent).toEqual([
       { agentId: "agent-empty", agentName: "Empty Agent", sampleCount: 0, scores: null },
     ]);
+  });
+
+  it("uses faithfulness coverage for its card and trend only", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getOverview
+      .mockResolvedValueOnce({
+        sampleCount: 12,
+        faithfulnessSampleCount: 3,
+        faithfulness: 90,
+        answerRelevancy: 85,
+        contextPrecision: 80,
+      })
+      .mockResolvedValueOnce({
+        sampleCount: 12,
+        faithfulnessSampleCount: 2,
+        faithfulness: 80,
+        answerRelevancy: 75,
+        contextPrecision: 70,
+      });
+    clickhouse.getMinuteAggregates.mockResolvedValue([
+      {
+        bucket: "2026-07-15T01:00:00.000Z",
+        sampleCount: 12,
+        faithfulnessSampleCount: 3,
+        faithfulness: 90,
+        answerRelevancy: 85,
+        contextPrecision: 80,
+      },
+    ]);
+
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.metrics.faithfulness).toMatchObject({ sampleCount: 3, previousDelta: null });
+    expect(result.metrics.answerRelevancy.sampleCount).toBe(12);
+    expect(result.trend[0]).toMatchObject({ faithfulnessSampleCount: 3, sampleCount: 12 });
+  });
+
+  it("preserves a partial agent score and chooses a scored minimum", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getByAgent.mockResolvedValue([
+      {
+        agentId: "app-1",
+        agentName: "Refund Bot",
+        sampleCount: 12,
+        faithfulnessSampleCount: 0,
+        faithfulness: null,
+        answerRelevancy: 72,
+        contextPrecision: 88,
+      },
+    ]);
+    clickhouse.getLowSamples.mockResolvedValue([
+      {
+        targetTraceId: "b".repeat(32),
+        question: "refund",
+        faithfulness: null,
+        answerRelevancy: 72,
+        contextPrecision: 88,
+        evidence: "{}",
+      },
+    ]);
+
+    const result = await service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"));
+    expect(result.byAgent[0]?.scores).toEqual({
+      faithfulness: null,
+      answerRelevancy: 72,
+      contextPrecision: 88,
+    });
+    expect(result.lowSamples[0]).toMatchObject({
+      minMetric: "answerRelevancy",
+      minScore: 72,
+    });
+  });
+
+  it("rejects a leaked sentinel at the service boundary", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getOverview.mockResolvedValue({
+      sampleCount: 1,
+      faithfulnessSampleCount: 1,
+      faithfulness: -1,
+      answerRelevancy: 80,
+      contextPrecision: 80,
+    });
+    await expect(service.getOverview({}, new Date("2026-07-15T02:00:00.000Z"))).rejects.toThrow(
+      new RangeError("evaluation score out of range: expected 0..100"),
+    );
+  });
+
+  it("preserves nullable faithfulness and optional evidence in trace quality", async () => {
+    const { service, clickhouse } = setup();
+    clickhouse.getLatestSuccess.mockResolvedValue({
+      targetTraceId: "a".repeat(32),
+      judgeVersion: "online-v2",
+      evaluatedAt: "2026-07-15T02:00:00.000Z",
+      judgeModel: "judge-1",
+      faithfulness: null,
+      answerRelevancy: 80,
+      contextPrecision: 70,
+      evidence: JSON.stringify({
+        answerRelevancy: ["relevant"],
+        contextPrecision: ["one noisy chunk"],
+      }),
+    });
+
+    await expect(service.getTraceQuality("a".repeat(32))).resolves.toMatchObject({
+      status: "scored",
+      scores: { faithfulness: null, answerRelevancy: 80, contextPrecision: 70 },
+      evidence: {
+        answerRelevancy: ["relevant"],
+        contextPrecision: ["one noisy chunk"],
+      },
+    });
   });
 
   // 一个 GET 绝不能推进/播种游标：getOrCreateWatermark 会把它钉在 now-24h，
@@ -205,7 +319,12 @@ describe("EvaluationsService", () => {
     ["水位线行还不存在（worker 一轮都没跑过）", undefined],
     [
       "lastRunAt 为空",
-      { lastTs: new Date("2026-07-15T01:55:00.000Z"), lastTraceId: "", dailyCount: 0, lastRunAt: null },
+      {
+        lastTs: new Date("2026-07-15T01:55:00.000Z"),
+        lastTraceId: "",
+        dailyCount: 0,
+        lastRunAt: null,
+      },
     ],
     [
       "lastRunAt 超过两轮 cron 没动",

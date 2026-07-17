@@ -28,7 +28,14 @@ const baseOverview = {
     evaluatedCount: 30,
     eligibleCount: 300,
     evaluableCount: 270,
-    missed: { total: 0, sampledOut: 0, quotaSkipped: 0, incomplete: 0, judgeFailed: 0, neverSeen: 0 },
+    missed: {
+      total: 0,
+      sampledOut: 0,
+      quotaSkipped: 0,
+      incomplete: 0,
+      judgeFailed: 0,
+      neverSeen: 0,
+    },
     scoresNotPersisted: 0,
     judgeModel: "qwen-plus",
     judgeVersion: "online-v1",
@@ -168,7 +175,14 @@ it("separates the window total from what is still evaluable", async () => {
       eligibleCount: 32,
       evaluableCount: 1,
       backlog: 1,
-      missed: { total: 31, sampledOut: 0, quotaSkipped: 0, incomplete: 0, judgeFailed: 0, neverSeen: 31 },
+      missed: {
+        total: 31,
+        sampledOut: 0,
+        quotaSkipped: 0,
+        incomplete: 0,
+        judgeFailed: 0,
+        neverSeen: 31,
+      },
     },
     metrics: {
       faithfulness: metric(null, 0),
@@ -192,7 +206,14 @@ it("explains why the missed traces were missed", async () => {
       ...baseOverview.meta,
       eligibleCount: 40,
       evaluableCount: 0,
-      missed: { total: 10, sampledOut: 4, quotaSkipped: 0, incomplete: 1, judgeFailed: 2, neverSeen: 3 },
+      missed: {
+        total: 10,
+        sampledOut: 4,
+        quotaSkipped: 0,
+        incomplete: 1,
+        judgeFailed: 2,
+        neverSeen: 3,
+      },
     },
   });
   renderQuality();
@@ -262,6 +283,7 @@ it("opens shareable Trace filters and low-sample quality detail", async () => {
         faithfulness: 70,
         answerRelevancy: 80,
         contextPrecision: 90,
+        faithfulnessSampleCount: 9,
         sampleCount: 9,
         insufficientSample: true,
       },
@@ -289,6 +311,37 @@ it("opens shareable Trace filters and low-sample quality detail", async () => {
       .getAllByTestId("location")
       .some((node) => node.textContent?.includes(`/admin/traces/${"a".repeat(32)}?panel=quality`)),
   ).toBe(true);
+});
+
+it("reports independent trend coverage and ignores null agent faithfulness", async () => {
+  vi.mocked(api.getQualityOverview).mockResolvedValue({
+    ...baseOverview,
+    trend: [
+      {
+        bucket: "2026-07-15T01:00:00.000Z",
+        faithfulness: 90,
+        answerRelevancy: 72,
+        contextPrecision: 88,
+        faithfulnessSampleCount: 3,
+        sampleCount: 12,
+        insufficientSample: true,
+      },
+    ],
+    byAgent: [
+      {
+        agentId: "app-1",
+        agentName: "Partial Agent",
+        scores: { faithfulness: null, answerRelevancy: 72, contextPrecision: 88 },
+        sampleCount: 12,
+      },
+    ],
+  });
+
+  renderQuality();
+  expect(await screen.findByText(/事实一致性 n=3/)).toBeInTheDocument();
+  expect(screen.getByText(/其余指标 n=12/)).toBeInTheDocument();
+  expect(screen.getByText("Partial Agent").parentElement).toHaveTextContent("72 · n=12");
+  expect(screen.getByText("Partial Agent").parentElement).not.toHaveTextContent("0 · n=12");
 });
 
 it("shows unavailable models, validates thresholds, saves, and refreshes", async () => {
