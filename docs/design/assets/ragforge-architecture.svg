@@ -1,0 +1,235 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 960" width="1600" height="960" font-family="'Inter','Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#080D1C"/>
+      <stop offset="50%" stop-color="#0B1224"/>
+      <stop offset="100%" stop-color="#070B18"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#22D3EE"/>
+      <stop offset="55%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#C084FC"/>
+    </linearGradient>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#12224A"/>
+      <stop offset="100%" stop-color="#0C1530"/>
+    </linearGradient>
+    <linearGradient id="pipeGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0E2A4A"/>
+      <stop offset="100%" stop-color="#1B2350"/>
+    </linearGradient>
+    <!-- plug icon: drawn, not a glyph, so it never depends on font coverage -->
+    <symbol id="port" viewBox="0 0 12 12">
+      <rect x="3.5" y="2" width="7" height="8" rx="1.5" fill="none" stroke="#A78BFA" stroke-width="1.4"/>
+      <line x1="0" y1="4.5" x2="3.5" y2="4.5" stroke="#A78BFA" stroke-width="1.4"/>
+      <line x1="0" y1="7.5" x2="3.5" y2="7.5" stroke="#A78BFA" stroke-width="1.4"/>
+    </symbol>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#647CB4"/>
+    </marker>
+    <marker id="arrowCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#22D3EE"/>
+    </marker>
+    <style>
+      .band      { fill:#0E1428; stroke:#1F2C52; stroke-width:1.2; rx:14; }
+      .bandlabel { fill:#7C90BE; font-size:13px; font-weight:700; letter-spacing:2px; }
+      .bandnote  { fill:#55688F; font-size:11.5px; }
+      .box       { fill:#141C36; stroke:#2A3A68; stroke-width:1.2; rx:9; }
+      .chip      { fill:#16203D; stroke:#2E4076; stroke-width:1.1; rx:7; }
+      .t         { fill:#E8EEFA; font-size:14px; font-weight:600; }
+      .ts        { fill:#93A7CE; font-size:11.5px; }
+      .tc        { fill:#E8EEFA; font-size:13.5px; font-weight:600; text-anchor:middle; }
+      .tcs       { fill:#8EA2CA; font-size:11px; text-anchor:middle; }
+      .porttitle { fill:#C4B5FD; font-size:11.5px; font-weight:700; }
+      .portnow   { fill:#93A7CE; font-size:9.5px; }
+      .portalt   { fill:#67E8F9; font-size:9.5px; }
+      .cyan      { fill:#22D3EE; } .violet { fill:#A78BFA; } .emerald { fill:#34D399; } .amber { fill:#FBBF24; }
+      .link      { stroke:#3E5384; stroke-width:1.6; fill:none; marker-end:url(#arrow); }
+      .linkc     { stroke:#22D3EE; stroke-width:2; fill:none; marker-end:url(#arrowCyan); }
+      .edgelabel { fill:#7C90BE; font-size:10.5px; text-anchor:middle; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="960" fill="url(#bg)"/>
+
+  <!-- TITLE -->
+  <text x="44" y="52" font-size="36" font-weight="800" fill="url(#titleGrad)">RAGForge</text>
+  <text x="290" y="40" class="t" font-size="15">生产级 RAG 平台 · 系统架构</text>
+  <text x="290" y="62" class="ts">可配置 · 可追踪 · 可优化 —— 配置 → 入库 → 问答 → 观测 → 评测 → 安全上线</text>
+  <rect x="1188" y="26" width="118" height="26" rx="13" fill="#0B2A33" stroke="#22D3EE"/>
+  <text x="1247" y="43" class="tc cyan" font-size="11.5">OTLP 原生可观测</text>
+  <rect x="1316" y="26" width="118" height="26" rx="13" fill="#1B1533" stroke="#A78BFA"/>
+  <text x="1375" y="43" class="tc violet" font-size="11.5">端口全可插拔</text>
+  <rect x="1444" y="26" width="116" height="26" rx="13" fill="#2B2109" stroke="#FBBF24"/>
+  <text x="1502" y="43" class="tc amber" font-size="11.5">在线质量飞轮</text>
+  <line x1="44" y1="74" x2="1560" y2="74" stroke="#1F2C52"/>
+
+  <!-- BAND A: ACCESS -->
+  <rect class="band" x="40" y="84" width="1520" height="62"/>
+  <text x="58" y="120" class="bandlabel">接入层</text>
+  <rect class="box" x="200" y="95" width="430" height="40"/>
+  <text x="415" y="120" class="tc">C 端问答应用 · SSE 流式 + 引用溯源</text>
+  <rect class="box" x="650" y="95" width="430" height="40"/>
+  <text x="865" y="120" class="tc">管理控制台 · React + antd</text>
+  <rect class="box" x="1100" y="95" width="430" height="40"/>
+  <text x="1315" y="120" class="tc">边缘入口 · CDN / ALB / WAF / JWT</text>
+
+  <path class="linkc" d="M 800 146 L 800 160"/>
+
+  <!-- BAND B: APPLICATION PLANE -->
+  <rect class="band" x="40" y="164" width="1520" height="336" fill="url(#coreGrad)" stroke="#2E4076"/>
+  <text x="58" y="188" class="bandlabel">应用平面 · NestJS 模块化单体</text>
+  <text x="330" y="188" class="bandnote">依赖单向无环 · 一切外部依赖藏在端口背后</text>
+
+  <!-- B1 control-plane domains -->
+  <rect class="box" x="58" y="200" width="280" height="140" fill="#101833"/>
+  <text x="74" y="222" class="t" font-size="13">控制面域模块</text>
+  <rect class="chip" x="74" y="232" width="126" height="30"/><text x="137" y="252" class="tc" font-size="11.5">模型接入</text>
+  <rect class="chip" x="210" y="232" width="118" height="30"/><text x="269" y="252" class="tc" font-size="11.5">认证</text>
+  <rect class="chip" x="74" y="266" width="126" height="30"/><text x="137" y="286" class="tc" font-size="11.5">知识库 / 文档</text>
+  <rect class="chip" x="210" y="266" width="118" height="30"/><text x="269" y="286" class="tc" font-size="11.5">切片</text>
+  <rect class="chip" x="74" y="300" width="126" height="30"/><text x="137" y="320" class="tc" font-size="11.5">Prompt 版本</text>
+  <rect class="chip" x="210" y="300" width="118" height="30"/><text x="269" y="320" class="tc" font-size="11.5">应用配置</text>
+
+  <!-- B2 RAG pipeline (hero) -->
+  <rect x="352" y="200" width="806" height="140" rx="10" fill="url(#pipeGrad)" stroke="#22D3EE" stroke-width="1.8"/>
+  <text x="368" y="222" class="t cyan" font-size="13.5">★ RAG 编排主链路 · 自研薄编排</text>
+  <text x="640" y="222" class="bandnote">不引入 LangChain —— 每个阶段 = 一个显式 OTel Span</text>
+  <rect class="box" x="368" y="236" width="116" height="56" fill="#152447" stroke="#3E7FB4"/>
+  <text x="426" y="259" class="tc" font-size="12.5">问题改写</text><text x="426" y="278" class="tcs">rewrite</text>
+  <rect class="box" x="498" y="236" width="116" height="56" fill="#152447" stroke="#3E7FB4"/>
+  <text x="556" y="259" class="tc" font-size="12.5">意图路由</text><text x="556" y="278" class="tcs">intent</text>
+  <rect class="box" x="628" y="236" width="116" height="56" fill="#152447" stroke="#3E7FB4"/>
+  <text x="686" y="259" class="tc" font-size="12.5">混合召回</text><text x="686" y="278" class="tcs">向量 + 关键词</text>
+  <rect class="box" x="758" y="236" width="116" height="56" fill="#152447" stroke="#3E7FB4"/>
+  <text x="816" y="259" class="tc" font-size="12.5">融合</text><text x="816" y="278" class="tcs">RRF</text>
+  <rect class="box" x="888" y="236" width="116" height="56" fill="#152447" stroke="#3E7FB4"/>
+  <text x="946" y="259" class="tc" font-size="12.5">重排</text><text x="946" y="278" class="tcs">rerank</text>
+  <rect class="box" x="1018" y="236" width="116" height="56" fill="#0E2A33" stroke="#22D3EE" stroke-width="1.5"/>
+  <text x="1076" y="259" class="tc cyan" font-size="12.5">生成</text><text x="1076" y="278" class="tcs">SSE 流式</text>
+  <path class="linkc" d="M 484 264 L 494 264"/>
+  <path class="linkc" d="M 614 264 L 624 264"/>
+  <path class="linkc" d="M 744 264 L 754 264"/>
+  <path class="linkc" d="M 874 264 L 884 264"/>
+  <path class="linkc" d="M 1004 264 L 1014 264"/>
+  <text x="368" y="320" class="ts" font-size="11.5">· 模型输出经 NodeContract 校验后才进编排　· 每轮问答 = 一条 OTLP Trace　· 生成 30s 熔断，召回失败自动降级</text>
+
+  <!-- B3 release -->
+  <rect x="1172" y="200" width="388" height="140" rx="9" fill="#0C2118" stroke="#34D399" stroke-width="1.4"/>
+  <text x="1188" y="224" class="t emerald" font-size="13">★ 版本化发布</text>
+  <text x="1188" y="252" class="ts" font-size="11">配置版本不可变、地位平等</text>
+  <text x="1188" y="276" class="ts" font-size="11">production 单指针 = 线上唯一事实源</text>
+  <text x="1188" y="300" class="ts" font-size="11">上线前跑真实预演 ReleaseCheck</text>
+  <text x="1188" y="324" class="ts" font-size="11">切指针即上线 / 回滚，Prompt 永不漂移</text>
+
+  <!-- ===== PLUGGABLE PORT LANE ===== -->
+  <rect x="58" y="354" width="1502" height="134" rx="10" fill="#140F28" stroke="#A78BFA" stroke-width="1.6"/>
+  <use href="#port" x="74" y="366" width="13" height="13"/>
+  <text x="94" y="377" class="t violet" font-size="13">可插拔端口 · Ports &amp; Adapters</text>
+  <text x="330" y="377" class="bandnote">换实现只改 DI 注入，业务代码零改动 —— 本地自建 ↔ 云上托管同一套代码</text>
+
+  <rect class="box" x="66" y="386" width="237" height="92" fill="#16112C" stroke="#4C3A7A"/>
+  <use href="#port" x="78" y="398" width="11" height="11"/>
+  <text x="94" y="407" class="porttitle">ModelProviderPort</text>
+  <text x="78" y="428" class="portnow">LLM · Embedding · Rerank</text>
+  <text x="78" y="446" class="portalt">openai_compat · anthropic · gemini</text>
+  <text x="78" y="464" class="portalt">cohere · jina · dashscope · self_hosted</text>
+
+  <rect class="box" x="315" y="386" width="237" height="92" fill="#16112C" stroke="#4C3A7A"/>
+  <use href="#port" x="327" y="398" width="11" height="11"/>
+  <text x="343" y="407" class="porttitle">RetrieverPort</text>
+  <text x="327" y="428" class="portnow">召回策略（问答与测试台共用）</text>
+  <text x="327" y="446" class="portnow">当前：pgvector 向量 + 关键词</text>
+  <text x="327" y="464" class="portalt">可换：专用向量库 / 外部检索</text>
+
+  <rect class="box" x="564" y="386" width="237" height="92" fill="#16112C" stroke="#4C3A7A"/>
+  <use href="#port" x="576" y="398" width="11" height="11"/>
+  <text x="592" y="407" class="porttitle">Processing Profile</text>
+  <text x="576" y="428" class="portnow">入库四阶段，版本化快照</text>
+  <text x="576" y="446" class="portnow">解析 · 清洗 · 分块 · 向量化</text>
+  <text x="576" y="464" class="portalt">各阶段独立可换，可蓝绿重建</text>
+
+  <rect class="box" x="813" y="386" width="237" height="92" fill="#16112C" stroke="#4C3A7A"/>
+  <use href="#port" x="825" y="398" width="11" height="11"/>
+  <text x="841" y="407" class="porttitle">QueuePort</text>
+  <text x="825" y="428" class="portnow">异步任务总线</text>
+  <text x="825" y="446" class="portnow">当前：pg-boss（跑在 PG 上）</text>
+  <text x="825" y="464" class="portalt">可换：Kafka / RocketMQ</text>
+
+  <rect class="box" x="1062" y="386" width="237" height="92" fill="#16112C" stroke="#4C3A7A"/>
+  <use href="#port" x="1074" y="398" width="11" height="11"/>
+  <text x="1090" y="407" class="porttitle">BlobStore</text>
+  <text x="1074" y="428" class="portnow">原始文档 · Canonical Markdown</text>
+  <text x="1074" y="446" class="portnow">当前：本地卷</text>
+  <text x="1074" y="464" class="portalt">可换：MinIO / 阿里云 OSS</text>
+
+  <rect class="box" x="1311" y="386" width="237" height="92" fill="#16112C" stroke="#4C3A7A"/>
+  <use href="#port" x="1323" y="398" width="11" height="11"/>
+  <text x="1339" y="407" class="porttitle">OTLP Exporter</text>
+  <text x="1323" y="428" class="portnow">观测后端（换在 Collector 侧）</text>
+  <text x="1323" y="446" class="portnow">当前：ClickHouse</text>
+  <text x="1323" y="464" class="portalt">可换：Jaeger / Tempo / SLS / ARMS</text>
+
+  <path class="link" d="M 240 500 L 240 514"/>
+
+  <!-- BAND C: ASYNC -->
+  <rect class="band" x="40" y="518" width="1520" height="108"/>
+  <text x="58" y="542" class="bandlabel">异步平面 · 全部在问答关键路径之外</text>
+  <text x="420" y="542" class="bandnote">挂了不影响一次问答成功</text>
+  <rect class="box" x="58" y="552" width="356" height="62" fill="#2B2109" stroke="#FBBF24" stroke-width="1.3"/>
+  <text x="236" y="576" class="tc amber">消息队列</text>
+  <text x="236" y="598" class="tcs">ingestion.jobs · eval.jobs · metrics.rollup</text>
+  <rect class="box" x="434" y="552" width="356" height="62"/>
+  <text x="612" y="576" class="tc">入库 Worker</text>
+  <text x="612" y="598" class="tcs">解析 → 清洗 → 分块 → 向量化</text>
+  <rect class="box" x="810" y="552" width="356" height="62" fill="#2B2109" stroke="#FBBF24" stroke-width="1.3"/>
+  <text x="988" y="576" class="tc amber">★ 评测 Judge Worker</text>
+  <text x="988" y="598" class="tcs">对真实流量 LLM-as-Judge 三维打分</text>
+  <rect class="box" x="1186" y="552" width="374" height="62"/>
+  <text x="1373" y="576" class="tc">指标汇总 Worker</text>
+  <text x="1373" y="598" class="tcs">派生指标汇总 → 看板读模型</text>
+
+  <path class="link" d="M 240 626 L 240 640"/>
+
+  <!-- BAND D: DATA -->
+  <rect class="band" x="40" y="644" width="1520" height="108"/>
+  <text x="58" y="668" class="bandlabel">数据平面</text>
+  <rect class="box" x="58" y="680" width="356" height="60" stroke="#3E7FB4"/>
+  <text x="236" y="704" class="tc">PostgreSQL 16 + pgvector</text>
+  <text x="236" y="724" class="tcs">控制面事务 · 向量与关键词同表</text>
+  <rect class="box" x="434" y="680" width="356" height="60"/>
+  <text x="612" y="704" class="tc">Redis</text>
+  <text x="612" y="724" class="tcs">配置缓存 · 限流（生产形态）</text>
+  <rect class="box" x="810" y="680" width="356" height="60"/>
+  <text x="988" y="704" class="tc">对象存储 · OSS / MinIO</text>
+  <text x="988" y="724" class="tcs">原始文档 · Canonical Markdown</text>
+  <rect x="1186" y="680" width="374" height="60" rx="9" fill="#0B2A33" stroke="#22D3EE" stroke-width="1.5"/>
+  <text x="1373" y="704" class="tc cyan">ClickHouse</text>
+  <text x="1373" y="724" class="tcs">Trace 列存 · 读侧只经自有 VIEW</text>
+
+  <!-- BAND E: OBSERVABILITY -->
+  <rect class="band" x="40" y="770" width="1520" height="108" stroke="#2E4076"/>
+  <text x="58" y="794" class="bandlabel">可观测平面 · OTLP 标准链路</text>
+  <text x="330" y="794" class="bandnote">应用平面所有 span 经此异步导出 —— 埋点绝不进入问答关键路径，Collector / ClickHouse 挂，问答照常成功</text>
+  <rect class="box" x="58" y="806" width="340" height="56" stroke="#3E7FB4"/>
+  <text x="228" y="830" class="tc">@codecrush/otel SDK</text>
+  <text x="228" y="850" class="tcs">通用 SDK · 不绑 RAG</text>
+  <rect class="box" x="448" y="806" width="340" height="56" stroke="#3E7FB4"/>
+  <text x="618" y="830" class="tc">OpenTelemetry Collector</text>
+  <text x="618" y="850" class="tcs">batch · 重试 · PII 脱敏 · exporter 可插拔</text>
+  <rect class="box" x="838" y="806" width="300" height="56" fill="#0B2A33" stroke="#22D3EE"/>
+  <text x="988" y="830" class="tc cyan">ClickHouse otel_traces</text>
+  <text x="988" y="850" class="tcs">+ 自有读 VIEW（防腐层）</text>
+  <rect class="box" x="1188" y="806" width="372" height="56" stroke="#34D399"/>
+  <text x="1374" y="830" class="tc emerald">读模型 · traces 模块</text>
+  <text x="1374" y="850" class="tcs">Trace / Session / 运行看板 / 质量报表</text>
+  <path class="linkc" d="M 398 834 L 442 834"/>
+  <text x="420" y="826" class="edgelabel">OTLP</text>
+  <path class="linkc" d="M 788 834 L 832 834"/>
+  <path class="link" d="M 1138 834 L 1182 834" stroke="#34D399"/>
+
+  <!-- BAND F: FLYWHEEL -->
+  <rect x="40" y="896" width="1520" height="32" rx="16" fill="#160F2E" stroke="#A78BFA" stroke-width="1.2"/>
+  <text x="60" y="917" class="t violet" font-size="12.5">质量飞轮 ↺</text>
+  <text x="150" y="917" class="ts" font-size="11.5">线上评测发现坏样本 → 根因分诊 → 人工审核 → 重放 → 回归评测 → 版本对比 → 预演后安全上线（一键回滚）</text>
+</svg>
