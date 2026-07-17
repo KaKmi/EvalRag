@@ -5,6 +5,9 @@ export default tseslint.config(
   {
     ignores: [
       "**/dist/**",
+      // 019：worker dev watch 的独立编译产物（apps/backend/tsconfig.worker.json 的 outDir）——
+      // 与 dist 同性质，是产物不是源码；`**/dist/**` 匹配不到它，必须单列。
+      "**/dist-worker/**",
       "**/node_modules/**",
       "**/.turbo/**",
       "apps/backend/drizzle/**",

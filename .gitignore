@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# 019：worker dev watch 的独立编译产物（见 apps/backend/tsconfig.worker.json）
+dist-worker/
 .turbo/
 *.log
 .env
