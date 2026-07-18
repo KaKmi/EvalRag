@@ -5,6 +5,7 @@ import type { Queue } from "../../platform/queue/queue.port";
 import { NodeRuntimeService } from "../node-runtime/executor/node-runtime.service";
 import { PromptsService } from "../prompts/prompts.service";
 import { ApplicationsRepository } from "./applications.repository";
+import { ApplicationsService } from "./applications.service";
 import { buildSamples } from "./release-check.samples";
 import { hasBlockingIssue } from "./release-check.severity";
 import type { ApplicationConfigVersionRow } from "./schema";
@@ -36,6 +37,7 @@ export class ReleaseCheckProcessor implements OnModuleInit {
     private readonly repo: ApplicationsRepository,
     private readonly nodeRuntime: NodeRuntimeService,
     private readonly prompts: PromptsService,
+    private readonly applications: ApplicationsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -124,6 +126,17 @@ export class ReleaseCheckProcessor implements OnModuleInit {
           });
         }
       }
+    }
+
+    // B1/F5：评测门禁——**纯附加**的 warning issue。
+    // 放在 blocked 计算之前是安全的：collectEvalGateIssues 恒返回 warning 级
+    // （provider 抛错也只降级成 UNAVAILABLE warning），故它无论如何都不参与阻断判定。
+    // 拿不到 applicationId 就跳过——门禁缺结论时 fail-open，绝不因此让发布变红。
+    const check = await this.repo.findReleaseCheckById(checkId);
+    if (check) {
+      issues.push(
+        ...(await this.applications.collectEvalGateIssues(check.applicationId, configVersionId)),
+      );
     }
 
     const blocked = hasBlockingIssue(issues);

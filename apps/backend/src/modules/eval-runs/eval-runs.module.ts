@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ApplicationsModule } from "../applications/applications.module";
 import { ChatModule } from "../chat/chat.module";
 import { EvaluationsModule } from "../evaluations/evaluations.module";
+import { EvalGateProviderRegistrar } from "./eval-gate.provider";
 import { EvalRunDeletionGuard } from "./eval-run-deletion.guard";
 import { EvalRunWorkerProcessor } from "./eval-run-worker.processor";
 import { EvalRunsController } from "./eval-runs.controller";
@@ -31,6 +32,7 @@ import { ReplayService } from "./replay.service";
     EvalRunsService,
     EvalRunWorkerProcessor,
     EvalRunDeletionGuard, // F6：onModuleInit 注册应用删除守卫
+    EvalGateProviderRegistrar, // B1/F5：onModuleInit 注册上线门禁 issue 提供方
     ReplayService, // F7：单条重放（SSE + 即时判分）
   ],
 })

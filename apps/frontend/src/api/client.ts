@@ -26,7 +26,9 @@ import {
   ApplicationTagListResponseSchema,
   type ApplicationTagListResponse,
   type MoveApplicationTagRequest,
+  EvalGateStatusSchema,
   ReleaseCheckSchema,
+  type EvalGateStatus,
   type ReleaseCheck,
   PublishProductionRequestSchema,
   type PublishProductionRequest,
@@ -573,6 +575,15 @@ export const getApplicationReleaseCheck = (id: string, checkId: string): Promise
   getJson(
     `/api/applications/${encodeURIComponent(id)}/release-checks/${encodeURIComponent(checkId)}`,
     ReleaseCheckSchema,
+  );
+/** B1/F5：屏4「去上线」按钮态数据源。只读端点，不建 ReleaseCheck。 */
+export const getEvalGate = (
+  applicationId: string,
+  configVersionId: string,
+): Promise<EvalGateStatus> =>
+  getJson(
+    `/api/applications/${encodeURIComponent(applicationId)}/eval-gate?configVersionId=${encodeURIComponent(configVersionId)}`,
+    EvalGateStatusSchema,
   );
 export const publishApplicationProduction = (
   id: string,

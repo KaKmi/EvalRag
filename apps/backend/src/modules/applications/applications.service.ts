@@ -16,6 +16,7 @@ import type {
   ApplicationDetail,
   ApplicationTag,
   CreateApplicationConfigVersionRequest,
+  EvalGateStatus,
   CreateApplicationRequest,
   PromptUsageEntry,
   ReleaseCheck,
@@ -23,6 +24,7 @@ import type {
   ResolvedApplicationConfig,
   UpdateApplicationRequest,
 } from "@codecrush/contracts";
+import { EVAL_GATE_ISSUE_CODES } from "@codecrush/contracts";
 import { KnowledgeBasesService } from "../knowledge-bases/knowledge-bases.service";
 import { ModelsService } from "../models/models.service";
 import { NodeContractRegistry } from "../node-runtime/contracts/registry";
@@ -59,6 +61,15 @@ interface ReleaseContext {
 
 /** E-W2b F6：应用删除守卫——返回拒绝理由（string）或 null（放行）。 */
 export type ApplicationDeletionGuard = (applicationId: string) => Promise<string | null>;
+
+/**
+ * B1/F5：评测门禁 issue 提供方。由 eval-runs 侧注册（注册表反转，同 ApplicationDeletionGuard）——
+ * applications **不知道** eval-runs，依赖方向保持 eval-runs → applications 单向。
+ */
+export type EvalGateProvider = (
+  applicationId: string,
+  configVersionId: string,
+) => Promise<ReleaseCheckIssue[]>;
 
 @Injectable()
 export class ApplicationsService {
@@ -538,6 +549,58 @@ export class ApplicationsService {
    * ——applications 暴露端口、不知道 eval-runs。未来版本删除端点出现时同一注册表复用。
    */
   private readonly deletionGuards: ApplicationDeletionGuard[] = [];
+
+  /** B1/F5：评测门禁 issue 提供方（由 eval-runs 侧注册）。未注册 = 无门禁结论。 */
+  private evalGateProvider: EvalGateProvider | null = null;
+
+  registerEvalGateProvider(provider: EvalGateProvider): void {
+    this.evalGateProvider = provider;
+  }
+
+  /**
+   * 门禁 issue 收集。**fail-open 的落点就在这里**：
+   *  · 未注册 provider（只起 applications 的部署）→ 空数组，不炸；
+   *  · provider 抛异常（ClickHouse/PG 抖动）→ 降级成一条 UNAVAILABLE **warning**，绝不阻断。
+   *
+   * 返回值恒为 warning 级 ⇒ hasBlockingIssue 判否 ⇒ ReleaseCheck 仍 passed ⇒
+   * publishProduction 照常放行。这是「软提示」不变量的机器保证。
+   */
+  async collectEvalGateIssues(
+    applicationId: string,
+    configVersionId: string,
+  ): Promise<ReleaseCheckIssue[]> {
+    if (!this.evalGateProvider) return [];
+    try {
+      const issues = await this.evalGateProvider(applicationId, configVersionId);
+      // 纵深防御：provider 万一产出了 error 级 issue，也不得让它获得阻断力——
+      // 门禁按设计只做软提示，阻断权属于 staticGate/预演。
+      return issues.map((issue) => ({ ...issue, severity: "warning" as const }));
+    } catch (err) {
+      this.logger.warn(`eval gate provider failed app=${applicationId}: ${String(err)}`);
+      return [
+        {
+          code: EVAL_GATE_ISSUE_CODES.UNAVAILABLE,
+          message: "评测数据暂不可用，未做回退判断",
+          severity: "warning",
+        },
+      ];
+    }
+  }
+
+  /** B1/F5：屏4「去上线」按钮态的数据来源。只读，不建 ReleaseCheck、不产生副作用。 */
+  async getEvalGateStatus(id: string, configVersionId: string): Promise<EvalGateStatus> {
+    const row = await this.mustFind(id);
+    return {
+      enabled: row.evalGateEnabled,
+      issues: await this.collectEvalGateIssues(id, configVersionId),
+    };
+  }
+
+  /** B1/F5：门禁基线侧要知道「当前 production 是哪个配置版本」。 */
+  async getProductionConfigVersionId(id: string): Promise<string | null> {
+    const row = await this.repo.findApplicationById(id);
+    return row?.productionConfigVersionId ?? null;
+  }
 
   registerDeletionGuard(guard: ApplicationDeletionGuard): void {
     this.deletionGuards.push(guard);

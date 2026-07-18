@@ -203,6 +203,16 @@ export const EVAL_GATE_ISSUE_CODES = {
   UNAVAILABLE: "EVAL_GATE_UNAVAILABLE",
 } as const;
 
+/**
+ * B1/F5：屏4 按钮态数据源。`enabled` = 应用级开关（只影响前端是否 disable 引导按钮）；
+ * `issues` 恒为 warning 级门禁 issue —— 后端永远不因它拒绝发布。
+ */
+export const EvalGateStatusSchema = z.strictObject({
+  enabled: z.boolean(),
+  issues: z.array(ReleaseCheckIssueSchema),
+});
+export type EvalGateStatus = z.infer<typeof EvalGateStatusSchema>;
+
 export const ReleaseCheckStatusSchema = z.enum([
   "queued",
   "running",
