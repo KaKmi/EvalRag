@@ -357,14 +357,15 @@ describeDb("eval run lease + reaper（真库三值逻辑）", () => {
 
   // ——— 缺口 15(c)：queued 臂的宽限锚点必须与 running 臂同源（deadline，不是 now）———
   it("被 SIGKILL 的 worker：租约刚过期但未满一个宽限期 → **不**回收（不架空 retryLimit:3）", async () => {
-    // 现场：worker acquire 后被 SIGKILL，租约在 acquire+5min 过期；
+    // 现场：worker acquire 后被 SIGKILL，租约在 acquire+TTL 过期；
     // 而 pg-boss 要到 acquire+15min 才重投（pg-boss@12.25.1：expire_seconds=900、
     // retry_delay=0，见 node_modules/pg-boss/dist/plans.js:28,32）。
     // 锚点若用 now，回收器在 +5min 即可动手 ⇒ 早赢 10 分钟，重试还没来就把 run 判死。
     const id = await insertRun(
       "queued",
       null,
-      ago(EVAL_RUN_REAP_GRACE_MS / 2), // 租约过期了，但没过一个 GRACE
+      // 租约已过期，但过期时长（GRACE/2）不足一个 GRACE —— 正是「早赢 10 分钟」那个窗口。
+      ago(EVAL_RUN_REAP_GRACE_MS / 2),
       ago(EVAL_RUN_REAP_GRACE_MS + 60_000), // created_at 很旧（满足另一个条件）
     );
     expect(await repo.reapAbandonedRuns(new Date())).toEqual([]);

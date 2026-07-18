@@ -316,7 +316,8 @@ export class EvalRunsRepository {
    * 「worker 被 SIGKILL」这条路径上的回收比 pg-boss 的重投早赢 10 分钟，静默架空 retryLimit: 3。
    * 这层要求恢复了 `running` 臂本来就有的那层保护：**持租即免疫回收**。`tryAcquireLease` 是原子的，
    * 它一旦成功，这条 run 就有了「有人正在管它」的证据，回收器必须让路。反过来，两条**真孤儿**
-   * 路径的租约证据都不成立（NULL / 过期时间戳），照常被回收 —— 覆盖面没有缩小。
+   * 路径的租约证据都不成立（NULL / 过期时间戳），照常被回收 —— 覆盖面没有缩小，
+   * 只是「过期时间戳」那一路的回收时刻推迟了一个 GRACE（锚点改 deadline 之后，见 15(c)）。
    *
    * READ COMMITTED 下也够：本 UPDATE 取行锁后会重算谓词 → `tryAcquireLease` 先提交则跳过该行；
    * 本回收器先提交则 worker 的 `findRunById` 读到 `failed` → `already_finished` 干净退出。
@@ -324,7 +325,7 @@ export class EvalRunsRepository {
    *
    * 残余窗口（018 §11 已记）：job 在队列里干等超过一个 GRACE **且无人持租**时（worker 在
    * `tryAcquireLease` 前挂起、或 job 迟迟未被取走），回收会先于最后一次重试 → 该 run 判 failed
-   * 而非续跑。代价是「卡了 15 分钟的 run 诚实地失败」，换来的是死锁**必然自愈**，划算。
+   * 而非续跑。代价是「卡了 15 分钟（被租约触碰过则 20 分钟）的 run 诚实地失败」，换来的是死锁**必然自愈**，划算。
    */
   async reapAbandonedRuns(now: Date): Promise<string[]> {
     // 宽限期：`lease_until < now - GRACE`，不是 `< now`。**两条臂现在同源于 deadline**
