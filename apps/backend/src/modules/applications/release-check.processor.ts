@@ -6,6 +6,7 @@ import { NodeRuntimeService } from "../node-runtime/executor/node-runtime.servic
 import { PromptsService } from "../prompts/prompts.service";
 import { ApplicationsRepository } from "./applications.repository";
 import { buildSamples } from "./release-check.samples";
+import { hasBlockingIssue } from "./release-check.severity";
 import type { ApplicationConfigVersionRow } from "./schema";
 
 const RELEASE_CHECK_TTL_MS = 15 * 60 * 1000; // 通过后 15 分钟有效（009）
@@ -65,7 +66,7 @@ export class ReleaseCheckProcessor implements OnModuleInit {
       this.logger.error(`release check ${checkId} 执行异常：${msg}`);
       await this.repo.markReleaseCheckResult(checkId, {
         status: "failed",
-        issues: [{ code: "INTERNAL_ERROR", message: msg }],
+        issues: [{ code: "INTERNAL_ERROR", message: msg, severity: "error" }],
         sampleSummary: {},
         expiresAt: null,
       });
@@ -77,7 +78,7 @@ export class ReleaseCheckProcessor implements OnModuleInit {
     if (!version) {
       await this.repo.markReleaseCheckResult(checkId, {
         status: "failed",
-        issues: [{ code: "VERSION_MISSING", message: "配置版本不存在" }],
+        issues: [{ code: "VERSION_MISSING", message: "配置版本不存在", severity: "error" }],
         sampleSummary: {},
         expiresAt: null,
       });
@@ -85,16 +86,14 @@ export class ReleaseCheckProcessor implements OnModuleInit {
     }
     const issues: ReleaseCheckIssue[] = [];
     const summary: Record<string, { ok: number; total: number }> = {};
-    let allOk = true;
 
     for (const node of NODES) {
       const promptVersionId = version[NODE_COLUMNS[node].prompt] as string;
       const modelId = version[MODEL_COLUMNS[node]] as string;
       const exec = await this.prompts.getVersionExecutable(promptVersionId);
       if (!exec) {
-        allOk = false;
         summary[node] = { ok: 0, total: 0 };
-        issues.push({ code: "PROMPT_VERSION_MISSING", node, promptVersionId, message: `${node} 的 PromptVersion 不存在` });
+        issues.push({ code: "PROMPT_VERSION_MISSING", node, promptVersionId, message: `${node} 的 PromptVersion 不存在`, severity: "error" });
         continue;
       }
       const params = version.nodeParams[node];
@@ -112,7 +111,6 @@ export class ReleaseCheckProcessor implements OnModuleInit {
       const okCount = result.results.filter((r) => r.ok).length;
       summary[node] = { ok: okCount, total: result.results.length };
       if (!result.ok) {
-        allOk = false;
         for (const r of result.results.filter((s) => !s.ok)) {
           issues.push({
             code: r.issues[0]?.code ?? "SAMPLE_FAILED",
@@ -122,17 +120,19 @@ export class ReleaseCheckProcessor implements OnModuleInit {
             traceId: r.traceId,
             action: "OPEN_PROMPT_TRY_RUN",
             message: r.issues[0]?.message ?? `${node} 样例 ${r.sampleIndex} 预演未通过`,
+            severity: "error",
           });
         }
       }
     }
 
+    const blocked = hasBlockingIssue(issues);
     await this.repo.markReleaseCheckResult(checkId, {
-      status: allOk ? "passed" : "failed",
+      status: blocked ? "failed" : "passed",
       issues,
       sampleSummary: summary,
-      expiresAt: allOk ? new Date(Date.now() + RELEASE_CHECK_TTL_MS) : null,
+      expiresAt: blocked ? null : new Date(Date.now() + RELEASE_CHECK_TTL_MS),
     });
-    this.logger.log(`release check ${checkId} → ${allOk ? "passed" : "failed"}`);
+    this.logger.log(`release check ${checkId} → ${blocked ? "failed" : "passed"}`);
   }
 }

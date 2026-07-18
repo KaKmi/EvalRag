@@ -420,53 +420,53 @@ export class ApplicationsService {
   private staticGate(version: ApplicationConfigVersionRow, ctx: ReleaseContext): ReleaseCheckIssue[] {
     const issues: ReleaseCheckIssue[] = [];
     // 1. ≥1 KB 且 embedding 模型一致
-    if (ctx.kbIds.length === 0) issues.push({ code: "NO_KB", message: "至少需要一个知识库" });
+    if (ctx.kbIds.length === 0) issues.push({ code: "NO_KB", message: "至少需要一个知识库", severity: "error" });
     else if (new Set(ctx.kbRows.map((k) => k.embeddingModelId)).size > 1)
-      issues.push({ code: "KB_EMBEDDING_MISMATCH", message: "知识库 embedding 模型不一致" });
+      issues.push({ code: "KB_EMBEDDING_MISMATCH", message: "知识库 embedding 模型不一致", severity: "error" });
     // 2/3/7. 四 PromptVersion 存在 + 节点归属 + 编译无错 + NodeRuntime 支持 contract
     for (const node of nodes) {
       const promptVersionId = version[NODE_COLUMNS[node].prompt] as string;
       const meta = ctx.promptMetas.get(node);
       if (!meta) {
-        issues.push({ code: "PROMPT_VERSION_MISSING", node, promptVersionId, message: `${node} 的 PromptVersion 不存在` });
+        issues.push({ code: "PROMPT_VERSION_MISSING", node, promptVersionId, message: `${node} 的 PromptVersion 不存在`, severity: "error" });
         continue;
       }
       if (meta.node !== node)
-        issues.push({ code: "PROMPT_NODE_MISMATCH", node, promptVersionId, message: `PromptVersion 归属 ${meta.node}，与 ${node} 不匹配` });
+        issues.push({ code: "PROMPT_NODE_MISMATCH", node, promptVersionId, message: `PromptVersion 归属 ${meta.node}，与 ${node} 不匹配`, severity: "error" });
       if (meta.compileStatus === "has_errors")
-        issues.push({ code: "PROMPT_COMPILE_ERROR", node, promptVersionId, action: "OPEN_PROMPT_TRY_RUN", message: `${node} 的 Prompt 存在编译错误` });
+        issues.push({ code: "PROMPT_COMPILE_ERROR", node, promptVersionId, action: "OPEN_PROMPT_TRY_RUN", message: `${node} 的 Prompt 存在编译错误`, severity: "error" });
       try {
         NodeContractRegistry.resolve(node, meta.contractVersion);
       } catch {
-        issues.push({ code: "CONTRACT_UNSUPPORTED", node, promptVersionId, message: `NodeRuntime 不支持 ${node} 的 contractVersion ${meta.contractVersion}` });
+        issues.push({ code: "CONTRACT_UNSUPPORTED", node, promptVersionId, message: `NodeRuntime 不支持 ${node} 的 contractVersion ${meta.contractVersion}`, severity: "error" });
       }
     }
     // 4. 四 LLM 模型存在 + 启用 + 类型
     for (const node of nodes) {
       const model = ctx.modelMetas.get(node);
-      if (!model) issues.push({ code: "MODEL_MISSING", node, message: `${node} 模型不存在` });
+      if (!model) issues.push({ code: "MODEL_MISSING", node, message: `${node} 模型不存在`, severity: "error" });
       else if (model.type !== "llm" || !model.enabled)
-        issues.push({ code: "MODEL_INVALID", node, message: `${node} 模型必须是启用的 llm` });
+        issues.push({ code: "MODEL_INVALID", node, message: `${node} 模型必须是启用的 llm`, severity: "error" });
     }
     // 5. rerank 开启则模型合法
     if (version.rerankModelId) {
-      if (!ctx.rerank) issues.push({ code: "RERANK_MISSING", message: "rerank 模型不存在" });
+      if (!ctx.rerank) issues.push({ code: "RERANK_MISSING", message: "rerank 模型不存在", severity: "error" });
       else if (ctx.rerank.type !== "rerank" || !ctx.rerank.enabled)
-        issues.push({ code: "RERANK_INVALID", message: "rerank 模型必须是启用的 rerank" });
+        issues.push({ code: "RERANK_INVALID", message: "rerank 模型必须是启用的 rerank", severity: "error" });
     }
     // 6. 值域（对存量版本再查一遍，防旧版本越界）
     const r = version.retrievalParams;
-    if (r.topN > r.topK) issues.push({ code: "TOPN_GT_TOPK", message: "topN 不能大于 topK" });
+    if (r.topN > r.topK) issues.push({ code: "TOPN_GT_TOPK", message: "topN 不能大于 topK", severity: "error" });
     if (r.vectorWeight < 0 || r.vectorWeight > 1)
-      issues.push({ code: "VECTOR_WEIGHT_RANGE", message: "vectorWeight 越界 [0,1]" });
+      issues.push({ code: "VECTOR_WEIGHT_RANGE", message: "vectorWeight 越界 [0,1]", severity: "error" });
     if (r.rerankThreshold != null && (r.rerankThreshold < 0 || r.rerankThreshold > 1))
-      issues.push({ code: "RERANK_THRESHOLD_RANGE", message: "rerankThreshold 越界 [0,1]" });
+      issues.push({ code: "RERANK_THRESHOLD_RANGE", message: "rerankThreshold 越界 [0,1]", severity: "error" });
     for (const node of nodes) {
       const p = version.nodeParams[node];
       if (p.temperature < 0 || p.temperature > 2)
-        issues.push({ code: "TEMPERATURE_RANGE", node, message: `${node} temperature 越界 [0,2]` });
+        issues.push({ code: "TEMPERATURE_RANGE", node, message: `${node} temperature 越界 [0,2]`, severity: "error" });
       if (p.topP < 0 || p.topP > 1)
-        issues.push({ code: "TOPP_RANGE", node, message: `${node} topP 越界 [0,1]` });
+        issues.push({ code: "TOPP_RANGE", node, message: `${node} topP 越界 [0,1]`, severity: "error" });
     }
     return issues;
   }

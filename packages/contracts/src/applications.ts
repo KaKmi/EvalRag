@@ -173,6 +173,12 @@ export const ApplicationTagListResponseSchema = z.array(ApplicationTagSchema);
 export type ApplicationTagListResponse = z.infer<typeof ApplicationTagListResponseSchema>;
 
 // —— M7b ReleaseCheck（异步真实 NodeRuntime 预演结果）——
+/**
+ * B1/F5：`severity` 是「上线门禁做软提示」的落点。
+ * `error` = 阻断（M7b 既有静态/预演 issue 全属此类，行为不变）；
+ * `warning` = 仅提示（评测门禁结论），**不得**让 ReleaseCheck 变 failed、
+ * 不得让 PUT :id/production 拒绝。缺省 `error` ⇒ 库里既有 jsonb 行解析后语义零变化。
+ */
 export const ReleaseCheckIssueSchema = z.strictObject({
   code: z.string(),
   node: PromptNodeSchema.optional(),
@@ -181,8 +187,18 @@ export const ReleaseCheckIssueSchema = z.strictObject({
   traceId: z.string().optional(),
   action: z.literal("OPEN_PROMPT_TRY_RUN").optional(),
   message: z.string(),
+  severity: z.enum(["error", "warning"]).default("error"),
 });
 export type ReleaseCheckIssue = z.infer<typeof ReleaseCheckIssueSchema>;
+
+/** B1/F5：评测门禁的 issue code 全集（均为 warning 级）。 */
+export const EVAL_GATE_ISSUE_CODES = {
+  REGRESSION: "EVAL_GATE_REGRESSION",
+  OVERALL_DROP: "EVAL_GATE_OVERALL_DROP",
+  NO_RUN: "EVAL_GATE_NO_RUN",
+  STALE_RUN: "EVAL_GATE_STALE_RUN",
+  UNAVAILABLE: "EVAL_GATE_UNAVAILABLE",
+} as const;
 
 export const ReleaseCheckStatusSchema = z.enum([
   "queued",
