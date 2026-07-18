@@ -28,6 +28,7 @@ import type {
   EvalVerdict,
 } from "@codecrush/contracts";
 import { ApiError, getEvalRunReport, stopEvalRun } from "../../api/client";
+import ReplayModal, { type ReplaySource } from "./ReplayModal";
 
 const { Title, Text } = Typography;
 
@@ -133,6 +134,7 @@ export default function EvalRunDetailPage() {
   const [sortKey, setSortKey] = useState<EvalMetricKey | "min">("min");
   const [evidenceOf, setEvidenceOf] = useState<Row | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [replaySource, setReplaySource] = useState<ReplaySource | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -256,11 +258,22 @@ export default function EvalRunDetailPage() {
   const totalUnits = run.totalCases * run.repeatCount;
   const percent = totalUnits > 0 ? Math.round((run.doneCases / totalUnits) * 100) : 0;
 
-  // Task 12 接线：行尾「重放该条」打开 ReplayModal（预填 run 的 app/version + 行 question + previewTraceId）。
-  // 本任务仅留占位回调，不引入尚不存在的 ReplayModal。
-  const onReplayRow = (_row: Row) => {
-    /* TODO(Task 12)：openReplayModal({ applicationId: run.applicationId, configVersionId: run.configVersionId,
-       question: _row.question, sourceTraceId: _row.previewTraceId }) */
+  // F7：行尾「重放该条」打开 ReplayModal（预填 run 的 app/version + 行 question + previewTraceId）。
+  const onReplayRow = (row: Row) => {
+    if (!row.previewTraceId) return;
+    setReplaySource({
+      applicationId: run.applicationId,
+      configVersionId: run.configVersionId,
+      question: row.question,
+      sourceTraceId: row.previewTraceId,
+      originalAnswer: row.answer,
+      originalScores: {
+        faithfulness: row.faithfulness,
+        answerRelevancy: row.answerRelevancy,
+        contextPrecision: row.contextPrecision,
+      },
+      originalVersionLabel: run.configVersionLabel,
+    });
   };
 
   const columns: TableColumnsType<Row> = [
@@ -504,6 +517,12 @@ export default function EvalRunDetailPage() {
       </Card>
 
       <EvidenceDrawer row={evidenceOf} onClose={() => setEvidenceOf(null)} />
+
+      <ReplayModal
+        open={replaySource !== null}
+        source={replaySource}
+        onClose={() => setReplaySource(null)}
+      />
     </div>
   );
 }

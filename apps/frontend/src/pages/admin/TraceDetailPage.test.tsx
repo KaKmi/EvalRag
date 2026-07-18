@@ -11,6 +11,7 @@ const detail: TraceDetailResponse = {
   traceId: "a".repeat(32),
   meta: {
     userInput: "怎么退款",
+    agentId: "app-1",
     agentName: "退款助手",
     genModel: "deepseek-v3",
     genModelVersion: null,
@@ -106,10 +107,11 @@ describe("TraceDetailPage (M9 W2)", () => {
     expect(await screen.findByText(/退款政策 V3.2 · 第二条/)).toBeInTheDocument();
   });
 
-  it("has no replay button", async () => {
+  // E-W2b F7：头部新增「↻ 重放」按钮（原「无重放，M11」注记已随本波交付）。
+  it("has a replay button (agentId present)", async () => {
     renderAt("a".repeat(32));
     await screen.findByText("退款助手");
-    expect(screen.queryByText(/重放/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "↻ 重放" })).toBeEnabled();
   });
 
   it("keeps trace content when quality loading fails", async () => {
