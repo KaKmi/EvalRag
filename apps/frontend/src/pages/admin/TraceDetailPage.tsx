@@ -85,10 +85,19 @@ export default function TraceDetailPage() {
     };
   }, [traceId]);
 
-  /** 入集成功后就地刷新按钮态（原型 §17.6「成功 toast + 按钮态切换」）。 */
-  const refreshCaseRefs = () => {
+  /**
+   * 入集成功后切按钮态（原型 §17.6「成功 toast + 按钮态切换」）。
+   *
+   * 先用已知的 setId 乐观置位，再后台核对：若只依赖重取，一次读失败就会让用户
+   * 看着「已成功」的 toast、按钮却还写着「+ 加入评测集」，转头再点一次造出重复用例。
+   */
+  const markAddedTo = (setId: string) => {
+    const optimistic: EvalCaseRef = { setId, setName: "", caseId: "" };
+    setCaseRefs((prev) => (prev.some((r) => r.setId === setId) ? prev : [...prev, optimistic]));
+    // 后台核对拿到权威数据；但**不允许它把刚加的这条抹掉**——重取失败或读到旧快照时
+    // 若直接覆盖，用户会看着「已成功」的 toast、按钮却退回「+ 加入评测集」，转头再点一次造重复用例。
     void getEvalCaseRefs(traceId)
-      .then(setCaseRefs)
+      .then((refs) => setCaseRefs(refs.some((r) => r.setId === setId) ? refs : [...refs, optimistic]))
       .catch(() => undefined);
   };
 
@@ -185,7 +194,15 @@ export default function TraceDetailPage() {
           // 原型 §17.6 `:647`「已在集:按钮变「已在评测集·查看」」
           <Button onClick={() => nav("/admin/eval/sets")}>已在评测集 · 查看</Button>
         ) : (
-          <Button onClick={() => setAddOpen(true)}>+ 加入评测集</Button>
+          // 问题为空的 trace 入不了集（用例的 question 契约要求非空）。与其让用户
+          // 点完在弹窗里撞一堵墙，不如在这里就说明白——同「重放」缺 agentId 的处理方式。
+          <Tooltip title={meta.userInput?.trim() ? "" : "trace 缺少用户问题，无法加入评测集"}>
+            <span>
+              <Button disabled={!meta.userInput?.trim()} onClick={() => setAddOpen(true)}>
+                + 加入评测集
+              </Button>
+            </span>
+          </Tooltip>
         )}
         <Tooltip title={meta.agentId ? "" : "trace 缺少应用信息，无法重放"}>
           <Button
@@ -210,9 +227,9 @@ export default function TraceDetailPage() {
         sourceTraceId={traceId}
         question={meta.userInput ?? ""}
         onClose={() => setAddOpen(false)}
-        onDone={() => {
+        onDone={(setId) => {
           setAddOpen(false);
-          refreshCaseRefs();
+          markAddedTo(setId);
         }}
       />
 

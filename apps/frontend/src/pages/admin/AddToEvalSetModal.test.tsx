@@ -111,3 +111,57 @@ it("提交失败时报错且不回调 onDone", async () => {
   await waitFor(() => expect(message.error).toHaveBeenCalledWith("集不存在"));
   expect(onDone).not.toHaveBeenCalled();
 });
+
+/**
+ * 下拉内「新建评测集」是本弹窗最有状态的一段（追加列表 → 自动选中 → 可提交）。
+ * 不钉的话，删掉 setSetId(created.id) 或 setSets 追加都不会有任何测试变红。
+ */
+it("下拉内新建评测集：创建后自动选中，可直接提交到新集", async () => {
+  vi.mocked(api.createEvalSet).mockResolvedValue({ id: "set-new", name: "新集" } as never);
+  renderModal();
+  fireEvent.mouseDown(screen.getByRole("combobox"));
+  await screen.findByRole("option", { name: "售后核心 50 题" });
+
+  const nameInput = screen.getByPlaceholderText("新建评测集名称");
+  fireEvent.change(nameInput, { target: { value: "  新集  " } });
+  fireEvent.click(screen.getByRole("button", { name: /新\s*建/ }));
+
+  // 名称去空白后提交
+  await waitFor(() => expect(api.createEvalSet).toHaveBeenCalledWith({ name: "新集", kbIds: [] }));
+
+  // 自动选中新集 → 直接确认即可入到新集
+  clickConfirm();
+  await waitFor(() =>
+    expect(vi.mocked(api.createEvalCase)).toHaveBeenCalledWith(
+      "set-new",
+      expect.objectContaining({ sourceTraceId: TRACE }),
+    ),
+  );
+});
+
+/**
+ * question 为空时 client.ts 的 postJson 会在发请求前同步抛 ZodError，
+ * 而 ZodError.message 是一坨 JSON。必须本地挡住并给人话。
+ */
+it("trace 无用户问题时本地拦截，不发请求也不吐 ZodError", async () => {
+  renderModal({ question: "" });
+  await pickFirstSet();
+  clickConfirm();
+  await waitFor(() =>
+    expect(screen.getByText("该 trace 没有用户问题，无法入集")).toBeInTheDocument(),
+  );
+  expect(vi.mocked(api.createEvalCase)).not.toHaveBeenCalled();
+});
+
+it("gold 单条超 200 字本地拦截（§19.1），给人话不给 ZodError", async () => {
+  renderModal();
+  await pickFirstSet();
+  fireEvent.change(screen.getByPlaceholderText("留空则进集后为待补 gold"), {
+    target: { value: "长".repeat(201) },
+  });
+  clickConfirm();
+  await waitFor(() =>
+    expect(screen.getByText("gold 要点每条不超过 200 字")).toBeInTheDocument(),
+  );
+  expect(vi.mocked(api.createEvalCase)).not.toHaveBeenCalled();
+});

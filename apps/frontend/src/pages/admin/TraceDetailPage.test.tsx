@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { TraceDetailResponse } from "@codecrush/contracts";
 import TraceDetailPage from "./TraceDetailPage";
@@ -215,4 +215,37 @@ it("case-refs 读取失败 → 退回「+ 加入评测集」态", async () => {
   mocked.getEvalCaseRefs.mockRejectedValue(new Error("boom"));
   renderAt("a".repeat(32));
   expect(await screen.findByRole("button", { name: "+ 加入评测集" })).toBeInTheDocument();
+});
+
+/** AC10 的真正路径：入集成功后按钮当场切态（不只是两个静态态各自渲染正确）。 */
+it("入集成功后按钮当场切成「已在评测集 · 查看」", async () => {
+  mocked.getEvalCaseRefs.mockResolvedValue([]);
+  mocked.getEvalSets.mockResolvedValue([{ id: "set-1", name: "售后核心 50 题" } as never]);
+  mocked.createEvalCase.mockResolvedValue({ id: "case-1" } as never);
+  renderAt("a".repeat(32));
+
+  fireEvent.click(await screen.findByRole("button", { name: "+ 加入评测集" }));
+  await screen.findByPlaceholderText("留空则进集后为待补 gold");
+
+  fireEvent.mouseDown(screen.getByRole("combobox"));
+  await screen.findByRole("option", { name: "售后核心 50 题" });
+  const dropdown = document.querySelector(".ant-select-dropdown") as HTMLElement;
+  fireEvent.click(within(dropdown).getByText("售后核心 50 题"));
+
+  // 重取返回空数组：按钮仍必须切态（乐观置位兜底），否则用户会重复入集
+  mocked.getEvalCaseRefs.mockResolvedValue([]);
+  fireEvent.click(screen.getByRole("button", { name: /确认加入/ }));
+  await waitFor(() => expect(mocked.createEvalCase).toHaveBeenCalled());
+
+  expect(await screen.findByRole("button", { name: "已在评测集 · 查看" })).toBeInTheDocument();
+});
+
+/** 问题为空的 trace 入不了集，按钮直接禁用并给原因。 */
+it("trace 无用户问题 → 「+ 加入评测集」禁用", async () => {
+  mocked.getEvalCaseRefs.mockResolvedValue([]);
+  mocked.getTrace.mockResolvedValue({ ...detail, meta: { ...detail.meta, userInput: "" } });
+  renderAt("a".repeat(32));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "+ 加入评测集" })).toBeDisabled(),
+  );
 });
