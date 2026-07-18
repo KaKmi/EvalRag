@@ -156,6 +156,17 @@ beforeEach(() => {
   mocked.listApplicationTags.mockResolvedValue([]);
 });
 
+/** 只渲染页面（不开弹窗），用于发布卡片本身的断言。 */
+function renderPage(url = "/admin/applications/app1") {
+  return render(
+    <MemoryRouter initialEntries={[url]}>
+      <Routes>
+        <Route path="/admin/applications/:appId" element={<ApplicationDetailPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 /** 走真实交互路径：点「上线这个版本」→ 触发 ReleaseCheck → 核对弹窗。 */
 async function openReleaseModal(check: ReleaseCheck) {
   mocked.startApplicationReleaseCheck.mockResolvedValue(check);
@@ -255,4 +266,25 @@ it("无门禁 issue 时不渲染任何全局区块（不给空壳 Alert）", asy
   await screen.findByRole("button", { name: /核对通过 · 上线/ });
   expect(screen.queryByText("评测提示（不阻断上线）")).not.toBeInTheDocument();
   expect(screen.queryByText("发布检查未通过")).not.toBeInTheDocument();
+});
+
+// —— B1/F5：原型 `:621`「跳应用发布页，发布卡片显示评测摘要」——
+
+it("URL 带 fromCompare 时，发布卡片显示评测摘要", async () => {
+  renderPage("/admin/applications/app1?fromCompare=run-a_run-b&regressed=5&delta=3.6");
+  expect(await screen.findByText("来自版本对比的评测结论")).toBeInTheDocument();
+  expect(screen.getByText(/综合 Δ 3\.6 · 回退用例 5 条/)).toBeInTheDocument();
+});
+
+it("URL 无 fromCompare 时不显示评测摘要（不给空壳卡片）", async () => {
+  renderPage();
+  await screen.findByRole("button", { name: /上线这个版本/ });
+  expect(screen.queryByText("来自版本对比的评测结论")).not.toBeInTheDocument();
+});
+
+/** NULL 不退化为 0：屏4 对 null delta 传空串，这里必须显示「—」而不是 0。 */
+it("delta 为空（overallDelta 为 null）时显示「—」而非 0", async () => {
+  renderPage("/admin/applications/app1?fromCompare=run-a_run-b&regressed=0&delta=");
+  expect(await screen.findByText("来自版本对比的评测结论")).toBeInTheDocument();
+  expect(screen.getByText(/综合 Δ — · 回退用例 0 条/)).toBeInTheDocument();
 });

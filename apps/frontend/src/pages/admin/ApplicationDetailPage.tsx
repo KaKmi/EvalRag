@@ -6,7 +6,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -186,6 +186,19 @@ function FieldRow({ label, children }: { label: ReactNode; children: ReactNode }
 export default function ApplicationDetailPage() {
   const { appId = "" } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  /**
+   * B1/F5：屏4 跳过来时携带的评测结论（原型 `:621`「发布卡片显示评测摘要」）。
+   * `delta` 可能是空串——overallDelta 为 null（某侧无已评用例）时屏4 刻意传空，
+   * **NULL 不退化为 0**（0 会被读成「持平」，那是一句没有证据的断言）。
+   */
+  const compareSummary = searchParams.get("fromCompare")
+    ? {
+        regressed: Number(searchParams.get("regressed") ?? 0),
+        delta: searchParams.get("delta") || "—",
+      }
+    : null;
 
   const [detail, setDetail] = useState<ApplicationDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -902,6 +915,23 @@ export default function ApplicationDetailPage() {
             }}
           >
             <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(0,0,0,.8)" }}>上线</div>
+            {/*
+              原型 §17.4（`:621`）：「跳应用发布页，**发布卡片显示评测摘要**」。
+              屏4 的「去上线」按钮无论门禁开关如何都会携带结论参数过来，这里把它显示出来
+              ——否则「携带结论」这一半等于没做，用户跳过来只看到一个普通发布卡片。
+            */}
+            {compareSummary && (
+              <Alert
+                type={compareSummary.regressed > 0 ? "warning" : "info"}
+                showIcon
+                message="来自版本对比的评测结论"
+                description={
+                  <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                    综合 Δ {compareSummary.delta} · 回退用例 {compareSummary.regressed} 条
+                  </div>
+                }
+              />
+            )}
             <div style={{ fontSize: 12, color: "rgba(0,0,0,.5)", lineHeight: 1.7 }}>
               {detail.productionVersion != null ? (
                 <>

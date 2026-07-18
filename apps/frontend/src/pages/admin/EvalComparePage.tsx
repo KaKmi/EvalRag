@@ -148,6 +148,9 @@ export default function EvalComparePage() {
   useEffect(() => {
     if (!data) return;
     let alive = true;
+    // 先清空再取：切换 run 对时，上一对的门禁结论会在新数据落地到新结论到手之间
+    // 多渲染一帧——那一帧会把 A 对的「可上线」结论盖在 B 对身上。
+    setGate({ enabled: false, issues: [] });
     void getEvalGate(data.b.applicationId, data.b.configVersionId)
       .then((s) => {
         if (alive) setGate(s);
