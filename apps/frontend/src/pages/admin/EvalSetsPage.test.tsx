@@ -186,6 +186,25 @@ it("列表按原型 §5 显示 gold docs 覆盖率与一位小数的上次得分
   expect(screen.getByText("全部")).toBeInTheDocument();
 });
 
+it("知识库名称加载期间显示占位，不暴露内部 UUID", async () => {
+  let resolveKnowledgeBases!: (
+    value: Awaited<ReturnType<typeof api.getKnowledgeBases>>,
+  ) => void;
+  vi.mocked(api.getKnowledgeBases).mockReturnValue(
+    new Promise((resolve) => {
+      resolveKnowledgeBases = resolve;
+    }),
+  );
+
+  renderPage([evalSet({ kbIds: ["kb-1"] })]);
+
+  expect(await screen.findByText("加载中…")).toBeInTheDocument();
+  expect(screen.queryByText("kb-1")).not.toBeInTheDocument();
+
+  resolveKnowledgeBases([knowledgeBase()]);
+  expect(await screen.findByText("售后FAQ")).toBeInTheDocument();
+});
+
 // QA P2：一个跑完 5 次 run 的集合被显示成「未运行」——NULL 是对的，词是假的。
 it("跑过但没出分的集 →「未出分」而非「未运行」（两种 null 成因必须分词）", async () => {
   renderPage([

@@ -209,12 +209,13 @@ export default function EvalSetsPage() {
   const [sets, setSets] = useState<EvalSet[]>([]);
   const [loading, setLoading] = useState(true);
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
+  const [kbsLoading, setKbsLoading] = useState(true);
   const [cases, setCases] = useState<Record<string, EvalCase[]>>({});
   const [expanded, setExpanded] = useState<string[]>([]);
   const [selectedCases, setSelectedCases] = useState<Record<string, string[]>>({});
 
   const kbName = useCallback(
-    (id: string) => kbs.find((kb) => kb.id === id)?.name ?? id,
+    (id: string) => kbs.find((kb) => kb.id === id)?.name ?? "未知知识库",
     [kbs],
   );
 
@@ -234,7 +235,8 @@ export default function EvalSetsPage() {
     void reload();
     getKnowledgeBases()
       .then(setKbs)
-      .catch(() => setKbs([]));
+      .catch(() => setKbs([]))
+      .finally(() => setKbsLoading(false));
   }, [reload]);
 
   const loadCases = useCallback(async (setId: string) => {
@@ -274,6 +276,7 @@ export default function EvalSetsPage() {
       <SetsTable
         sets={sets}
         loading={loading}
+        kbsLoading={kbsLoading}
         kbName={kbName}
         cases={cases}
         expanded={expanded}
@@ -296,6 +299,7 @@ export default function EvalSetsPage() {
 function SetsTable({
   sets,
   loading,
+  kbsLoading,
   kbName,
   cases,
   expanded,
@@ -308,6 +312,7 @@ function SetsTable({
 }: {
   sets: EvalSet[];
   loading: boolean;
+  kbsLoading: boolean;
   kbName: (id: string) => string;
   cases: Record<string, EvalCase[]>;
   expanded: string[];
@@ -357,7 +362,11 @@ function SetsTable({
       // 原型 §5：未关联知识库的集显示「全部」（「高频 Badcase 集」行即 34 条 / 覆盖「全部」）
       render: (_: unknown, row) => (
         <Text type="secondary">
-          {row.kbIds.length === 0 ? "全部" : row.kbIds.map(kbName).join("·")}
+          {row.kbIds.length === 0
+            ? "全部"
+            : kbsLoading
+              ? "加载中…"
+              : row.kbIds.map(kbName).join("·")}
         </Text>
       ),
     },

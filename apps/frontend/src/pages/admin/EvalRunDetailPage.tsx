@@ -735,8 +735,16 @@ const POINT_STATUS: Record<string, { label: string; color: string }> = {
 /** §17.3「判分依据抽屉 Drawer 560px · eval_results.judge_evidence」。 */
 function EvidenceDrawer({ row, onClose }: { row: Row | null; onClose: () => void }) {
   return (
-    // antd v6：`width` 已废弃 → `size`（数值语义不变）。§17.3 的 560px 不变。
-    <Drawer title={`判分依据 · #${row?.seq ?? ""}`} size={560} open={row !== null} onClose={onClose}>
+    // 挂在当前页面而非延迟创建 body portal：React 19 + antd v6 开发态下可稳定响应首次点击。
+    <Drawer
+      title={`判分依据 · #${row?.seq ?? ""}`}
+      size={560}
+      open={row !== null}
+      onClose={onClose}
+      getContainer={false}
+      rootStyle={{ position: "fixed" }}
+      forceRender
+    >
       {row && (
         <>
           <Text strong>{row.question}</Text>

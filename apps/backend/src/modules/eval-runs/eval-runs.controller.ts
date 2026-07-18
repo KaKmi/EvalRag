@@ -21,6 +21,12 @@ import { EvalRunsService } from "./eval-runs.service";
 
 type AuthedRequest = { user: AuthenticatedUser };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function assertRunId(value: string, parameter: string): void {
+  if (!UUID_RE.test(value)) throw new BadRequestException(`${parameter} must be a UUID`);
+}
+
 /** 原型 §7 / 决策 F：`/admin/eval/runs` 与 `/admin/eval/runs/:runId` 的后端。 */
 @Controller("eval/runs")
 export class EvalRunsController {
@@ -48,16 +54,20 @@ export class EvalRunsController {
     @Query("b") b: string,
   ): Promise<EvalCompareResponse> {
     if (!a || !b) throw new BadRequestException("compare requires both a and b run ids");
+    assertRunId(a, "a");
+    assertRunId(b, "b");
     return this.service.compare(a, b);
   }
 
   /** 进度反馈用轮询（018 已知取舍 8）：前端仅在 queued/running 时 3s 拉一次本端点。 */
   @Get(":id") getReport(@Param("id") id: string): Promise<EvalRunReport> {
+    assertRunId(id, "id");
     return this.service.getReport(id);
   }
 
   /** 原型 §19.2 Popconfirm「停止后已完成的 23 条保留,未运行的不再执行?」——只置信号，worker 收尾。 */
   @Post(":id/stop") @HttpCode(204) stop(@Param("id") id: string): Promise<void> {
+    assertRunId(id, "id");
     return this.service.stop(id);
   }
 }

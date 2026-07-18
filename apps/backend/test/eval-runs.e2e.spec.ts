@@ -487,6 +487,12 @@ describeInfra("E-W2a 离线评测闭环（HTTP e2e，真 PG + 真 ClickHouse）"
 
   // ═══════════════════════ §9.6 / §9.7 停止与预算熔断 ═══════════════════════
 
+  it("run id 路径与 compare 查询参数非法时返回 400，而不是存储层 500", async () => {
+    await http().post("/api/eval/runs/not-a-uuid/stop").expect(400);
+    await http().get("/api/eval/runs/not-a-uuid").expect(400);
+    await http().get("/api/eval/runs/compare?a=not-a-uuid&b=also-invalid").expect(400);
+  });
+
   it("§9.6 停止：running 中 stop → 已完成结果保留、run=partial、未跑用例显示为 skipped", async () => {
     const setId = await seedReviewedSet("停止集", [GOOD_QUESTION, "发货要多久", "怎么换货"]);
     const runId = (await startRun(setId).expect(201)).body.id as string;

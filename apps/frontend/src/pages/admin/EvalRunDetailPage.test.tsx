@@ -308,6 +308,7 @@ it("未跑用例渲染为灰行且指标全「—」", async () => {
 it("判分依据抽屉逐指标展示证据，未评指标说明不计入均值", async () => {
   renderReport({ results: [result({ correctness: null, evidence: { faithfulness: ["[hit] 7 天内无理由退 —— 一致"] } })] });
   fireEvent.click(await screen.findByRole("button", { name: "判分依据" }));
+  expect(await screen.findByRole("dialog", { name: "判分依据 · #1" })).toBeVisible();
   expect(await screen.findByText("7 天内无理由退 —— 一致")).toBeInTheDocument();
   expect(screen.getByText("一致")).toBeInTheDocument();
   // 未评的是 correctness（分数为 NULL）——「未评」判据是分数为 NULL，不是 evidence 键缺失
