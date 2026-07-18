@@ -390,13 +390,31 @@ export class EvalRunsRepository {
    * `startedAt` 用 COALESCE 只在首次置位：pg-boss 重试会对同一条 run 再走一遍本方法，
    * 直接覆盖会把开始时间推后到重试时刻 → 报告耗时凭空缩水（甚至短于实际已跑的用例耗时和）。
    *
-   * ⚠️ **条件更新（`lease_owner = owner` 且租约未过期），返回 false = 我已不是所有者**。
+   * ⚠️ **条件更新（`lease_owner = owner`），返回 false = 我已不是所有者**。
    * 无条件写会把「失去租约」这件事悄悄抹平：`tryAcquireLease` 与 `markRunning` 之间隔着
    * `findRunById` + `resolveForTest`（两次 DB 往返），这个窗口里回收器可能已把该 run 判死
    * （回收会清空 `lease_owner`）。此时无条件的 `WHERE id=$1` 会把一条 `failed` run 写回
    * `running`，且租约恒 NULL —— 两条回收臂**都够不着**它（running 臂要 `lease_until < deadline`，
    * 而 `NULL < ts` 求值为 NULL 而非 TRUE；queued 臂要 `status='queued'`）→ `findActiveRun`
    * 恒返回它 → `POST /eval/runs` 恒 409 → **回收器立意消灭的死锁原样重生，且更不可达**。
+   *
+   * ## 所有权即守卫 —— 这里**没有**过期检查，且不得加（018 §12 缺口 15(d)）
+   *
+   * 过期只在两处被读：`tryAcquireLease`（接管）与 `reapAbandonedRuns`（撤销）。
+   * worker 的自我推进（`markRunning`/`renewLease`/`recordResult`/`finishRunAsOwner`）
+   * **一律只证明所有权**。失去所有权的唯一来源就是「被撤销」或「被接管」，两者都会
+   * 改写 `lease_owner` —— 故所有权检查已经涵盖了全部真实的失效路径。
+   *
+   * 此处曾有一个 `lease_until > now` 合取项。它在唯一调用点是**空转**的
+   * （`processRun` 传的 `now` 正是 `tryAcquireLease` 用来算 `lease_until = now + TTL`
+   * 的那个 `now`），已删除。**不要把它「做实」**（传新鲜时间戳）：第 3 轮 review 的
+   * 无死锁证明依赖「`markRunning=false` ⟺ `lease_owner ≠ owner`」，这正是
+   * `eval-run-worker.processor.ts` 的「不重新入队」的正当性来源。真过期检查会让一个
+   * **仍持租**的 worker（如 `resolveForTest` 慢过 5min）拿到 false → 不重投 →
+   * handler 正常返回 → pg-boss 视作完成不再重试 → run 卡在 `queued` 直到 15min 后
+   * 被回收判 failed。**那是往非保守方向新增的失败模式。**
+   * `eval-runs.lease.db.spec.ts` 里那两条「租约已过期但 owner 正确 → 仍返回 true」
+   * 就是钉死本段结论的反向钉子。
    *
    * 与 `renewLease` 同形（`WHERE lease_owner = owner`）：worker 的每一次状态推进都必须先
    * 证明自己仍持有租约。调用方据返回值让位。**不变式：失去租约的 worker 永远写不回 running。**
@@ -405,9 +423,7 @@ export class EvalRunsRepository {
     const rows = await this.db
       .update(evalRuns)
       .set({ status: "running", startedAt: sql`COALESCE(${evalRuns.startedAt}, ${now})` })
-      .where(
-        and(eq(evalRuns.id, id), eq(evalRuns.leaseOwner, owner), gt(evalRuns.leaseUntil, now)),
-      )
+      .where(and(eq(evalRuns.id, id), eq(evalRuns.leaseOwner, owner)))
       .returning({ id: evalRuns.id });
     return rows.length === 1;
   }

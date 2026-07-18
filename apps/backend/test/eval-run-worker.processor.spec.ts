@@ -107,10 +107,10 @@ function setup(opts: SetupOptions = {}) {
     async findRunById(id: string) {
       return runs.get(id);
     },
-    // 条件更新（`lease_owner = owner` 且租约未过期）：返回 false = 我已不是所有者。
-    // 无条件写会把一条已被回收的 failed run 复活成 running + NULL 租约 —— 两条回收臂都
-    // 够不着的永久死锁（见 eval-runs.lease.db.spec.ts；那条性质活在 SQL 三值逻辑上，
-    // 只有真库测得到，此处的 fake 只守 worker 的**让位行为**）。
+    // 条件更新（**只**看 `lease_owner = owner`——所有权即守卫，见 018 §12 缺口 15(d)）：
+    // 返回 false = 我已不是所有者。无条件写会把一条已被回收的 failed run 复活成
+    // running + NULL 租约 —— 两条回收臂都够不着的永久死锁（见 eval-runs.lease.db.spec.ts；
+    // 那条性质活在 SQL 三值逻辑上，只有真库测得到，此处的 fake 只守 worker 的**让位行为**）。
     async markRunning(id: string, _owner: string, at: Date) {
       if (opts.markRunningLost) return false;
       const row = runs.get(id)!;

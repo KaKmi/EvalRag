@@ -291,4 +291,25 @@ describeDb("eval run lease + reaper（真库三值逻辑）", () => {
     // 不抛即通过：槽位已随 status 转终态而释放
     await insertRun("queued", null, null);
   });
+
+  // ——— 缺口 15(d)：所有权即守卫 —— 这两条是**反向钉子**，防后人把过期检查加回来 ———
+  it("owner 正确但租约**已过期** → markRunning 仍返回 true（推进只看所有权，不看过期）", async () => {
+    const id = await insertRun("queued", null, null);
+    // 手工把租约推到过去：模拟「worker 还活着、但 TTL 已过且无人接管」
+    await pool.query(`UPDATE eval_runs SET lease_owner='w1', lease_until=$2 WHERE id=$1`, [
+      id,
+      ago(EVAL_RUN_LEASE_MS + 60_000),
+    ]);
+    // 若有人把 gt(lease_until, now) 加回来，这条立刻变红。
+    // 加回来的代价见 018 §12 缺口 15(d)：持租 worker 收到 false → 不重投 →
+    // pg-boss 视作完成 → run 卡在 queued 直到被回收判 failed（非保守的新失败模式）。
+    expect(await repo.markRunning(id, "w1", new Date())).toBe(true);
+    expect((await statusOf(id)).status).toBe("running");
+  });
+
+  it("owner 不匹配 → markRunning 仍返回 false（守卫没被削弱）", async () => {
+    const id = await insertRun("queued", "someone-else", new Date(Date.now() + EVAL_RUN_LEASE_MS));
+    expect(await repo.markRunning(id, "w1", new Date())).toBe(false);
+    expect((await statusOf(id)).status).toBe("queued");
+  });
 });
