@@ -32,6 +32,8 @@ export type QualityThresholds = z.infer<typeof QualityThresholdsSchema>;
 
 export const TraceQualityDetailSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("unscored") }),
+  /** B1/F3：人工「立即评测」已入队/运行中。原型 §18.D：面板「评分中」，轮询 5s×6。 */
+  z.object({ status: z.literal("scoring"), startedAt: isoString.nullable() }),
   z.object({
     status: z.literal("scored"),
     scores: QualityScoresSchema,

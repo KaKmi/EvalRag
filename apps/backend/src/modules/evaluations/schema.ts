@@ -114,3 +114,31 @@ export const evalCandidateLedger = pgTable(
 export type OnlineEvalSettingsRow = typeof onlineEvalSettings.$inferSelect;
 export type EvalWatermarkRow = typeof evalWatermarks.$inferSelect;
 export type EvalCandidateLedgerRow = typeof evalCandidateLedger.$inferSelect;
+
+/**
+ * B1/F3：人工「立即评测」的作业表。**刻意与 eval_candidate_ledger 分开**——
+ * 见 0025 迁移注释：账本表达的是游标推进语义，人工旁路不推进游标。
+ * 主键与账本同形 (target_trace_id, judge_version)，正因如此更不能混用同一张表。
+ */
+export const evalManualScoreJobs = pgTable(
+  "eval_manual_score_jobs",
+  {
+    targetTraceId: varchar("target_trace_id", { length: 32 }).notNull(),
+    judgeVersion: varchar("judge_version", { length: 100 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull().default("queued"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    requestedBy: varchar("requested_by", { length: 200 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.targetTraceId, t.judgeVersion] }),
+    check(
+      "eval_manual_score_jobs_status_check",
+      sql`${t.status} IN ('queued','running','scored','failed')`,
+    ),
+    index("eval_manual_score_jobs_status_idx").on(t.status, t.updatedAt),
+  ],
+);
+export type EvalManualScoreJobRow = typeof evalManualScoreJobs.$inferSelect;
