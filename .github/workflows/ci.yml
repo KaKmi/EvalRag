@@ -25,6 +25,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      # skeleton.e2e.spec.ts 在 import 期就实例化 NestJS 配置模块，envSchema 的
+      # DATABASE_URL / JWT_SECRET / MODEL_API_KEY_ENCRYPTION_KEY 三项无默认值 ⇒ 无 .env 直接
+      # ZodError。该 spec 不连任何真实服务（pg-boss 被 jest.mock、仓储全部 override 成内存假件），
+      # 只是要一份能过 schema 的占位配置。本地一直有 .env 故从未暴露，CI 首跑即抓到（#42）。
+      #
+      # 用 .env.example 而非在此写死一份 env：日后往 envSchema 加必填项却忘了同步 .env.example，
+      # 这一步会立刻红——把「示例文件与 schema 同步」从自觉变成机器检查。
+      - name: Seed placeholder env (schema-satisfaction only, no real services)
+        run: cp apps/backend/.env.example apps/backend/.env
       # turbo 的 test/build 都 dependsOn ^build，无需额外构建步骤
       - run: pnpm test
       - run: pnpm build
