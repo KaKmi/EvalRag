@@ -22,6 +22,7 @@ const GapsPage = lazy(() => import("../pages/admin/GapsPage"));
 const EvalSetsPage = lazy(() => import("../pages/admin/EvalSetsPage"));
 const EvalRunsPage = lazy(() => import("../pages/admin/EvalRunsPage"));
 const EvalRunDetailPage = lazy(() => import("../pages/admin/EvalRunDetailPage"));
+const EvalComparePage = lazy(() => import("../pages/admin/EvalComparePage"));
 const TracesPage = lazy(() => import("../pages/admin/TracesPage"));
 const TraceDetailPage = lazy(() => import("../pages/admin/TraceDetailPage"));
 const QualityPage = lazy(() => import("../pages/admin/QualityPage"));
@@ -85,6 +86,7 @@ export function App() {
           <Route path="eval/sets" element={<EvalSetsPage />} />
           <Route path="eval/runs" element={<EvalRunsPage />} />
           <Route path="eval/runs/:runId" element={<EvalRunDetailPage />} />
+          <Route path="eval/compare" element={<EvalComparePage />} />
           <Route path="traces" element={<TracesPage />} />
           <Route path="traces/sessions/:sessionId" element={<SessionDetailPage />} />
           <Route path="traces/:traceId" element={<TraceDetailPage />} />
