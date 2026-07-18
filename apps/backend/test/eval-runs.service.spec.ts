@@ -88,6 +88,8 @@ interface SetupOptions {
   goldRefCaseVersionIds?: string[];
   /** 缺口 13：让 insertRun 抛指定错误（模拟撞活跃槽位唯一索引）。 */
   insertRunError?: unknown;
+  /** 缺口 15(a)：让 queue.publish 抛错（走 finishRunUnowned 收尾路径）。 */
+  publishError?: unknown;
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -100,7 +102,10 @@ function setup(opts: SetupOptions = {}) {
   if (recentDone) runs.set(recentDone.id, recentDone);
 
   let nextId = 0;
-  const publish = jest.fn(async () => undefined);
+  const publish = jest.fn(async () => {
+    if (opts.publishError) throw opts.publishError;
+    return undefined;
+  });
   const queue = { publish, subscribe: jest.fn(), schedule: jest.fn() };
 
   const aggregate = (row: EvalRunRow): EvalRunAggregate => ({
@@ -206,6 +211,7 @@ function setup(opts: SetupOptions = {}) {
           : [],
       }));
     },
+    finishRunUnowned: jest.fn(async () => true),
   };
 
   const sets = {
@@ -287,6 +293,22 @@ describe("EvalRunsService", () => {
     await expect(service.create(req(), "admin")).rejects.toThrow(
       "已有评测正在运行，请等待完成或先停止",
     );
+  });
+
+  it("create：publish 抛出 → 走 finishRunUnowned（而非无条件收尾），并重抛原始错误", async () => {
+    // 谓词 status='queued' AND lease_owner IS NULL 是必需的：catch 只能证明 publish
+    // **抛出**，不能证明 job 没落库（网络超时后服务端已收到是可达的）。若 worker 已接管，
+    // 无条件写会把一条**正在跑**的 run 判 failed。
+    const boom = new Error("queue down");
+    const { service, repo, queue } = setup({ publishError: boom });
+    await expect(service.create(req(), "admin")).rejects.toBe(boom);
+    expect(repo.finishRunUnowned).toHaveBeenCalledWith(
+      expect.any(String),
+      "failed",
+      expect.any(Date),
+      "入队失败，未能启动评测",
+    );
+    expect(queue.publish).toHaveBeenCalledTimes(1);
   });
 
   it("create：**别的**唯一索引冲突原样抛出 —— 不得伪装成 409", async () => {

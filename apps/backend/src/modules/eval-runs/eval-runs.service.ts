@@ -229,8 +229,17 @@ export class EvalRunsService {
         { retryLimit: EVAL_RUN_JOB_RETRY_LIMIT },
       );
     } catch (err) {
-      await this.repo.finishRun(run.id, "failed", new Date(), "入队失败，未能启动评测");
-      this.logger.error(`run ${run.id} 入队失败，已收成 failed：${(err as Error).message}`);
+      // 收窄到「仍是无主 queued」：catch 只能证明 publish **抛出**，不能证明 job 没落库
+      // （网络超时后服务端已收到是可达的）。若 worker 已接管，这里必须什么都不做。
+      const finished = await this.repo.finishRunUnowned(
+        run.id,
+        "failed",
+        new Date(),
+        "入队失败，未能启动评测",
+      );
+      this.logger.error(
+        `run ${run.id} 入队失败${finished ? "，已收成 failed" : "（已被 worker 接管，保持原状）"}：${(err as Error).message}`,
+      );
       throw err;
     }
     // 新 run 必然 0 结果 → 综合分直接给 null，省一次回读（同 eval-sets.service.ts:78-85 的做法）。

@@ -55,6 +55,7 @@ const ID = "11111111-1111-4111-8111-111111111111";
 describeDb("eval run lease + reaper（真库三值逻辑）", () => {
   let pool: Pool;
   let repo: EvalRunsRepository;
+  let CASE_VERSION_ID: string;
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.MIGRATION_TEST_DATABASE_URL });
@@ -69,9 +70,50 @@ describeDb("eval run lease + reaper（真库三值逻辑）", () => {
   beforeEach(async () => {
     await pool.query("DELETE FROM eval_run_results");
     await pool.query("DELETE FROM eval_runs");
+    await pool.query("DELETE FROM eval_case_versions");
+    await pool.query("DELETE FROM eval_cases");
     await pool.query("DELETE FROM eval_sets");
     await pool.query(`INSERT INTO eval_sets (id, name, created_by) VALUES ($1, 'set', 't')`, [ID]);
+    // `eval_run_results.case_version_id` 有 FK ⇒ recordResult 的用例需要一条真实版本行
+    // （做法参 eval-sets.aggregate.db.spec.ts:63-70）。
+    const caseRow = await pool.query(
+      `INSERT INTO eval_cases (set_id, status) VALUES ($1,'reviewed') RETURNING id`,
+      [ID],
+    );
+    const versionRow = await pool.query(
+      `INSERT INTO eval_case_versions (case_id, version, question) VALUES ($1,1,'q') RETURNING id`,
+      [caseRow.rows[0].id],
+    );
+    CASE_VERSION_ID = versionRow.rows[0].id;
   });
+
+  /** recordResult 的最小合法入参；`eval_run_results` 需要一条真实的 case_version_id。 */
+  function resultInput(runId: string, owner: string) {
+    return {
+      runId,
+      owner,
+      caseVersionId: CASE_VERSION_ID,
+      seq: 1,
+      repeatIndex: 1,
+      verdict: "pass",
+      faithfulness: null,
+      answerRelevancy: null,
+      contextPrecision: null,
+      correctness: null,
+      citation: null,
+      contextRecall: null,
+      ndcg5: null,
+      hitRate5: null,
+      minMetric: null,
+      minScore: null,
+      evidence: {},
+      previewTraceId: null,
+      answer: "",
+      tokensUsed: 7,
+      durationMs: 1,
+      error: null,
+    };
+  }
 
   /** `createdAt` 省略 = now（默认值）；queued 孤儿的判据是**创建时刻**，故必须可控。 */
   async function insertRun(
@@ -311,5 +353,61 @@ describeDb("eval run lease + reaper（真库三值逻辑）", () => {
     const id = await insertRun("queued", "someone-else", new Date(Date.now() + EVAL_RUN_LEASE_MS));
     expect(await repo.markRunning(id, "w1", new Date())).toBe(false);
     expect((await statusOf(id)).status).toBe("queued");
+  });
+
+  // ——— 缺口 15(a)(b)：每次状态推进都必须证明租约所有权 ————————————————
+  it("15(a) 失租后 finishRunAsOwner 不生效 —— failed 不会被 done 覆盖", async () => {
+    // 最后一条 case 卡住 > 20min 的现场：回收器先判 failed 并清空 owner，
+    // 随后过期 worker 用 done 覆盖它，并经 findRecentDoneRun 成为权威的 1h 幂等结果。
+    const id = await insertRun("running", null, ago(EVAL_RUN_REAP_GRACE_MS + 60_000));
+    expect(await repo.reapAbandonedRuns(new Date())).toEqual([id]);
+
+    expect(await repo.finishRunAsOwner(id, "done", new Date(), null, "w1")).toBe(false);
+    expect((await statusOf(id)).status).toBe("failed");
+  });
+
+  it("15(a) 活性：租约已过期但 owner 仍是自己 → finishRunAsOwner 成功（所有权即守卫）", async () => {
+    const id = await insertRun("running", "w1", ago(EVAL_RUN_LEASE_MS + 60_000));
+    expect(await repo.finishRunAsOwner(id, "done", new Date(), null, "w1")).toBe(true);
+    expect((await statusOf(id)).status).toBe("done");
+  });
+
+  it("15(a) finishRunUnowned 只作用于无主 queued —— 已被接管的 run 不受影响", async () => {
+    const taken = await insertRun("queued", null, null);
+    expect(await repo.tryAcquireLease(taken, "w1", new Date(), EVAL_RUN_LEASE_MS)).toBe(true);
+    // publish 抛出**不能**证明 job 没落库（网络超时后服务端已收到是可达的），
+    // 故 worker 可能已接管；无条件写会把一条正在跑的 run 判 failed。
+    expect(await repo.finishRunUnowned(taken, "failed", new Date(), "入队失败")).toBe(false);
+    expect((await statusOf(taken)).status).toBe("queued");
+  });
+
+  it("15(b) 失租后 recordResult 不写结果行、不推进 done_cases", async () => {
+    const id = await insertRun("running", null, ago(EVAL_RUN_REAP_GRACE_MS + 60_000));
+    await repo.reapAbandonedRuns(new Date());
+
+    expect(await repo.recordResult(resultInput(id, "w1"))).toBe(false);
+
+    const rows = await pool.query(
+      `SELECT count(*)::int AS n FROM eval_run_results WHERE run_id=$1`,
+      [id],
+    );
+    expect(rows.rows[0].n).toBe(0);
+    const run = await pool.query(`SELECT done_cases, tokens_used FROM eval_runs WHERE id=$1`, [id]);
+    expect(run.rows[0].done_cases).toBe(0);
+    expect(run.rows[0].tokens_used).toBe(0);
+  });
+
+  it("15(b) 持租时 recordResult 照常：结果行 + 计数同事务推进", async () => {
+    const id = await insertRun("running", "w1", new Date(Date.now() + EVAL_RUN_LEASE_MS));
+    expect(await repo.recordResult(resultInput(id, "w1"))).toBe(true);
+
+    const rows = await pool.query(
+      `SELECT count(*)::int AS n FROM eval_run_results WHERE run_id=$1`,
+      [id],
+    );
+    expect(rows.rows[0].n).toBe(1);
+    const run = await pool.query(`SELECT done_cases, tokens_used FROM eval_runs WHERE id=$1`, [id]);
+    expect(run.rows[0].done_cases).toBe(1);
+    expect(run.rows[0].tokens_used).toBe(7);
   });
 });

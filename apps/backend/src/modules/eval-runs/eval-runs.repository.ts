@@ -347,8 +347,9 @@ export class EvalRunsRepository {
         // `leaseOwner: null` 是**必须的**，不是清理洁癖：worker 靠 `renewLease` 的
         // 条件更新（`WHERE lease_owner = owner`）判断自己是否已被回收。若回收时留着
         // 原 owner，被误回收的 worker 续租仍返回 true → 永远不让位 → 继续把结果写进
-        // 一条已 `failed` 的 run，`finishRun` 还会把它翻回 `done`（而此时 create 已放行
-        // 第二个 run）。清掉 owner，续租立刻返回 false，worker 下一轮迭代即让位。
+        // 一条已 `failed` 的 run，`finishRunAsOwner` 还会把它翻回 `done`（而此时 create
+        // 已放行第二个 run）——**该路径现已被 15(a) 的租约条件化关闭**：失去租约的 worker
+        // 改不动终态。清掉 owner，续租立刻返回 false，worker 下一轮迭代即让位。
         leaseOwner: null,
         leaseUntil: null,
       })
@@ -428,29 +429,87 @@ export class EvalRunsRepository {
     return rows.length === 1;
   }
 
-  async finishRun(id: string, status: string, now: Date, error: string | null): Promise<void> {
-    await this.db
+  /**
+   * 收尾（worker 路径）—— **条件更新 `lease_owner = owner`，返回 false = 我已不是所有者**。
+   *
+   * 018 §12 缺口 15(a)：`renewLease` 只守在每轮迭代**开头**，最后一条 case 跑完后直奔
+   * 这里，中间无租约复检。若最后一条卡得够久，回收器会先把 run 判 `failed` 并释放
+   * 全局槽位，随后过期 worker 用 `done` 覆盖它 —— 而 `findRecentDoneRun` 只认 `done`，
+   * 于是这条**假**结果成为权威的 1h 幂等结果，下一次同集同版本的发起会拿它复用。
+   * 条件化之后，失去租约的 worker 改不动终态。
+   *
+   * 与 `markRunning`/`renewLease` 同形：**只看所有权，不看过期**（缺口 15(d)）。
+   * 故一个租约已过期但无人接管的 worker 仍能正常收尾 —— 这是活性所必需的。
+   */
+  async finishRunAsOwner(
+    id: string,
+    status: string,
+    now: Date,
+    error: string | null,
+    owner: string,
+  ): Promise<boolean> {
+    const rows = await this.db
       .update(evalRuns)
       .set({ status, finishedAt: now, error })
-      .where(eq(evalRuns.id, id));
+      .where(and(eq(evalRuns.id, id), eq(evalRuns.leaseOwner, owner)))
+      .returning({ id: evalRuns.id });
+    return rows.length === 1;
   }
 
   /**
-   * 单事务：结果行 + run 进度（`done_cases`/`tokens_used`）。
-   * 分两步会在中间失败时让进度与结果行对不上——而重试路径按「已落结果行」判断跑到哪，
-   * 计数漂了就再也对不齐。累加用 SQL 表达式而非读改写，避免并发丢更新。
+   * 收尾（**无 owner** 的发起侧路径）—— 仅供 `create()` 的「publish 抛出」分支。
+   *
+   * 谓词 `status='queued' AND lease_owner IS NULL` **不是保险，是必需的**：
+   * service 的 catch 只能证明 `publish` **抛出**，**不能**证明 job 没落库
+   * （网络超时后服务端已收到是可达路径）。此时 worker 可能已经接管，
+   * 无条件写会把一条**正在跑**的 run 判 `failed`。不命中就什么都不做，
+   * 剩下的交给正常执行或回收器。
    */
-  async recordResult(input: NewEvalRunResultInput): Promise<void> {
-    await this.db.transaction(async (tx) => {
-      const { runId, tokensUsed, ...rest } = input;
-      await tx.insert(evalRunResults).values({ runId, tokensUsed, ...rest });
-      await tx
+  async finishRunUnowned(
+    id: string,
+    status: string,
+    now: Date,
+    error: string | null,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(evalRuns)
+      .set({ status, finishedAt: now, error })
+      .where(and(eq(evalRuns.id, id), eq(evalRuns.status, "queued"), isNull(evalRuns.leaseOwner)))
+      .returning({ id: evalRuns.id });
+    return rows.length === 1;
+  }
+
+  /**
+   * 单事务：run 进度（`done_cases`/`tokens_used`）+ 结果行。返回 false = 已失去租约、什么都没写。
+   *
+   * **顺序要害：先 UPDATE 后 INSERT**（018 §12 缺口 15(b)）。两个理由：
+   *  ① **短路**：UPDATE 带租约守卫，0 行即代表「我已不是所有者」→ 直接跳过 INSERT。
+   *    否则回收若落在 `runCase` 执行中，这条结果行会被写进一条已 `failed` 的 run
+   *    并把 `done_cases` 推进一格（每次回收最多漏一行）。
+   *  ② **锁序**：回收器（`reapAbandonedRuns`）也是先锁 `eval_runs` 行。原实现
+   *    「先 INSERT 子表 → 后 UPDATE 父表」的锁序与之相反；重排后两者一致。
+   *
+   * READ COMMITTED 下也够：回收器先提交 → 本 UPDATE 取行锁后重算谓词，见
+   * `lease_owner IS NULL` → 0 行 → 不写。本事务先提交 → 回收器照常按
+   * `lease_until < deadline` 判定，最多回收一条「最后一行由合法持租者写入」的 run，
+   * 方向保守。
+   *
+   * 累加用 SQL 表达式而非读改写，避免并发丢更新。
+   */
+  async recordResult(input: NewEvalRunResultInput & { owner: string }): Promise<boolean> {
+    return await this.db.transaction(async (tx) => {
+      const { runId, tokensUsed, owner, ...rest } = input;
+      const advanced = await tx
         .update(evalRuns)
         .set({
           doneCases: sql`${evalRuns.doneCases} + 1`,
           tokensUsed: sql`${evalRuns.tokensUsed} + ${tokensUsed}`,
         })
-        .where(eq(evalRuns.id, runId));
+        .where(and(eq(evalRuns.id, runId), eq(evalRuns.leaseOwner, owner)))
+        .returning({ id: evalRuns.id });
+      if (advanced.length === 0) return false;
+      await tx.insert(evalRunResults).values({ runId, tokensUsed, ...rest });
+      return true;
     });
   }
 

@@ -50,6 +50,10 @@ interface SetupOptions {
    * 判死并清空租约 —— `create()` 的回收器跑在 `findActiveRun` 守卫之前，任一 POST 都触发它）。
    */
   markRunningLost?: boolean;
+  /** 15(a)：收尾时租约已失去（回收器先判 failed / 已被接管）。 */
+  finishRunLost?: boolean;
+  /** 15(b)：第 N 次 `recordResult` 时失去租约（模拟回收落在 runCase 执行中）。 */
+  recordResultLostAt?: number;
   scores?: Partial<OfflineEvaluationScores>;
   runStatus?: EvalRunRow["status"];
   recorded?: string[];
@@ -118,13 +122,28 @@ function setup(opts: SetupOptions = {}) {
       row.startedAt = at;
       return true;
     },
-    async finishRun(id: string, status: string, at: Date, error: string | null) {
+    async finishRunAsOwner(
+      id: string,
+      status: string,
+      at: Date,
+      error: string | null,
+      _owner: string,
+    ) {
+      if (opts.finishRunLost) return false;
       const row = runs.get(id)!;
       row.status = status as EvalRunRow["status"];
       row.finishedAt = at;
       row.error = error;
+      return true;
     },
-    async recordResult(input: NewEvalRunResultInput) {
+    async finishRunUnowned() {
+      return true;
+    },
+    async recordResult(input: NewEvalRunResultInput & { owner: string }) {
+      // 第 N 次记录时失去租约（模拟回收落在 runCase 执行中）
+      if (opts.recordResultLostAt !== undefined && results.length + 1 === opts.recordResultLostAt) {
+        return false;
+      }
       results.push(input);
       const row = runs.get(input.runId)!;
       row.doneCases += 1;
@@ -133,6 +152,7 @@ function setup(opts: SetupOptions = {}) {
       if (opts.stopAfter !== undefined && results.length === opts.stopAfter) {
         row.stopRequestedAt = now;
       }
+      return true;
     },
     async listRecordedCaseVersionIds() {
       // F5：唯一索引现含 repeat_index → 返回 (caseVersionId, repeatIndex) 二元组。
@@ -517,11 +537,33 @@ describe("EvalRunWorkerProcessor · 租约续期", () => {
   it("markRunning 条件更新不匹配（租约在 acquire 与 markRunning 之间被回收）→ 让位，不跑任何用例", async () => {
     // `tryAcquireLease` → `findRunById` → `resolveForTest` → `markRunning` 之间有两次 DB
     // 往返的真实窗口，回收器可能已把该 run 判死并清空租约。此时必须让位：继续跑会把结果
-    // 写进一条 failed run，`finishRun` 还会把它翻回 done（而 create 已放行第二个 run）。
+    // 写进一条 failed run，`finishRunAsOwner` 还会把它翻回 done（而 create 已放行第二个
+    // run）——**该路径现已被 15(a) 的租约条件化关闭**：失去租约的 worker 改不动终态。
     const { processor, results, runs } = setup({ snapshot: [c(1), c(2)], markRunningLost: true });
     const out = await processor.processRun("r1");
     expect(out.kind).toBe("lease_busy");
     expect(results).toHaveLength(0); // 一条用例都没跑
     expect(runs.get("r1")!.status).not.toBe("done"); // 没有越权收尾
+  });
+
+  it("15(b) recordResult 失租 → 立刻让位，不再跑后续用例、不写终态", async () => {
+    const { processor, results, runs } = setup({
+      snapshot: [c(1), c(2), c(3)],
+      recordResultLostAt: 2, // 第 2 条记录时被回收
+    });
+    const outcome = await processor.processRun("r1");
+
+    expect(outcome.kind).toBe("lease_busy");
+    expect(results).toHaveLength(1); // 第 2 条没写进去
+    // 关键：不得继续走到收尾 —— 否则把一条已被回收的 run 覆盖成 done
+    expect(runs.get("r1")!.status).toBe("running");
+  });
+
+  it("15(a) finishRunAsOwner 失租 → lease_busy，且不改本地 run 状态", async () => {
+    const { processor, runs } = setup({ snapshot: [c(1)], finishRunLost: true });
+    const outcome = await processor.processRun("r1");
+
+    expect(outcome.kind).toBe("lease_busy");
+    expect(runs.get("r1")!.status).toBe("running");
   });
 });
