@@ -344,9 +344,13 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
         durationMs: Date.now() - startedAt,
         error: noAnswer,
       });
-      this.logger.warn(
-        `用例编排未产出答案，记 unscored 不判分（run=${runId} seq=${entry.seq}）：${noAnswer}`,
-      );
+      // 只在**真的写进去了**才说「记 unscored」——失租时什么都没写，
+      // 无条件 warn 会声称一次并未发生的写入（调用方紧接着会 warn 让位原因）。
+      if (recorded) {
+        this.logger.warn(
+          `用例编排未产出答案，记 unscored 不判分（run=${runId} seq=${entry.seq}）：${noAnswer}`,
+        );
+      }
       return recorded;
     }
 

@@ -527,11 +527,15 @@ describe("EvalRunWorkerProcessor · 租约续期", () => {
   });
 
   it("续租失败（租约被回收或被接管）→ 立刻让位，不再写结果（防两个 worker 同写一条 run）", async () => {
-    const { processor, results, runs } = setup({ snapshot: [c(1), c(2), c(3)], leaseLostAfter: 1 });
+    const { processor, results, runs, queue } = setup({
+      snapshot: [c(1), c(2), c(3)],
+      leaseLostAfter: 1,
+    });
     const out = await processor.processRun("r1");
     expect(out.kind).toBe("lease_busy");
     expect(results).toHaveLength(1); // 只有续租成功那次写了
     expect(runs.get("r1")!.status).not.toBe("done"); // 没有越权收尾
+    expect(queue.publish).not.toHaveBeenCalled(); // 失租不重投
   });
 
   it("markRunning 条件更新不匹配（租约在 acquire 与 markRunning 之间被回收）→ 让位，不跑任何用例", async () => {
@@ -547,7 +551,7 @@ describe("EvalRunWorkerProcessor · 租约续期", () => {
   });
 
   it("15(b) recordResult 失租 → 立刻让位，不再跑后续用例、不写终态", async () => {
-    const { processor, results, runs } = setup({
+    const { processor, results, runs, queue } = setup({
       snapshot: [c(1), c(2), c(3)],
       recordResultLostAt: 2, // 第 2 条记录时被回收
     });
@@ -557,13 +561,17 @@ describe("EvalRunWorkerProcessor · 租约续期", () => {
     expect(results).toHaveLength(1); // 第 2 条没写进去
     // 关键：不得继续走到收尾 —— 否则把一条已被回收的 run 覆盖成 done
     expect(runs.get("r1")!.status).toBe("running");
+    // 失租**不重投**（与 renewLease 失败同款）：租约已属他人，重投只会空转。
+    // 唯一该重投的是 tryAcquireLease 抢不到那一路。
+    expect(queue.publish).not.toHaveBeenCalled();
   });
 
   it("15(a) finishRunAsOwner 失租 → lease_busy，且不改本地 run 状态", async () => {
-    const { processor, runs } = setup({ snapshot: [c(1)], finishRunLost: true });
+    const { processor, runs, queue } = setup({ snapshot: [c(1)], finishRunLost: true });
     const outcome = await processor.processRun("r1");
 
     expect(outcome.kind).toBe("lease_busy");
     expect(runs.get("r1")!.status).toBe("running");
+    expect(queue.publish).not.toHaveBeenCalled();
   });
 });
