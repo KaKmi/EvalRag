@@ -19,6 +19,14 @@ import {
  * 字段级约束取自原型 §19.1（表单校验），不是臆造。
  */
 
+/** `eval_case_versions.gold_doc_refs` 的行内结构（jsonb）。 */
+export interface GoldDocRefRow {
+  docId: string;
+  chunkId: string | null;
+  docName: string;
+  section: string | null;
+}
+
 /** 评测集。软删（原型 §18.B：历史报告仍可查看）。 */
 export const evalSets = pgTable(
   "eval_sets",
@@ -84,11 +92,14 @@ export const evalCaseVersions = pgTable(
       .array()
       .notNull()
       .default(sql`'{}'::text[]`),
-    /** §19.1：≤10；预留 W2b 检索层指标（W2a 建列不消费——决策 E，加指标时无需迁移）。 */
-    goldDocIds: uuid("gold_doc_ids")
-      .array()
+    /**
+     * §19.1：≤10 个引用（F3：chunk 级）。jsonb `[{docId, chunkId, docName, section}]`——
+     * docName/section 为保存时快照，供 UI 显示，不回查文档表。F2 检索指标消费。
+     */
+    goldDocRefs: jsonb("gold_doc_refs")
       .notNull()
-      .default(sql`'{}'::uuid[]`),
+      .$type<GoldDocRefRow[]>()
+      .default(sql`'[]'::jsonb`),
     /** §19.1：≤5 个、每个 ≤12 字。 */
     tags: varchar("tags", { length: 12 })
       .array()
@@ -116,6 +127,8 @@ export const evalRuns = pgTable(
     offlineJudgeVersion: varchar("offline_judge_version", { length: 100 })
       .notNull()
       .default("offline-v2"),
+    /** §14/F5：每题重复次数（1-5），worker 每 case 跑 N 次取非空均值。 */
+    repeatCount: integer("repeat_count").notNull().default(1),
     status: varchar("status", { length: 20 }).notNull().default("queued"), // 原型 §18.A 逐字
     scope: varchar("scope", { length: 20 }).notNull().default("all"), // W2a 仅 all；low_score/tags 留 W2b
     /**
@@ -164,12 +177,20 @@ export const evalRunResults = pgTable(
       .notNull()
       .references(() => evalCaseVersions.id),
     seq: integer("seq").notNull(), // 报告里的 # 列
+    /** §14/F5：本行属于第几次重复（1-5）。唯一索引含此列。 */
+    repeatIndex: integer("repeat_index").notNull().default(1),
     verdict: varchar("verdict", { length: 20 }).notNull(),
     // NULL = 未评（裁判失败 / 无 gold / 超时）——**绝不写 0**（原型 §6，防拉低均值）
     faithfulness: smallint("faithfulness"),
     answerRelevancy: smallint("answer_relevancy"),
     contextPrecision: smallint("context_precision"),
     correctness: smallint("correctness"),
+    /** F4：Citation（仅记分卡/evidence，不进 verdict/综合分）。 */
+    citation: smallint("citation"),
+    /** F2：检索层 gold-docs 指标（确定性排序真值，不进 verdict/综合分）。 */
+    contextRecall: smallint("context_recall"),
+    ndcg5: smallint("ndcg5"),
+    hitRate5: smallint("hit_rate5"),
     minMetric: varchar("min_metric", { length: 30 }), // 最差指标（默认排序键）
     minScore: smallint("min_score"),
     /** {faithfulness:[],answerRelevancy:[],contextPrecision:[],correctness:[]}——只收评出来的指标。 */
@@ -197,13 +218,18 @@ export const evalRunResults = pgTable(
         AND (${t.answerRelevancy} IS NULL OR ${t.answerRelevancy} BETWEEN 0 AND 100)
         AND (${t.contextPrecision} IS NULL OR ${t.contextPrecision} BETWEEN 0 AND 100)
         AND (${t.correctness} IS NULL OR ${t.correctness} BETWEEN 0 AND 100)
+        AND (${t.citation} IS NULL OR ${t.citation} BETWEEN 0 AND 100)
+        AND (${t.contextRecall} IS NULL OR ${t.contextRecall} BETWEEN 0 AND 100)
+        AND (${t.ndcg5} IS NULL OR ${t.ndcg5} BETWEEN 0 AND 100)
+        AND (${t.hitRate5} IS NULL OR ${t.hitRate5} BETWEEN 0 AND 100)
         AND (${t.minScore} IS NULL OR ${t.minScore} BETWEEN 0 AND 100)`,
     ),
+    // min_metric CHECK 不动——citation/检索三项不进 argmin（diff D1）。
     check(
       "eval_run_results_min_metric_check",
       sql`${t.minMetric} IS NULL OR ${t.minMetric} IN ('faithfulness','answerRelevancy','contextPrecision','correctness')`,
     ),
-    uniqueIndex("eval_run_results_run_case_unique").on(t.runId, t.caseVersionId),
+    uniqueIndex("eval_run_results_run_case_unique").on(t.runId, t.caseVersionId, t.repeatIndex),
     index("eval_run_results_worst_idx").on(t.runId, t.minScore), // 「最差指标升序」默认排序
   ],
 );

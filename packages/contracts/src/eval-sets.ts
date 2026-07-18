@@ -3,6 +3,19 @@ import { z } from "zod";
 const isoString = z.string().datetime({ offset: true });
 const uuid = z.string().uuid();
 
+/**
+ * chunk 级 gold 引用（E-W2b F3）。docName/section 为**保存时快照**，供 UI tag 显示，
+ * 不回查文档表——文档删了 tag 仍可读。`chunkId=null` 表示文档级引用（0021 遗留 gold_doc_ids
+ * 迁移而来 / CSV 导入），F2 检索指标按 docId 匹配；`chunkId` 非空则按 chunkId 精确匹配。
+ */
+export const GoldDocRefSchema = z.object({
+  docId: uuid,
+  chunkId: uuid.nullable(),
+  docName: z.string(),
+  section: z.string().nullable(),
+});
+export type GoldDocRef = z.infer<typeof GoldDocRefSchema>;
+
 /** 原型 §18.B：用例只有两态；`reviewed` 编辑保存后仍是 `reviewed`（v+1），不回退 draft。 */
 export const EvalCaseStatusSchema = z.enum(["draft", "reviewed"]);
 export type EvalCaseStatus = z.infer<typeof EvalCaseStatusSchema>;
@@ -81,7 +94,8 @@ export const CreateEvalCaseRequestSchema = z.object({
   // csv-import.ts:58-63 早已在导入路径堵了同类漏洞（纯分隔符 `;;;` → 僵尸用例），
   // 直连 API 路径当初漏了。
   goldPoints: z.array(z.string().trim().min(1).max(200)).default([]),
-  goldDocIds: z.array(uuid).max(10).default([]),
+  // §19.1：≤10 个引用（F3：chunk 级）。
+  goldDocRefs: z.array(GoldDocRefSchema).max(10).default([]),
   tags: z.array(z.string().min(1).max(12)).max(5).default([]),
   sourceTraceId: z
     .string()
@@ -94,7 +108,8 @@ export type CreateEvalCaseRequest = z.infer<typeof CreateEvalCaseRequestSchema>;
 export const UpdateEvalCaseRequestSchema = z.object({
   question: z.string().trim().min(1).max(500).optional(),
   goldPoints: z.array(z.string().trim().min(1).max(200)).optional(),
-  goldDocIds: z.array(uuid).max(10).optional(),
+  // Update 里必须显式 .optional() 无 default——防纯改名把 gold 清空（同 UpdateEvalSetRequest 教训 :20-31）。
+  goldDocRefs: z.array(GoldDocRefSchema).max(10).optional(),
   tags: z.array(z.string().min(1).max(12)).max(5).optional(),
   status: EvalCaseStatusSchema.optional(),
 });
@@ -107,7 +122,7 @@ export const EvalCaseSchema = z.object({
   status: EvalCaseStatusSchema,
   question: z.string(),
   goldPoints: z.array(z.string()),
-  goldDocIds: z.array(uuid),
+  goldDocRefs: z.array(GoldDocRefSchema),
   tags: z.array(z.string()),
   sourceTraceId: z.string().nullable(),
   /** 原型 §18.B。W2a 建列不建检测器 → 恒 false，UI 不显示橙 tag（018 已知缺口 4）。 */

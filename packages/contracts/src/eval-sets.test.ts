@@ -3,8 +3,18 @@ import {
   CreateEvalSetRequestSchema,
   UpdateEvalSetRequestSchema,
   CreateEvalCaseRequestSchema,
+  UpdateEvalCaseRequestSchema,
   ImportEvalCasesRequestSchema,
+  GoldDocRefSchema,
 } from "./eval-sets";
+
+const uuid = "11111111-1111-4111-8111-111111111111";
+const ref = (chunkId: string | null = null) => ({
+  docId: uuid,
+  chunkId,
+  docName: "退款政策",
+  section: chunkId ? "§2" : null,
+});
 
 describe("CreateEvalSetRequestSchema", () => {
   it("accepts a 1-50 char name", () => {
@@ -57,11 +67,11 @@ describe("CreateEvalCaseRequestSchema", () => {
       CreateEvalCaseRequestSchema.parse({ question: "q", goldPoints: [" 要点 "] }).goldPoints,
     ).toEqual(["要点"]);
   });
-  it("rejects >10 gold docs and >5 tags", () => {
+  it("rejects >10 gold refs and >5 tags", () => {
     expect(
       CreateEvalCaseRequestSchema.safeParse({
         question: "q",
-        goldDocIds: Array.from({ length: 11 }, () => "11111111-1111-4111-8111-111111111111"),
+        goldDocRefs: Array.from({ length: 11 }, () => ref("22222222-2222-4222-8222-222222222222")),
       }).success,
     ).toBe(false);
     expect(
@@ -69,10 +79,34 @@ describe("CreateEvalCaseRequestSchema", () => {
         .success,
     ).toBe(false);
   });
+  it("defaults goldDocRefs to []", () => {
+    expect(CreateEvalCaseRequestSchema.parse({ question: "q" }).goldDocRefs).toEqual([]);
+  });
   it("rejects a tag longer than 12 chars", () => {
     expect(
       CreateEvalCaseRequestSchema.safeParse({ question: "q", tags: ["x".repeat(13)] }).success,
     ).toBe(false);
+  });
+});
+
+describe("GoldDocRefSchema", () => {
+  it("accepts a chunk-level ref", () => {
+    expect(GoldDocRefSchema.parse(ref("22222222-2222-4222-8222-222222222222")).section).toBe("§2");
+  });
+  it("accepts a doc-level ref (chunkId null)", () => {
+    const parsed = GoldDocRefSchema.parse(ref(null));
+    expect(parsed.chunkId).toBeNull();
+    expect(parsed.section).toBeNull();
+  });
+  it("rejects a non-uuid docId", () => {
+    expect(GoldDocRefSchema.safeParse({ ...ref(), docId: "nope" }).success).toBe(false);
+  });
+});
+
+describe("UpdateEvalCaseRequestSchema", () => {
+  it("omitting goldDocRefs must NOT reset it（纯改名不得清空 gold）", () => {
+    const parsed = UpdateEvalCaseRequestSchema.parse({ question: "新问题" });
+    expect("goldDocRefs" in parsed).toBe(false);
   });
 });
 
