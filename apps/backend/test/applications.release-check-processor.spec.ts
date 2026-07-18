@@ -108,7 +108,8 @@ describe("ReleaseCheckProcessor", () => {
     const result = repo.markReleaseCheckResult.mock.calls[0][1];
     expect(result.status).toBe("failed");
     expect(result.expiresAt).toBeNull();
-    expect(result.issues[0]).toMatchObject({ node: "rewrite", traceId: "b".repeat(32), action: "OPEN_PROMPT_TRY_RUN" });
+    // B1/F5 回归钉：预演失败的 issue 必须是 error 级——否则 hasBlockingIssue 会把它当软提示放行。
+    expect(result.issues[0]).toMatchObject({ node: "rewrite", traceId: "b".repeat(32), action: "OPEN_PROMPT_TRY_RUN", severity: "error" });
   });
 
   it("version missing → failed VERSION_MISSING, no sampling", async () => {
