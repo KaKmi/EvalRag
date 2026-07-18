@@ -1,9 +1,11 @@
 import { Inject, Injectable } from "@nestjs/common";
+import type { EvalRunStatus } from "@codecrush/contracts";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import { EVAL_RUN_REAP_GRACE_MS } from "./eval-run.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import {
+  EVAL_RUNS_SINGLE_ACTIVE_UNIQUE,
   evalCaseVersions,
   evalRunResults,
   evalRuns,
@@ -111,6 +113,24 @@ const OVERALL_SCORE = sql<number | null>`(
 
 /** 未终结的 run（原型 §6「全局同时最多 1 个 run(串行队列)」的判定集合）。 */
 const ACTIVE_STATUSES = ["queued", "running"] as const;
+
+/**
+ * 「活跃槽位」唯一索引冲突（018 §12 缺口 13）。形状照
+ * `ingestion/processing-runs.repository.ts:11-15` 的 `isActiveRunConflict`。
+ *
+ * ⚠️ 两处细节都不能省：
+ *  · **必须拆 `cause`** —— drizzle 0.45 的 pg-core session 把 pg 错误包进
+ *    `DrizzleQueryError.cause`，直接读 `error.code` 恒 undefined。
+ *  · **必须按约束名精确匹配** —— `eval_run_results_run_case_unique` 也是 23505，
+ *    笼统吞掉会把「续跑撞唯一索引」这类真 bug 伪装成正常的 409。
+ *    索引名取 `schema.ts` 的 `EVAL_RUNS_SINGLE_ACTIVE_UNIQUE` 常量，与建索引处同源：
+ *    改名漏改这里会让并发兜底从 409 静默退化成 500。
+ */
+export function isSingleActiveRunConflict(error: unknown): boolean {
+  const candidate = (error as { cause?: unknown } | null)?.cause ?? error;
+  const pgError = candidate as { code?: string; constraint?: string } | null;
+  return pgError?.code === "23505" && pgError.constraint === EVAL_RUNS_SINGLE_ACTIVE_UNIQUE;
+}
 
 @Injectable()
 export class EvalRunsRepository {
@@ -295,10 +315,13 @@ export class EvalRunsRepository {
    * 任一 `POST /eval/runs` 都会在 `findActiveRun` 守卫**之前**触发本回收器（service:172，
    * 连注定 409 的请求也触发）→ 只看 `created_at` 就会把一条**活 worker 正持有**的 run 判死。
    *
-   * 故 queued 臂必须同时要求「无活租约」（`lease_until IS NULL OR lease_until < now`），
-   * 恢复 `running` 臂本来就有的那层保护：**持租即免疫回收**。`tryAcquireLease` 是原子的，
+   * 故 queued 臂必须同时要求「无活租约」（`lease_until IS NULL OR lease_until < deadline`）。
+   * 锚点用 `deadline` 而非 `now`，与 running 臂同源 —— 见缺口 15(c)。原写法（`< now`）让
+   * 「worker 被 SIGKILL」这条路径上的回收比 pg-boss 的重投早赢 10 分钟，静默架空 retryLimit: 3。
+   * 这层要求恢复了 `running` 臂本来就有的那层保护：**持租即免疫回收**。`tryAcquireLease` 是原子的，
    * 它一旦成功，这条 run 就有了「有人正在管它」的证据，回收器必须让路。反过来，两条**真孤儿**
-   * 路径的租约证据都不成立（NULL / 过期时间戳），照常被回收 —— 覆盖面没有缩小。
+   * 路径的租约证据都不成立（NULL / 过期时间戳），照常被回收 —— 覆盖面没有缩小，
+   * 只是「过期时间戳」那一路的回收时刻推迟了一个 GRACE（锚点改 deadline 之后，见 15(c)）。
    *
    * READ COMMITTED 下也够：本 UPDATE 取行锁后会重算谓词 → `tryAcquireLease` 先提交则跳过该行；
    * 本回收器先提交则 worker 的 `findRunById` 读到 `failed` → `already_finished` 干净退出。
@@ -306,10 +329,12 @@ export class EvalRunsRepository {
    *
    * 残余窗口（018 §11 已记）：job 在队列里干等超过一个 GRACE **且无人持租**时（worker 在
    * `tryAcquireLease` 前挂起、或 job 迟迟未被取走），回收会先于最后一次重试 → 该 run 判 failed
-   * 而非续跑。代价是「卡了 15 分钟的 run 诚实地失败」，换来的是死锁**必然自愈**，划算。
+   * 而非续跑。代价是「卡了 15 分钟（被租约触碰过则 20 分钟）的 run 诚实地失败」，换来的是死锁**必然自愈**，划算。
    */
   async reapAbandonedRuns(now: Date): Promise<string[]> {
-    // 宽限期：`lease_until < now - GRACE`，不是 `< now`。GRACE > pg-boss 的 job 过期时间，
+    // 宽限期：`lease_until < now - GRACE`，不是 `< now`。**两条臂现在同源于 deadline**
+    // （queued 臂的锚点曾经是 `now`，见 018 §12 缺口 15(c)：那让回收器比 pg-boss 的
+    // 重投早赢 10 分钟，静默架空 retryLimit: 3）。GRACE > pg-boss 的 job 过期时间，
     // 保证「未捕获异常 → releaseLease → 立刻重试」这条路径上，**重试永远先于回收**，
     // 不架空 retryLimit: 3（详见 EVAL_RUN_REAP_GRACE_MS 的注释）。
     const deadline = new Date(now.getTime() - EVAL_RUN_REAP_GRACE_MS);
@@ -331,8 +356,9 @@ export class EvalRunsRepository {
         // `leaseOwner: null` 是**必须的**，不是清理洁癖：worker 靠 `renewLease` 的
         // 条件更新（`WHERE lease_owner = owner`）判断自己是否已被回收。若回收时留着
         // 原 owner，被误回收的 worker 续租仍返回 true → 永远不让位 → 继续把结果写进
-        // 一条已 `failed` 的 run，`finishRun` 还会把它翻回 `done`（而此时 create 已放行
-        // 第二个 run）。清掉 owner，续租立刻返回 false，worker 下一轮迭代即让位。
+        // 一条已 `failed` 的 run，`finishRunAsOwner` 还会把它翻回 `done`（而此时 create
+        // 已放行第二个 run）——**该路径现已被 15(a) 的租约条件化关闭**：失去租约的 worker
+        // 改不动终态。清掉 owner，续租立刻返回 false，worker 下一轮迭代即让位。
         leaseOwner: null,
         leaseUntil: null,
       })
@@ -344,7 +370,7 @@ export class EvalRunsRepository {
           and(
             eq(evalRuns.status, "queued"),
             lt(evalRuns.createdAt, deadline),
-            or(isNull(evalRuns.leaseUntil), lt(evalRuns.leaseUntil, now)),
+            or(isNull(evalRuns.leaseUntil), lt(evalRuns.leaseUntil, deadline)),
           ),
         ),
       )
@@ -374,13 +400,31 @@ export class EvalRunsRepository {
    * `startedAt` 用 COALESCE 只在首次置位：pg-boss 重试会对同一条 run 再走一遍本方法，
    * 直接覆盖会把开始时间推后到重试时刻 → 报告耗时凭空缩水（甚至短于实际已跑的用例耗时和）。
    *
-   * ⚠️ **条件更新（`lease_owner = owner` 且租约未过期），返回 false = 我已不是所有者**。
+   * ⚠️ **条件更新（`lease_owner = owner`），返回 false = 我已不是所有者**。
    * 无条件写会把「失去租约」这件事悄悄抹平：`tryAcquireLease` 与 `markRunning` 之间隔着
    * `findRunById` + `resolveForTest`（两次 DB 往返），这个窗口里回收器可能已把该 run 判死
    * （回收会清空 `lease_owner`）。此时无条件的 `WHERE id=$1` 会把一条 `failed` run 写回
    * `running`，且租约恒 NULL —— 两条回收臂**都够不着**它（running 臂要 `lease_until < deadline`，
    * 而 `NULL < ts` 求值为 NULL 而非 TRUE；queued 臂要 `status='queued'`）→ `findActiveRun`
    * 恒返回它 → `POST /eval/runs` 恒 409 → **回收器立意消灭的死锁原样重生，且更不可达**。
+   *
+   * ## 所有权即守卫 —— 这里**没有**过期检查，且不得加（018 §12 缺口 15(d)）
+   *
+   * 过期只在两处被读：`tryAcquireLease`（接管）与 `reapAbandonedRuns`（撤销）。
+   * worker 的自我推进（`markRunning`/`renewLease`/`recordResult`/`finishRunAsOwner`）
+   * **一律只证明所有权**。失去所有权的唯一来源就是「被撤销」或「被接管」，两者都会
+   * 改写 `lease_owner` —— 故所有权检查已经涵盖了全部真实的失效路径。
+   *
+   * 此处曾有一个 `lease_until > now` 合取项。它在唯一调用点是**空转**的
+   * （`processRun` 传的 `now` 正是 `tryAcquireLease` 用来算 `lease_until = now + TTL`
+   * 的那个 `now`），已删除。**不要把它「做实」**（传新鲜时间戳）：第 3 轮 review 的
+   * 无死锁证明依赖「`markRunning=false` ⟺ `lease_owner ≠ owner`」，这正是
+   * `eval-run-worker.processor.ts` 的「不重新入队」的正当性来源。真过期检查会让一个
+   * **仍持租**的 worker（如 `resolveForTest` 慢过 5min）拿到 false → 不重投 →
+   * handler 正常返回 → pg-boss 视作完成不再重试 → run 卡在 `queued` 直到 15min 后
+   * 被回收判 failed。**那是往非保守方向新增的失败模式。**
+   * `eval-runs.lease.db.spec.ts` 里那两条「租约已过期但 owner 正确 → 仍返回 true」
+   * 就是钉死本段结论的反向钉子。
    *
    * 与 `renewLease` 同形（`WHERE lease_owner = owner`）：worker 的每一次状态推进都必须先
    * 证明自己仍持有租约。调用方据返回值让位。**不变式：失去租约的 worker 永远写不回 running。**
@@ -389,36 +433,92 @@ export class EvalRunsRepository {
     const rows = await this.db
       .update(evalRuns)
       .set({ status: "running", startedAt: sql`COALESCE(${evalRuns.startedAt}, ${now})` })
-      .where(
-        and(eq(evalRuns.id, id), eq(evalRuns.leaseOwner, owner), gt(evalRuns.leaseUntil, now)),
-      )
+      .where(and(eq(evalRuns.id, id), eq(evalRuns.leaseOwner, owner)))
       .returning({ id: evalRuns.id });
     return rows.length === 1;
   }
 
-  async finishRun(id: string, status: string, now: Date, error: string | null): Promise<void> {
-    await this.db
+  /**
+   * 收尾（worker 路径）—— **条件更新 `lease_owner = owner`，返回 false = 我已不是所有者**。
+   *
+   * 018 §12 缺口 15(a)：`renewLease` 只守在每轮迭代**开头**，最后一条 case 跑完后直奔
+   * 这里，中间无租约复检。若最后一条卡得够久，回收器会先把 run 判 `failed` 并释放
+   * 全局槽位，随后过期 worker 用 `done` 覆盖它 —— 而 `findRecentDoneRun` 只认 `done`，
+   * 于是这条**假**结果成为权威的 1h 幂等结果，下一次同集同版本的发起会拿它复用。
+   * 条件化之后，失去租约的 worker 改不动终态。
+   *
+   * 与 `markRunning`/`renewLease` 同形：**只看所有权，不看过期**（缺口 15(d)）。
+   * 故一个租约已过期但无人接管的 worker 仍能正常收尾 —— 这是活性所必需的。
+   */
+  async finishRunAsOwner(
+    id: string,
+    status: EvalRunStatus,
+    now: Date,
+    error: string | null,
+    owner: string,
+  ): Promise<boolean> {
+    const rows = await this.db
       .update(evalRuns)
       .set({ status, finishedAt: now, error })
-      .where(eq(evalRuns.id, id));
+      .where(and(eq(evalRuns.id, id), eq(evalRuns.leaseOwner, owner)))
+      .returning({ id: evalRuns.id });
+    return rows.length === 1;
   }
 
   /**
-   * 单事务：结果行 + run 进度（`done_cases`/`tokens_used`）。
-   * 分两步会在中间失败时让进度与结果行对不上——而重试路径按「已落结果行」判断跑到哪，
-   * 计数漂了就再也对不齐。累加用 SQL 表达式而非读改写，避免并发丢更新。
+   * 收尾（**无 owner** 的发起侧路径）—— 仅供 `create()` 的「publish 抛出」分支。
+   *
+   * 谓词 `status='queued' AND lease_owner IS NULL` **不是保险，是必需的**：
+   * service 的 catch 只能证明 `publish` **抛出**，**不能**证明 job 没落库
+   * （网络超时后服务端已收到是可达路径）。此时 worker 可能已经接管，
+   * 无条件写会把一条**正在跑**的 run 判 `failed`。不命中就什么都不做，
+   * 剩下的交给正常执行或回收器。
    */
-  async recordResult(input: NewEvalRunResultInput): Promise<void> {
-    await this.db.transaction(async (tx) => {
-      const { runId, tokensUsed, ...rest } = input;
-      await tx.insert(evalRunResults).values({ runId, tokensUsed, ...rest });
-      await tx
+  async finishRunUnowned(
+    id: string,
+    status: EvalRunStatus,
+    now: Date,
+    error: string | null,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(evalRuns)
+      .set({ status, finishedAt: now, error })
+      .where(and(eq(evalRuns.id, id), eq(evalRuns.status, "queued"), isNull(evalRuns.leaseOwner)))
+      .returning({ id: evalRuns.id });
+    return rows.length === 1;
+  }
+
+  /**
+   * 单事务：run 进度（`done_cases`/`tokens_used`）+ 结果行。返回 false = 已失去租约、什么都没写。
+   *
+   * **顺序要害：先 UPDATE 后 INSERT**（018 §12 缺口 15(b)）。两个理由：
+   *  ① **短路**：UPDATE 带租约守卫，0 行即代表「我已不是所有者」→ 直接跳过 INSERT。
+   *    否则回收若落在 `runCase` 执行中，这条结果行会被写进一条已 `failed` 的 run
+   *    并把 `done_cases` 推进一格（每次回收最多漏一行）。
+   *  ② **锁序**：回收器（`reapAbandonedRuns`）也是先锁 `eval_runs` 行。原实现
+   *    「先 INSERT 子表 → 后 UPDATE 父表」的锁序与之相反；重排后两者一致。
+   *
+   * READ COMMITTED 下也够：回收器先提交 → 本 UPDATE 取行锁后重算谓词，见
+   * `lease_owner IS NULL` → 0 行 → 不写。本事务先提交 → 回收器照常按
+   * `lease_until < deadline` 判定，最多回收一条「最后一行由合法持租者写入」的 run，
+   * 方向保守。
+   *
+   * 累加用 SQL 表达式而非读改写，避免并发丢更新。
+   */
+  async recordResult(input: NewEvalRunResultInput & { owner: string }): Promise<boolean> {
+    return await this.db.transaction(async (tx) => {
+      const { runId, tokensUsed, owner, ...rest } = input;
+      const advanced = await tx
         .update(evalRuns)
         .set({
           doneCases: sql`${evalRuns.doneCases} + 1`,
           tokensUsed: sql`${evalRuns.tokensUsed} + ${tokensUsed}`,
         })
-        .where(eq(evalRuns.id, runId));
+        .where(and(eq(evalRuns.id, runId), eq(evalRuns.leaseOwner, owner)))
+        .returning({ id: evalRuns.id });
+      if (advanced.length === 0) return false;
+      await tx.insert(evalRunResults).values({ runId, tokensUsed, ...rest });
+      return true;
     });
   }
 

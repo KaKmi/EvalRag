@@ -86,6 +86,10 @@ interface SetupOptions {
   versionsThrow?: boolean;
   /** F2：这些 caseVersionId 带 gold 引用（覆盖率断言）。 */
   goldRefCaseVersionIds?: string[];
+  /** 缺口 13：让 insertRun 抛指定错误（模拟撞活跃槽位唯一索引）。 */
+  insertRunError?: unknown;
+  /** 缺口 15(a)：让 queue.publish 抛错（走 finishRunUnowned 收尾路径）。 */
+  publishError?: unknown;
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -98,7 +102,10 @@ function setup(opts: SetupOptions = {}) {
   if (recentDone) runs.set(recentDone.id, recentDone);
 
   let nextId = 0;
-  const publish = jest.fn(async () => undefined);
+  const publish = jest.fn(async () => {
+    if (opts.publishError) throw opts.publishError;
+    return undefined;
+  });
   const queue = { publish, subscribe: jest.fn(), schedule: jest.fn() };
 
   const aggregate = (row: EvalRunRow): EvalRunAggregate => ({
@@ -145,6 +152,7 @@ function setup(opts: SetupOptions = {}) {
         : undefined;
     },
     async insertRun(input: NewEvalRunInput) {
+      if (opts.insertRunError) throw opts.insertRunError;
       const row = makeRun({ ...input, id: `new-run-${++nextId}`, status: "queued" });
       runs.set(row.id, row);
       return row;
@@ -203,6 +211,7 @@ function setup(opts: SetupOptions = {}) {
           : [],
       }));
     },
+    finishRunUnowned: jest.fn(async () => true),
   };
 
   const sets = {
@@ -269,6 +278,47 @@ describe("EvalRunsService", () => {
   it("create：已有 queued/running 的 run → 409（全局串行）", async () => {
     const { service } = setup({ activeRun: { id: "r-active", status: "running" } });
     await expect(service.create(req(), "admin")).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  // 018 §12 缺口 13：预检与 INSERT 之间的 TOCTOU 窗口，由唯一索引兜底。
+  it("create：并发双开，insertRun 撞活跃槽位唯一索引 → 409（与既有全局串行 409 同一条文案）", async () => {
+    const { service } = setup({
+      insertRunError: Object.assign(new Error("duplicate key"), {
+        cause: { code: "23505", constraint: "eval_runs_single_active_unique" },
+      }),
+    });
+    // 文案与形状都是契约：eval-runs.e2e.spec.ts:565-573 钉死响应体，
+    // 前端按响应体形状分流（client.ts:937 区分裸 {code,recentRunId} 与带 message 的普通 409）。
+    await expect(service.create(req(), "admin")).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.create(req(), "admin")).rejects.toThrow(
+      "已有评测正在运行，请等待完成或先停止",
+    );
+  });
+
+  it("create：publish 抛出 → 走 finishRunUnowned（而非无条件收尾），并重抛原始错误", async () => {
+    // 谓词 status='queued' AND lease_owner IS NULL 是必需的：catch 只能证明 publish
+    // **抛出**，不能证明 job 没落库（网络超时后服务端已收到是可达的）。若 worker 已接管，
+    // 无条件写会把一条**正在跑**的 run 判 failed。
+    const boom = new Error("queue down");
+    const { service, repo, queue } = setup({ publishError: boom });
+    await expect(service.create(req(), "admin")).rejects.toBe(boom);
+    expect(repo.finishRunUnowned).toHaveBeenCalledWith(
+      expect.any(String),
+      "failed",
+      expect.any(Date),
+      "入队失败，未能启动评测",
+    );
+    expect(queue.publish).toHaveBeenCalledTimes(1);
+  });
+
+  it("create：**别的**唯一索引冲突原样抛出 —— 不得伪装成 409", async () => {
+    // eval_run_results_run_case_unique 也是 23505。笼统吞掉会把「续跑撞唯一索引」
+    // 这类真 bug 伪装成正常的「已有评测在跑」。
+    const err = Object.assign(new Error("duplicate key"), {
+      cause: { code: "23505", constraint: "eval_run_results_run_case_unique" },
+    });
+    const { service } = setup({ insertRunError: err });
+    await expect(service.create(req(), "admin")).rejects.toBe(err);
   });
 
   // ——— host review 修订：一次 worker 崩溃不得永久锁死整个离线评测功能 ———

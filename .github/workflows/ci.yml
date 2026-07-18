@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支的旧运行直接取消，省 runner 也避免过期结论覆盖新结论
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    name: lint + test + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      # 版本不写死：从根 package.json 的 packageManager 字段读（当前 pnpm@9.13.2）
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      # skeleton.e2e.spec.ts 在 import 期就实例化 NestJS 配置模块，envSchema 的
+      # DATABASE_URL / JWT_SECRET / MODEL_API_KEY_ENCRYPTION_KEY 三项无默认值 ⇒ 无 .env 直接
+      # ZodError。该 spec 不连任何真实服务（pg-boss 被 jest.mock、仓储全部 override 成内存假件），
+      # 只是要一份能过 schema 的占位配置。本地一直有 .env 故从未暴露，CI 首跑即抓到（#42）。
+      #
+      # 用 .env.example 而非在此写死一份 env：日后往 envSchema 加必填项却忘了同步 .env.example，
+      # 这一步会立刻红——把「示例文件与 schema 同步」从自觉变成机器检查。
+      - name: Seed placeholder env (schema-satisfaction only, no real services)
+        run: cp apps/backend/.env.example apps/backend/.env
+      # turbo 的 test/build 都 dependsOn ^build，无需额外构建步骤
+      - run: pnpm test
+      - run: pnpm build
+
+  db:
+    name: real-postgres (test:db)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: codecrush
+          POSTGRES_PASSWORD: codecrush
+          POSTGRES_DB: codecrush
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U codecrush -d codecrush"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      MIGRATION_TEST_DATABASE_URL: postgres://codecrush:codecrush@localhost:5432/codecrush_mig_test
+    steps:
+      - uses: actions/checkout@v4
+      # 门控变量断言放在装依赖**之前**：变量没了就没必要烧 20 分钟 job。
+      # 为什么需要：全部 db spec 的形状是「变量齐才 describe，否则 describe.skip」——
+      # 变量一旦被删/改名/拼错/提到错误 YAML 层级，jest 退出码仍是 0、本 job 显示
+      # 「9 suites 通过」而一条断言都没跑。另两道防线：test/helpers/gated-suite.ts
+      # 的 CI 硬门控（抛错）、scripts/check-test-baseline.mjs 的用例数下限。
+      - name: assert gate env is present
+        run: test -n "$MIGRATION_TEST_DATABASE_URL" || { echo "::error::MIGRATION_TEST_DATABASE_URL 缺失——db job 会静默跳过全部用例并假绿"; exit 1; }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 专用一次性库：spec 自己会 DROP SCHEMA public CASCADE，故不能用主库
+      - name: create migration test database
+        run: PGPASSWORD=codecrush psql -h localhost -U codecrush -d codecrush -c 'CREATE DATABASE codecrush_mig_test'
+      # jest 的 moduleNameMapper 直指各包 src，无需先 build
+      # test:db 自带 RUN_DB_TESTS=1 与 --runInBand —— 两者都不得删；
+      # 脚本末尾串了 check-test-baseline.mjs（用例数下限 + 零 skip），亦不得删
+      - run: pnpm --filter @codecrush/backend test:db
+
+  infra:
+    name: postgres + clickhouse + collector (test:infra)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIGRATION_TEST_DATABASE_URL: postgres://codecrush:codecrush@localhost:5432/codecrush_mig_test
+      CLICKHOUSE_URL: http://localhost:8123
+    steps:
+      - uses: actions/checkout@v4
+      # 同 db job：两个门控变量缺一，全部 infra spec 都会 describe.skip 而 job 假绿。
+      - name: assert gate env is present
+        run: |
+          test -n "$MIGRATION_TEST_DATABASE_URL" || { echo "::error::MIGRATION_TEST_DATABASE_URL 缺失——infra job 会静默跳过全部用例并假绿"; exit 1; }
+          test -n "$CLICKHOUSE_URL" || { echo "::error::CLICKHOUSE_URL 缺失——ClickHouse spec 会静默跳过（或悄悄回落 localhost）并假绿"; exit 1; }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 刻意复用开发者天天跑的那条命令（AGENTS.md:19），CI 与本地同构、零配置漂移。
+      # 不用 GitHub services：三个服务都要挂载仓库内文件（collector 的 config.yaml
+      # 决定 create_schema:true —— 没有它就没有 otel_traces 表；clickhouse 的
+      # users.d/*.xml 决定 default 用户可连），而 services 容器在 checkout 之前启动。
+      - name: start infra
+        run: docker compose -f infra/docker-compose.yml --profile infra up -d --wait
+      - name: create migration test database
+        run: docker compose -f infra/docker-compose.yml --profile infra exec -T postgres psql -U codecrush -d codecrush -c 'CREATE DATABASE codecrush_mig_test'
+      # --wait 只等有 healthcheck 的服务，collector 没有 healthcheck。
+      # otel_traces 由 collector 的 clickhouse exporter 建（create_schema: true）；
+      # 测试 harness 直接往该表 insert（helpers/evaluation-infra.ts:94），表不在就直接炸。
+      # 必须显式等，且等不到要**失败**——静默继续会让测试以「查不到数据」的形式假失败。
+      - name: wait for otel_traces table
+        run: |
+          # 建表发生在 exporter 的 Start()，**轮询才是真正的机制**。这条空 OTLP POST 只是
+          # 一个廉价的兜底探针（万一某版本改成首次导出才建表），空 resourceSpans 不产生
+          # 任何 span，失败也无所谓（|| true）。
+          curl -s -X POST "http://localhost:4318/v1/traces" \
+            -H 'Content-Type: application/json' -d '{"resourceSpans":[]}' >/dev/null || true
+          for i in $(seq 1 60); do
+            if [ "$(curl -s "$CLICKHOUSE_URL" --data-binary 'EXISTS TABLE otel_traces')" = "1" ]; then
+              echo "otel_traces ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::otel_traces never appeared; collector logs follow"
+          docker compose -f infra/docker-compose.yml --profile infra logs otel-collector
+          exit 1
+      - run: pnpm --filter @codecrush/backend test:infra
+      - name: dump infra logs on failure
+        if: failure()
+        run: docker compose -f infra/docker-compose.yml --profile infra logs --tail 200

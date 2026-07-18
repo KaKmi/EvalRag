@@ -46,7 +46,7 @@ infra/                   docker-compose（postgres+pgvector / clickhouse / otel-
 6. `chat` 与 `traces` 无直接代码依赖：chat 写（OTLP）、traces 读（ClickHouse），经存储解耦。
 7. **埋点绝不进入问答关键路径**：可观测组件故障不得导致问答失败或增加用户可感延迟。
 8. 域内 `schema.ts` 是纯表定义，零 service 引用（防循环 import）。
-9. 迁移是显式命令（`pnpm db:migrate`），不在应用启动时静默执行。
+9. 迁移是显式命令（`pnpm db:migrate`），不在应用启动时静默执行。**迁移一律手写**（`drizzle/00NN_*.sql` + `drizzle/meta/_journal.json`）；`drizzle-kit generate` 已停用（快照链断在 0021，跑它会产出破坏性迁移）——详见 `apps/backend/drizzle/README.md`。
 
 ## 约定
 

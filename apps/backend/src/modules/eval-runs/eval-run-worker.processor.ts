@@ -145,7 +145,14 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
         );
       } catch {
         // 原型 §18.A：「queued/running + 配置版本被停用 → failed，横幅『配置版本不可用』」。
-        await this.repo.finishRun(runId, "failed", new Date(), "配置版本不可用");
+        // 此时仍在 acquire↔markRunning 的窗口内，回收器可能已把该 run 判死。
+        // 条件化是严格更保守的：不命中说明它已是终态或已被接管，让位即可。
+        if (
+          !(await this.repo.finishRunAsOwner(runId, "failed", new Date(), "配置版本不可用", owner))
+        ) {
+          this.logger.warn(`run ${runId} 租约已失去（配置解析失败收尾时），本 worker 让位`);
+          return { runId, kind: "lease_busy", status: null, doneCases: 0 };
+        }
         return { runId, kind: "finished", status: "failed", doneCases: run.doneCases };
       }
 
@@ -205,18 +212,31 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
 
           // 裁判模型取**发起时快照在 run 行上**的值，不读全局在线设置：离线 run 的裁判是发起
           // 参数（原型 §6 的「裁判模型」下拉），改了在线设置不该改变已发起 run 的判分口径。
-          await this.runCase(
-            runId,
-            cfg,
-            entry,
-            content,
-            { judgeModelId: run.judgeModelId, embeddingModelId: run.embeddingModelId },
-            repeatIndex,
-          );
+          if (
+            !(await this.runCase(
+              runId,
+              owner,
+              cfg,
+              entry,
+              content,
+              { judgeModelId: run.judgeModelId, embeddingModelId: run.embeddingModelId },
+              repeatIndex,
+            ))
+          ) {
+            this.logger.warn(
+              `run ${runId} 租约已失去（recordResult 期间被回收或被接管），本 worker 让位`,
+            );
+            return { runId, kind: "lease_busy", status: null, doneCases: 0 };
+          }
         }
       }
 
-      await this.repo.finishRun(runId, status, new Date(), null);
+      if (!(await this.repo.finishRunAsOwner(runId, status, new Date(), null, owner))) {
+        // 缺口 15(a)：最后一条 case 跑完到这里之间没有续租检查，回收器可能已判 failed。
+        // 不覆盖它 —— 否则这条假 done 会经 findRecentDoneRun 成为权威的 1h 幂等结果。
+        this.logger.warn(`run ${runId} 租约已失去（收尾时被回收或被接管），本 worker 让位`);
+        return { runId, kind: "lease_busy", status: null, doneCases: 0 };
+      }
       const finished = await this.repo.findRunById(runId);
       return { runId, kind: "finished", status, doneCases: finished?.doneCases ?? 0 };
     } finally {
@@ -224,14 +244,19 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
     }
   }
 
+  /**
+   * 跑一条 unit 并落结果行。**返回 false = 已失去租约、什么都没写** —— 调用方必须让位
+   * （018 §12 缺口 15(b)：`recordResult` 的租约守卫 UPDATE 命中 0 行即跳过 INSERT）。
+   */
   private async runCase(
     runId: string,
+    owner: string,
     cfg: Awaited<ReturnType<ApplicationsService["resolveForTest"]>>,
     entry: EvalRunSnapshotEntry,
     content: EvalCaseVersionContent,
     modelIds: EvaluationModelIds,
     repeatIndex: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const startedAt = Date.now();
     // 离线口径：默认 120s，**不套用**在线熔断的 30s（config.schema.ts + 018 §12 缺口 16）。
     const timeoutMs = this.config.evalRunCaseTimeoutMs;
@@ -253,8 +278,9 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
       // 018 已知取舍 2：超时**记 NULL + verdict=timeout**，不记 0 分（原型 §6 说记 0——
       // 本波唯一一处主动偏离产品权威：同一列里混「0=真的很差」与「未测出」会让记分卡 avg
       // 不可解释。超时信息不丢：verdict 列显性表达，覆盖率 scoredCount/total 显性表达占比）。
-      await this.repo.recordResult({
+      const recorded = await this.repo.recordResult({
         runId,
+        owner,
         caseVersionId: entry.caseVersionId,
         seq: entry.seq,
         repeatIndex,
@@ -276,7 +302,7 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
         durationMs: Date.now() - startedAt,
         error: `编排超时（判定阈值 ${timeoutMs}ms）`,
       });
-      return;
+      return recorded;
     }
 
     // ——— 不变式：编排没产出答案的用例，**绝不送去判分** ————————————————————
@@ -293,8 +319,9 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
     // 检索兜底**不在此列**——兜底话术是用户真会看到的答案（replyText 非空），照常判分。
     const noAnswer = outcome.error ?? (outcome.replyText.trim() === "" ? "编排未产出答案" : null);
     if (noAnswer) {
-      await this.repo.recordResult({
+      const recorded = await this.repo.recordResult({
         runId,
+        owner,
         caseVersionId: entry.caseVersionId,
         seq: entry.seq,
         repeatIndex,
@@ -317,10 +344,14 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
         durationMs: Date.now() - startedAt,
         error: noAnswer,
       });
-      this.logger.warn(
-        `用例编排未产出答案，记 unscored 不判分（run=${runId} seq=${entry.seq}）：${noAnswer}`,
-      );
-      return;
+      // 只在**真的写进去了**才说「记 unscored」——失租时什么都没写，
+      // 无条件 warn 会声称一次并未发生的写入（调用方紧接着会 warn 让位原因）。
+      if (recorded) {
+        this.logger.warn(
+          `用例编排未产出答案，记 unscored 不判分（run=${runId} seq=${entry.seq}）：${noAnswer}`,
+        );
+      }
+      return recorded;
     }
 
     // 真实 chunkId/text/finalScore 直接来自编排的 TaggedHit —— 绝不合成 c1/c2
@@ -338,8 +369,9 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
     // decideVerdict 只吃四个 argmin 指标——citation/检索三项**不进** verdict/综合分（diff D1）。
     const decision = decideVerdict(scores);
 
-    await this.repo.recordResult({
+    return await this.repo.recordResult({
       runId,
+      owner,
       caseVersionId: entry.caseVersionId,
       seq: entry.seq,
       repeatIndex,
