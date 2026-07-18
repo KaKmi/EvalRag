@@ -21,7 +21,8 @@ import {
   EVAL_RUN_METRIC_KEYS,
   EVAL_RUN_PASS_THRESHOLD,
 } from "./eval-run.constants";
-import { EvalRunsRepository } from "./eval-runs.repository";
+import { EvalRunsRepository, type EvalCaseVersionContent } from "./eval-runs.repository";
+import { computeGoldMetrics } from "./retrieval-gold-metrics";
 import type { EvalRunSnapshotEntry } from "./schema";
 
 const JobPayloadSchema = z.strictObject({ runId: z.string().uuid() });
@@ -63,7 +64,8 @@ export interface VerdictDecision {
  */
 export function decideVerdict(scores: MetricScores): VerdictDecision {
   const scored = EVAL_RUN_METRIC_KEYS.map((metric) => ({ metric, value: scores[metric] })).filter(
-    (entry): entry is { metric: EvalMetricKey; value: number } => entry.value !== null,
+    (entry): entry is { metric: (typeof EVAL_RUN_METRIC_KEYS)[number]; value: number } =>
+      entry.value !== null,
   );
   if (scored.length === 0) return { verdict: "unscored", minMetric: null, minScore: null };
 
@@ -164,46 +166,54 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
           v,
         ]),
       );
-      // pg-boss 重试会从头重投同一个 runId：已落结果行的用例必须跳过，否则撞
+      // pg-boss 重试会从头重投同一个 runId：已落结果行的 unit 必须跳过，否则撞
       // `eval_run_results_run_case_unique` → 每次重试都在第一条就炸，3 次重试等于白给。
-      const recorded = new Set(await this.repo.listRecordedCaseVersionIds(runId));
+      // F5：唯一索引现含 repeat_index → 键为 `${caseVersionId}:${repeatIndex}`。
+      const recorded = new Set(
+        (await this.repo.listRecordedCaseVersionIds(runId)).map(
+          (r) => `${r.caseVersionId}:${r.repeatIndex}`,
+        ),
+      );
 
       let status: EvalRunStatus = "done";
-      for (const entry of snapshot) {
-        if (recorded.has(entry.caseVersionId)) continue;
-
-        // 逐条回读 run 行：停止信号与 token 用量都是**别处**在改（service 置停止、
-        // recordResult 累加用量），本地缓存必然读到旧值。一条用例耗时以秒计，这一次
-        // SELECT 的代价可忽略。
-        // 续租（心跳）：租约 5 分钟，而 run 轻易跑更久 —— 不逐条续期的话，健康的长 run
-        // 会把自己的租约跑过期，进而被 reapAbandonedRuns 误杀成 failed，也可能被另一个
-        // worker 抢去并发跑。续租失败 = 租约已被别人接管（我方已被回收器判死）→ 立刻让位，
-        // 不再写任何结果，避免两个 worker 同时往一条 run 里写。
-        if (!(await this.repo.renewLease(runId, owner, new Date(), EVAL_RUN_LEASE_MS))) {
-          this.logger.warn(`run ${runId} 租约已失去（被回收或被接管），本 worker 让位`);
-          return { runId, kind: "lease_busy", status: null, doneCases: 0 };
-        }
-
-        const current = await this.repo.findRunById(runId);
-        if (!current) return { runId, kind: "not_found", status: null, doneCases: 0 };
-        if (current.stopRequestedAt) {
-          // 018 §11：0 条完成时点停止也收 partial + done_cases=0（不新造状态）。
-          status = "partial";
-          break;
-        }
-        if (current.tokensUsed >= current.tokenBudget) {
-          status = "budget_stop";
-          break;
-        }
-
+      // F5：外层 case、内层 repeat（序号连续可停）；每个 unit 前照常续租/停止/预算三查。
+      outer: for (const entry of snapshot) {
         const content = contents.get(entry.caseVersionId);
         if (!content) continue; // 版本行不可变且永不删；真缺了就跳过，留给 skipped 推导。
-        // 裁判模型取**发起时快照在 run 行上**的值，不读全局在线设置：离线 run 的裁判是发起
-        // 参数（原型 §6 的「裁判模型」下拉），改了在线设置不该改变已发起 run 的判分口径。
-        await this.runCase(runId, cfg, entry, content, {
-          judgeModelId: run.judgeModelId,
-          embeddingModelId: run.embeddingModelId,
-        });
+        for (let repeatIndex = 1; repeatIndex <= run.repeatCount; repeatIndex += 1) {
+          if (recorded.has(`${entry.caseVersionId}:${repeatIndex}`)) continue;
+
+          // 逐 unit 回读 run 行：停止信号与 token 用量都是**别处**在改（service 置停止、
+          // recordResult 累加用量），本地缓存必然读到旧值。一条用例耗时以秒计，这次
+          // SELECT 的代价可忽略。续租失败 = 租约已被别人接管 → 立刻让位，不再写任何结果。
+          if (!(await this.repo.renewLease(runId, owner, new Date(), EVAL_RUN_LEASE_MS))) {
+            this.logger.warn(`run ${runId} 租约已失去（被回收或被接管），本 worker 让位`);
+            return { runId, kind: "lease_busy", status: null, doneCases: 0 };
+          }
+
+          const current = await this.repo.findRunById(runId);
+          if (!current) return { runId, kind: "not_found", status: null, doneCases: 0 };
+          if (current.stopRequestedAt) {
+            // 018 §11：0 条完成时点停止也收 partial + done_cases=0（不新造状态）。
+            status = "partial";
+            break outer;
+          }
+          if (current.tokensUsed >= current.tokenBudget) {
+            status = "budget_stop";
+            break outer;
+          }
+
+          // 裁判模型取**发起时快照在 run 行上**的值，不读全局在线设置：离线 run 的裁判是发起
+          // 参数（原型 §6 的「裁判模型」下拉），改了在线设置不该改变已发起 run 的判分口径。
+          await this.runCase(
+            runId,
+            cfg,
+            entry,
+            content,
+            { judgeModelId: run.judgeModelId, embeddingModelId: run.embeddingModelId },
+            repeatIndex,
+          );
+        }
       }
 
       await this.repo.finishRun(runId, status, new Date(), null);
@@ -218,8 +228,9 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
     runId: string,
     cfg: Awaited<ReturnType<ApplicationsService["resolveForTest"]>>,
     entry: EvalRunSnapshotEntry,
-    content: { question: string; goldPoints: string[] },
+    content: EvalCaseVersionContent,
     modelIds: EvaluationModelIds,
+    repeatIndex: number,
   ): Promise<void> {
     const startedAt = Date.now();
     // 离线口径：默认 120s，**不套用**在线熔断的 30s（config.schema.ts + 018 §12 缺口 16）。
@@ -232,6 +243,12 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
     });
     const orchestrationTokens = outcome.usage.inputTokens + outcome.usage.outputTokens;
 
+    // F2：检索层 gold 指标不依赖答案——只要真检索了（retrievalExecuted）且有 goldDocRefs 即回填。
+    // timeout/unscored 路径也算（兜底不等于没检索）；retrievalExecuted=false → 三项 NULL。
+    const gold = outcome.retrievalExecuted
+      ? computeGoldMetrics(outcome.retrievedHits, content.goldDocRefs)
+      : null;
+
     if (outcome.timedOut) {
       // 018 已知取舍 2：超时**记 NULL + verdict=timeout**，不记 0 分（原型 §6 说记 0——
       // 本波唯一一处主动偏离产品权威：同一列里混「0=真的很差」与「未测出」会让记分卡 avg
@@ -240,11 +257,16 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
         runId,
         caseVersionId: entry.caseVersionId,
         seq: entry.seq,
+        repeatIndex,
         verdict: "timeout" satisfies EvalVerdict,
         faithfulness: null,
         answerRelevancy: null,
         contextPrecision: null,
         correctness: null,
+        citation: null,
+        contextRecall: gold?.contextRecall ?? null,
+        ndcg5: gold?.ndcg5 ?? null,
+        hitRate5: gold?.hitRate5 ?? null,
         minMetric: null,
         minScore: null,
         evidence: {},
@@ -275,11 +297,17 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
         runId,
         caseVersionId: entry.caseVersionId,
         seq: entry.seq,
+        repeatIndex,
         verdict: "unscored" satisfies EvalVerdict,
         faithfulness: null,
         answerRelevancy: null,
         contextPrecision: null,
         correctness: null,
+        citation: null,
+        // F2：检索层指标不依赖答案——真检索了就回填（无答案的 unscored 同样有召回列表）。
+        contextRecall: gold?.contextRecall ?? null,
+        ndcg5: gold?.ndcg5 ?? null,
+        hitRate5: gold?.hitRate5 ?? null,
         minMetric: null,
         minScore: null,
         evidence: {},
@@ -307,17 +335,23 @@ export class EvalRunWorkerProcessor implements OnModuleInit {
       modelIds,
       content.goldPoints,
     );
+    // decideVerdict 只吃四个 argmin 指标——citation/检索三项**不进** verdict/综合分（diff D1）。
     const decision = decideVerdict(scores);
 
     await this.repo.recordResult({
       runId,
       caseVersionId: entry.caseVersionId,
       seq: entry.seq,
+      repeatIndex,
       verdict: decision.verdict,
       faithfulness: scores.faithfulness,
       answerRelevancy: scores.answerRelevancy,
       contextPrecision: scores.contextPrecision,
       correctness: scores.correctness,
+      citation: scores.citation, // F4：仅记分卡/evidence
+      contextRecall: gold?.contextRecall ?? null, // F2
+      ndcg5: gold?.ndcg5 ?? null,
+      hitRate5: gold?.hitRate5 ?? null,
       minMetric: decision.minMetric,
       minScore: decision.minScore,
       evidence: scores.evidence,

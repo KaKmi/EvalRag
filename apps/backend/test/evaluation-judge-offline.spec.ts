@@ -43,6 +43,43 @@ describe("EvaluationJudgeService.scoreOffline（离线：单指标隔离）", ()
     expect(out.correctness).toBe(82);
   });
 
+  it("F4：citation 加为第 5 个 allSettled 项——拒绝时其余四项不受影响，citation 记 null", async () => {
+    const judge = new EvaluationJudgeService(
+      ok(91) as never,
+      ok(88) as never,
+      ok(78) as never,
+      ok(82) as never,
+      boom() as never, // citation 裁判挂
+    );
+    const out = await judge.scoreOffline(input, modelIds, ["7 天内无理由退"]);
+    expect(out.faithfulness).toBe(91);
+    expect(out.answerRelevancy).toBe(88);
+    expect(out.citation).toBeNull(); // 未评，不是 0
+  });
+
+  it("F4：4 参构造（不传 citation）不编译失败且 scoreOffline citation 恒 null", async () => {
+    const judge = new EvaluationJudgeService(
+      ok(90) as never,
+      ok(90) as never,
+      ok(90) as never,
+      ok(90) as never,
+    );
+    const out = await judge.scoreOffline(input, modelIds, ["要点"]);
+    expect(out.citation).toBeNull();
+  });
+
+  it("F4：citation 出分 → 进 scoreOffline 返回值", async () => {
+    const judge = new EvaluationJudgeService(
+      ok(90) as never,
+      ok(90) as never,
+      ok(90) as never,
+      unscored() as never,
+      ok(67) as never,
+    );
+    const out = await judge.scoreOffline(input, modelIds, []);
+    expect(out.citation).toBe(67);
+  });
+
   it("全部裁判失败 → 四个指标全 null（一个 0 都不写）", async () => {
     const judge = new EvaluationJudgeService(
       boom() as never,

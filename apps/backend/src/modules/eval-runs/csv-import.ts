@@ -6,10 +6,13 @@ import type { ImportEvalCasesRequest, ImportEvalCasesResponse } from "@codecrush
  * 错误文案逐字取自原型 §19.1。
  */
 
+import type { GoldDocRefRow } from "./schema";
+
 export interface ParsedImportRow {
   question: string;
   goldPoints: string[];
-  goldDocIds: string[];
+  /** F3：CSV gold_docs 列语义不变（文档 uuid）→ 文档级 ref（chunkId=null、名称空快照）。 */
+  goldDocRefs: GoldDocRefRow[];
   tags: string[];
 }
 
@@ -81,7 +84,16 @@ export function parseImportRows(rows: ImportEvalCasesRequest["rows"]): ImportPar
       errors.push({ row, message: `第 ${row} 行标签不合法（最多 5 个、每个 ≤12 字）` });
       return;
     }
-    valid.push({ row, parsed: { question: raw.question.trim(), goldPoints, goldDocIds, tags } });
+    const goldDocRefs: GoldDocRefRow[] = goldDocIds.map((docId) => ({
+      docId,
+      chunkId: null,
+      docName: "",
+      section: null,
+    }));
+    valid.push({
+      row,
+      parsed: { question: raw.question.trim(), goldPoints, goldDocRefs, tags },
+    });
   });
   return { valid, errors };
 }

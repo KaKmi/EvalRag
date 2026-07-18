@@ -43,6 +43,8 @@ export interface OfflineEvaluationScores {
   answerRelevancy: number | null;
   contextPrecision: number | null;
   correctness: number | null;
+  /** E-W2b F4：Citation（无引用 → null）。仅记分卡/evidence，不进 verdict/综合分。 */
+  citation: number | null;
   /** 只收**评出来**的指标——未评指标无键（对齐契约的 partialRecord）。 */
   evidence: Record<string, string[]>;
   /** 各裁判已上报 usage 之和；缺失部分计 0（决策 G）。 */

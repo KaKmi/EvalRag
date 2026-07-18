@@ -9,13 +9,15 @@ import {
   type EvalCaseRow,
   type EvalCaseVersionRow,
   type EvalSetRow,
+  type GoldDocRefRow,
 } from "./schema";
 
 /** 用例内容的可变部分 —— 一次保存即一个不可变版本行（018 §10）。 */
 export interface EvalCaseVersionContent {
   question: string;
   goldPoints: string[];
-  goldDocIds: string[];
+  /** F3：chunk 级 gold 引用（jsonb）。 */
+  goldDocRefs: GoldDocRefRow[];
   tags: string[];
 }
 
@@ -56,6 +58,8 @@ export interface ReviewedCaseVersion {
   caseVersionId: string;
   question: string;
   goldPoints: string[];
+  /** F2 检索指标消费的 gold 引用。 */
+  goldDocRefs: GoldDocRefRow[];
   seq: number;
 }
 
@@ -81,7 +85,7 @@ const SET_AGG_SELECT = {
   withGoldDocs: sql<number>`(
     SELECT COUNT(*)::int FROM ${evalCases} c
     JOIN ${evalCaseVersions} v ON v.case_id = c.id AND v.version = c.current_version
-    WHERE c.set_id = "eval_sets"."id" AND c.deleted_at IS NULL AND cardinality(v.gold_doc_ids) > 0
+    WHERE c.set_id = "eval_sets"."id" AND c.deleted_at IS NULL AND jsonb_array_length(v.gold_doc_refs) > 0
   )`.as("with_gold_docs"),
   /**
    * 原型 §5「上次得分」（`82.0` → 一位小数）。口径 = **最近一个有结果的终态 run** 的四指标
@@ -305,6 +309,7 @@ export class EvalSetsRepository {
         caseVersionId: evalCaseVersions.id,
         question: evalCaseVersions.question,
         goldPoints: evalCaseVersions.goldPoints,
+        goldDocRefs: evalCaseVersions.goldDocRefs,
       })
       .from(evalCases)
       .innerJoin(

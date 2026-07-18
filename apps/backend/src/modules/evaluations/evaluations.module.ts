@@ -3,6 +3,7 @@ import { ChunksModule } from "../chunks/chunks.module";
 import { ConversationsModule } from "../conversations/conversations.module";
 import { ModelsModule } from "../models/models.module";
 import { AnswerRelevancyEvaluator } from "./answer-relevancy.evaluator";
+import { CitationEvaluator } from "./citation.evaluator";
 import { ClickHouseEvaluationsRepository } from "./clickhouse-evaluations.repository";
 import { ContextPrecisionEvaluator } from "./context-precision.evaluator";
 import { CorrectnessEvaluator } from "./correctness.evaluator";
@@ -26,6 +27,7 @@ import { EvaluationsService } from "./evaluations.service";
     AnswerRelevancyEvaluator,
     ContextPrecisionEvaluator,
     CorrectnessEvaluator, // E-W2a：离线 gold 对照指标（在线三指标不含它）
+    CitationEvaluator, // E-W2b F4：离线 Citation 指标（仅记分卡，不进 verdict/综合分）
     EvaluationJudgeService,
     EvaluationSpanEmitter,
     EvaluationWorkerProcessor,

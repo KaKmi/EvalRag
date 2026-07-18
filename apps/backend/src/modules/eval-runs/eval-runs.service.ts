@@ -8,7 +8,6 @@ import {
 } from "@nestjs/common";
 import type {
   CreateEvalRunRequest,
-  EvalMetricKey,
   EvalRunListItem,
   EvalRunReport,
   EvalRunScorecard,
@@ -21,11 +20,8 @@ import type {
 import { EVAL_RUN_JOB, EVAL_RUN_QUEUE } from "../../platform/queue/queue.constants";
 import type { Queue } from "../../platform/queue/queue.port";
 import { ApplicationsService } from "../applications/applications.service";
-import {
-  EVAL_RUN_IDEMPOTENCY_MS,
-  EVAL_RUN_JOB_RETRY_LIMIT,
-  EVAL_RUN_METRIC_KEYS,
-} from "./eval-run.constants";
+import { EVAL_RUN_IDEMPOTENCY_MS, EVAL_RUN_JOB_RETRY_LIMIT } from "./eval-run.constants";
+import { aggregateResults } from "./eval-run-aggregate";
 import { EvalSetsRepository } from "./eval-sets.repository";
 import {
   EvalRunsRepository,
@@ -56,40 +52,31 @@ function toListItem(row: EvalRunAggregate, configVersionLabel: string): EvalRunL
     overallScore: row.overallScore,
     totalCases: row.totalCases,
     doneCases: row.doneCases,
+    repeatCount: row.repeatCount,
     durationMs: durationOf(row),
     createdAt: row.createdAt.toISOString(),
   };
 }
 
-function toResult(row: EvalRunResultWithCase): EvalRunResult {
-  return {
-    seq: row.seq,
-    caseId: row.caseId,
-    caseVersion: row.caseVersion,
-    question: row.question,
-    faithfulness: row.faithfulness,
-    answerRelevancy: row.answerRelevancy,
-    contextPrecision: row.contextPrecision,
-    correctness: row.correctness,
-    minMetric: row.minMetric as EvalMetricKey | null,
-    minScore: row.minScore,
-    verdict: row.verdict as EvalVerdict,
-    evidence: row.evidence as EvalRunResult["evidence"],
-    previewTraceId: row.previewTraceId,
-    answer: row.answer,
-    durationMs: row.durationMs,
-    error: row.error,
-  };
-}
+/** 记分卡指标键（8 项：4 argmin + citation + 3 检索 gold）。 */
+type ScorecardMetricKey =
+  | "faithfulness"
+  | "answerRelevancy"
+  | "contextPrecision"
+  | "correctness"
+  | "citation"
+  | "contextRecall"
+  | "ndcg5"
+  | "hitRate5";
 
 /**
  * 单指标聚合：avg **只对非 NULL 样本**算（未评不进分母——原型 §6「不拉低均值」），
- * 并回传覆盖率。`total` = **实际跑到的用例数**（结果行数），不是快照总数：
+ * 并回传覆盖率。`total` = **实际跑到的用例数**（聚合后的 case 行数，F5），不是快照总数：
  * 「没跑」由 `skippedCount` 单独表达，混进覆盖率会让「裁判挂了多少」读不出来。
  */
 function metricAggregate(
-  results: EvalRunResultWithCase[],
-  key: (typeof EVAL_RUN_METRIC_KEYS)[number],
+  results: EvalRunResult[],
+  key: ScorecardMetricKey,
 ): EvalRunScorecard["retrieval"]["contextPrecision"] {
   const values = results.map((row) => row[key]).filter((value): value is number => value !== null);
   const sum = values.reduce((acc, value) => acc + value, 0);
@@ -100,15 +87,26 @@ function metricAggregate(
   };
 }
 
-function buildScorecard(results: EvalRunResultWithCase[], skippedCount: number): EvalRunScorecard {
+function buildScorecard(
+  results: EvalRunResult[],
+  skippedCount: number,
+  goldCoverage: { withGold: number; total: number },
+): EvalRunScorecard {
   const countOf = (verdict: EvalVerdict) => results.filter((row) => row.verdict === verdict).length;
   return {
-    // W2a 检索层只有 contextPrecision；recall/ndcg/hitRate 需 gold docs 通路 → W2b（018 决策 E）。
-    retrieval: { contextPrecision: metricAggregate(results, "contextPrecision") },
+    // F2：检索层四指标。contextPrecision 是 LLM 判分；recall/ndcg5/hitRate5 是 gold 排序真值。
+    retrieval: {
+      contextPrecision: metricAggregate(results, "contextPrecision"),
+      contextRecall: metricAggregate(results, "contextRecall"),
+      ndcg5: metricAggregate(results, "ndcg5"),
+      hitRate5: metricAggregate(results, "hitRate5"),
+      goldCoverage,
+    },
     generation: {
       faithfulness: metricAggregate(results, "faithfulness"),
       answerRelevancy: metricAggregate(results, "answerRelevancy"),
       correctness: metricAggregate(results, "correctness"),
+      citation: metricAggregate(results, "citation"), // F4：仅记分卡，不进 verdict/综合分
     },
     passCount: countOf("pass"),
     weakCount: countOf("weak"),
@@ -203,6 +201,7 @@ export class EvalRunsService {
       embeddingModelId: req.embeddingModelId,
       caseVersionSnapshot: snapshot,
       totalCases: snapshot.length,
+      repeatCount: req.repeatCount,
       createdBy: actor,
     });
     // 入队失败必须把 run 收成 failed 再抛：插行与入队不在同一事务，publish 抛出会留下一条
@@ -229,9 +228,13 @@ export class EvalRunsService {
     if (!row) throw new NotFoundException("评测报告不存在");
 
     const labels = await this.versionLabels([row]);
-    const results = await this.repo.listResults(id);
+    const rawResults = await this.repo.listResults(id);
     const snapshot = row.caseVersionSnapshot as EvalRunSnapshotEntry[];
-    const skipped = await this.deriveSkipped(snapshot, results);
+    // F5：按 caseVersionId 聚合多次重复 → 每 case 一行（顶层均值 + repeats 明细）。
+    const results = aggregateResults(rawResults);
+    const skipped = await this.deriveSkipped(snapshot, rawResults);
+    // F2：goldCoverage 按**本 run 快照**用例的 goldDocRefs 非空数算（记分卡旁标「gold 38/50」）。
+    const goldCoverage = await this.computeGoldCoverage(snapshot);
 
     return {
       run: {
@@ -244,10 +247,23 @@ export class EvalRunsService {
         finishedAt: row.finishedAt?.toISOString() ?? null,
         error: row.error,
       },
-      scorecard: buildScorecard(results, snapshot.length - results.length),
-      results: results.map(toResult),
+      // skippedCount = 快照 − 有 ≥1 行结果的 case 数（聚合后行数）。
+      scorecard: buildScorecard(results, snapshot.length - results.length, goldCoverage),
+      results,
       skipped,
     };
+  }
+
+  /** F2：本 run 快照里 goldDocRefs 非空的用例数（withGold）/ 快照总数（total）。 */
+  private async computeGoldCoverage(
+    snapshot: EvalRunSnapshotEntry[],
+  ): Promise<{ withGold: number; total: number }> {
+    if (snapshot.length === 0) return { withGold: 0, total: 0 };
+    const versions = await this.repo.findCaseVersionsByIds(
+      snapshot.map((entry) => entry.caseVersionId),
+    );
+    const withGold = versions.filter((v) => v.goldDocRefs.length > 0).length;
+    return { withGold, total: snapshot.length };
   }
 
   /** 原型 §18.A：只有 queued/running 可停；终态 → 409（报告不可变）。 */
