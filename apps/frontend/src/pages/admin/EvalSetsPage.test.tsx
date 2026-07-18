@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import type { EvalCase, EvalSet } from "@codecrush/contracts";
+import type { EvalCase, EvalSet, GoldDocRef, RetrievalHit } from "@codecrush/contracts";
 import * as api from "../../api/client";
 import EvalSetsPage from "./EvalSetsPage";
 
@@ -22,6 +22,7 @@ vi.mock("../../api/client", async (importOriginal) => {
     getApplications: vi.fn(),
     getApplicationDetail: vi.fn(),
     getOnlineEvalSettings: vi.fn(),
+    testRetrieval: vi.fn(),
   };
 });
 vi.mock("antd", async (importOriginal) => {
@@ -51,11 +52,47 @@ const evalCase = (over: Partial<EvalCase> = {}): EvalCase => ({
   status: "reviewed",
   question: "课程可以退款吗",
   goldPoints: ["7 天内无理由退", "已开课按比例"],
-  goldDocIds: [],
+  goldDocRefs: [],
   tags: ["退款"],
   sourceTraceId: null,
   goldStale: false,
   createdAt: "2026-07-10T02:00:00.000Z",
+  ...over,
+});
+
+const goldRef = (over: Partial<GoldDocRef> = {}): GoldDocRef => ({
+  docId: "d-1",
+  chunkId: "c-1",
+  docName: "退款政策",
+  section: "§2",
+  ...over,
+});
+
+const knowledgeBase = () =>
+  ({
+    id: "kb-1",
+    name: "售后FAQ",
+    desc: "",
+    chunkTemplate: "general",
+    embeddingModelId: "embed-1",
+    docsCount: 3,
+    chunksCount: 12,
+    status: "ready",
+    activeVersion: 1,
+    buildingVersion: null,
+    processingProfileId: null,
+    processingProfileVersion: null,
+    updatedAt: "2026-07-10T02:00:00.000Z",
+  }) as never;
+
+const retrievalHit = (over: Partial<RetrievalHit> = {}): RetrievalHit => ({
+  chunkId: "c-1",
+  docId: "d-1",
+  docName: "退款政策",
+  text: "课程支持 7 天无理由退款，已开课按剩余比例退还。",
+  section: "§2",
+  vecScore: 0.9,
+  finalScore: 0.88,
   ...over,
 });
 
@@ -91,6 +128,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.getKnowledgeBases).mockResolvedValue([]);
   vi.mocked(api.getDocuments).mockResolvedValue([]);
+  vi.mocked(api.testRetrieval).mockResolvedValue({ hits: [] });
   vi.mocked(api.getEvalCases).mockResolvedValue([evalCase()]);
   vi.mocked(api.getApplications).mockResolvedValue([]);
   vi.mocked(api.getOnlineEvalSettings).mockResolvedValue({
@@ -299,4 +337,141 @@ describe("发起评测 Modal 的预估耗时随用例数缩放", () => {
   it("200 条 → 放大到「12~24 分钟」", async () => {
     expect(await openRunModal(200)).toHaveTextContent("耗时 12~24 分钟");
   });
+});
+
+// —— F3：chunk 级 gold 选择器 ——
+
+/** 展开评测集第一行并打开该用例的编辑抽屉。 */
+async function openCaseDrawer() {
+  fireEvent.click(await screen.findByRole("button", { name: /Expand row/i }));
+  fireEvent.click(await screen.findByText("课程可以退款吗"));
+  await screen.findByText("保存将生成新版本，历史报告仍引用旧版本");
+}
+
+it("CaseDrawer 显示 chunk 级与文档级 gold ref tag，点 × 移除（F3）", async () => {
+  vi.mocked(api.getEvalCases).mockResolvedValue([
+    evalCase({
+      goldDocRefs: [
+        goldRef({ docId: "d-1", chunkId: "c-1", docName: "退款政策", section: "§2" }),
+        goldRef({ docId: "d-old", chunkId: null, docName: "旧文档", section: null }),
+      ],
+    }),
+  ]);
+  renderPage();
+  await openCaseDrawer();
+  // chunk 级：docName + section；文档级遗留（chunkId=null）：docName（整篇）
+  expect(await screen.findByText("退款政策 §2")).toBeInTheDocument();
+  expect(screen.getByText("旧文档（整篇）")).toBeInTheDocument();
+  // 点 × 移除 chunk 级 tag
+  const tag = screen.getByText("退款政策 §2").closest(".ant-tag") as HTMLElement;
+  fireEvent.click(tag.querySelector(".ant-tag-close-icon") as HTMLElement);
+  await waitFor(() => expect(screen.queryByText("退款政策 §2")).not.toBeInTheDocument());
+  // 文档级 tag 不受影响
+  expect(screen.getByText("旧文档（整篇）")).toBeInTheDocument();
+});
+
+it("GoldRefSelector：选 KB + 关键词 → 候选 chunk 勾选确认 → tag 出现（F3）", async () => {
+  vi.mocked(api.getKnowledgeBases).mockResolvedValue([knowledgeBase()]);
+  vi.mocked(api.testRetrieval).mockResolvedValue({
+    hits: [
+      retrievalHit({ chunkId: "c-1", docName: "退款政策", section: "§2", text: "课程支持 7 天无理由退款" }),
+      retrievalHit({ chunkId: "c-2", docName: "退款政策", section: "§3", text: "已开课按剩余比例退还" }),
+    ],
+  });
+  renderPage();
+  await openCaseDrawer();
+  fireEvent.click(screen.getByRole("button", { name: /添加/ }));
+  // 关键词检索 → 复用检索测试台端点
+  const searchInput = await screen.findByPlaceholderText("输入关键词检索候选片段");
+  const modal = searchInput.closest(".ant-modal") as HTMLElement;
+  fireEvent.change(searchInput, { target: { value: "退款" } });
+  fireEvent.click(within(modal).getByRole("button", { name: /检\s*索/ }));
+  await waitFor(() =>
+    expect(api.testRetrieval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: "退款",
+        kbId: "kb-1",
+        embedModelId: "embed-1",
+        topK: 10,
+        threshold: 0,
+        multi: false,
+      }),
+    ),
+  );
+  await within(modal).findByText("课程支持 7 天无理由退款");
+  // 勾第一个候选 → 确认
+  fireEvent.click(within(modal).getAllByRole("checkbox")[0]);
+  fireEvent.click(within(modal).getByRole("button", { name: /确\s*认/ }));
+  // 合入抽屉后显示 tag
+  expect(await screen.findByText("退款政策 §2")).toBeInTheDocument();
+});
+
+it("GoldRefSelector：已选满 10 再合入报「最多关联 10 个片段」（§19.1）", async () => {
+  vi.mocked(api.getKnowledgeBases).mockResolvedValue([knowledgeBase()]);
+  vi.mocked(api.testRetrieval).mockResolvedValue({
+    hits: [retrievalHit({ chunkId: "c-new", docId: "d-new", docName: "新文档", section: "§9", text: "新片段内容" })],
+  });
+  vi.mocked(api.getEvalCases).mockResolvedValue([
+    evalCase({
+      goldDocRefs: Array.from({ length: 10 }, (_, i) =>
+        goldRef({ docId: `d-${i}`, chunkId: `c-${i}`, docName: `文档${i}`, section: `§${i}` }),
+      ),
+    }),
+  ]);
+  renderPage();
+  await openCaseDrawer();
+  fireEvent.click(screen.getByRole("button", { name: /添加/ }));
+  const searchInput = await screen.findByPlaceholderText("输入关键词检索候选片段");
+  const modal = searchInput.closest(".ant-modal") as HTMLElement;
+  fireEvent.change(searchInput, { target: { value: "退款" } });
+  fireEvent.click(within(modal).getByRole("button", { name: /检\s*索/ }));
+  await within(modal).findByText("新片段内容");
+  fireEvent.click(within(modal).getAllByRole("checkbox")[0]);
+  fireEvent.click(within(modal).getByRole("button", { name: /确\s*认/ }));
+  expect(await within(modal).findByText("最多关联 10 个片段")).toBeInTheDocument();
+});
+
+// —— F5：发起 Modal「每题重复」——
+
+it("发起评测 Modal 显示「每题重复」默认 1，选 3 后请求体带 repeatCount:3、预估数值 ×3", async () => {
+  renderPage();
+  vi.mocked(api.getApplications).mockResolvedValue([
+    { id: "app-1", name: "售后支持", productionConfigVersionId: "ver-7" } as never,
+  ]);
+  vi.mocked(api.getApplicationDetail).mockResolvedValue({
+    id: "app-1",
+    productionConfigVersionId: "ver-7",
+    versions: [{ id: "ver-7", version: 7 }],
+  } as never);
+  vi.mocked(api.createEvalRun).mockResolvedValue({ id: "run-new" } as never);
+
+  fireEvent.click(await screen.findByRole("button", { name: "发起评测" }));
+  await screen.findByText("发起评测 · 售后核心 50 题");
+  await waitFor(() => expect(screen.getByTestId("version-select")).toHaveTextContent("v7"));
+
+  // 默认 1 次；预估 50 条对应「3~6 分钟」
+  const repeatSelect = screen.getByTestId("repeat-select");
+  expect(repeatSelect).toHaveTextContent("1 次");
+  expect(screen.getByText(/预估：/)).toHaveTextContent("耗时 3~6 分钟");
+
+  // 选 3 次（antd 6 虚拟列表下 option 角色名不稳定 → 按下拉门户内文本点选，同 ImportModal 模式）
+  fireEvent.mouseDown(within(repeatSelect).getByRole("combobox"));
+  const repeatDropdown = await waitFor(() => {
+    const items = document.querySelectorAll(".ant-select-dropdown .ant-select-item-option-content");
+    const three = Array.from(items).find((el) => el.textContent === "3 次");
+    if (!three) throw new Error("option 3 次 not rendered yet");
+    return three as HTMLElement;
+  });
+  fireEvent.click(repeatDropdown);
+
+  // 预估随 repeat 缩放 ×3：150 units → 9~18 分钟 · Token ~540k · 150 条
+  await waitFor(() => expect(screen.getByText(/预估：/)).toHaveTextContent("耗时 9~18 分钟"));
+  const estimateLine = screen.getByText(/预估：/);
+  expect(estimateLine).toHaveTextContent("Token ~540k");
+  expect(estimateLine).toHaveTextContent("产出 150 条");
+
+  fireEvent.click(screen.getByRole("button", { name: "开始运行" }));
+  await waitFor(() =>
+    expect(api.createEvalRun).toHaveBeenCalledWith(expect.objectContaining({ repeatCount: 3 })),
+  );
 });

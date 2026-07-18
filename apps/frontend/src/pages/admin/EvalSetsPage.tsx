@@ -22,9 +22,9 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import type {
   Application,
-  Document,
   EvalCase,
   EvalSet,
+  GoldDocRef,
   ImportEvalCasesRequest,
   ImportEvalCasesResponse,
   KnowledgeBase,
@@ -39,7 +39,6 @@ import {
   deleteEvalSet,
   getApplicationDetail,
   getApplications,
-  getDocuments,
   getEvalCases,
   getEvalSets,
   getKnowledgeBases,
@@ -47,6 +46,7 @@ import {
   importEvalCases,
   updateEvalCase,
 } from "../../api/client";
+import { GoldRefSelector } from "./GoldRefSelector";
 
 const { Title, Text } = Typography;
 
@@ -191,11 +191,17 @@ function minutes(caseCount: number, perAnchor: number): string {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
-function estimate(caseCount: number): string {
-  const tokens = Math.round((caseCount * 3600) / 1000);
-  const low = minutes(caseCount, ESTIMATE_MIN_MINUTES_PER_ANCHOR);
-  const high = minutes(caseCount, ESTIMATE_MAX_MINUTES_PER_ANCHOR);
-  return `预估：${caseCount} 条 × (1 次编排 + ~3 次裁判调用) ≈ 耗时 ${low}~${high} 分钟 · Token ~${tokens}k · 产出 ${caseCount} 条 preview trace（不入线上统计）`;
+/**
+ * F5：每题重复 N 次时，编排+裁判+preview trace 全部 × repeatCount（每次重复都是一遍完整跑）。
+ * repeatCount=1 时输出与 W2a 逐字节一致（units==caseCount、无重复注记）——既有 QA P3-1 断言不改。
+ */
+function estimate(caseCount: number, repeatCount: number): string {
+  const units = caseCount * repeatCount;
+  const tokens = Math.round((units * 3600) / 1000);
+  const low = minutes(units, ESTIMATE_MIN_MINUTES_PER_ANCHOR);
+  const high = minutes(units, ESTIMATE_MAX_MINUTES_PER_ANCHOR);
+  const repeatNote = repeatCount > 1 ? ` × 每题重复 ${repeatCount} 次` : "";
+  return `预估：${caseCount} 条${repeatNote} × (1 次编排 + ~3 次裁判调用) ≈ 耗时 ${low}~${high} 分钟 · Token ~${tokens}k · 产出 ${units} 条 preview trace（不入线上统计）`;
 }
 
 export default function EvalSetsPage() {
@@ -544,7 +550,7 @@ function CasesTable({
       key: "goldDocs",
       width: 90,
       render: (_: unknown, row) =>
-        row.goldDocIds.length === 0 ? <Text type="secondary">未标</Text> : row.goldDocIds.length,
+        row.goldDocRefs.length === 0 ? <Text type="secondary">未标</Text> : row.goldDocRefs.length,
     },
     {
       title: "标签",
@@ -679,28 +685,10 @@ function CaseDrawer({
 }) {
   const [question, setQuestion] = useState(value?.question ?? "");
   const [goldAnswer, setGoldAnswer] = useState((value?.goldPoints ?? []).join("；"));
-  const [goldDocIds, setGoldDocIds] = useState<string[]>(value?.goldDocIds ?? []);
+  const [goldDocRefs, setGoldDocRefs] = useState<GoldDocRef[]>(value?.goldDocRefs ?? []);
   const [tags, setTags] = useState<string[]>(value?.tags ?? []);
-  const [docs, setDocs] = useState<Document[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-
-  // gold 文档候选：优先取该集关联知识库的文档；未关联（=覆盖「全部」）则取全部知识库。
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      try {
-        const kbIds = set.kbIds.length > 0 ? set.kbIds : (await getKnowledgeBases()).map((k) => k.id);
-        const lists = await Promise.all(kbIds.map((kbId) => getDocuments(kbId)));
-        if (live) setDocs(lists.flat());
-      } catch {
-        if (live) setDocs([]); // 候选拉不到不挡编辑（gold docs 选填）
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [set.kbIds]);
 
   const save = async () => {
     // §19.1 逐条校验，文案逐字。
@@ -715,14 +703,14 @@ function CaseDrawer({
     if (goldPoints.some((point) => point.length > GOLD_POINT_MAX)) {
       return setError(`gold 要点每条不超过 ${GOLD_POINT_MAX} 字`);
     }
-    if (goldDocIds.length > GOLD_DOC_MAX) return setError("最多关联 10 个片段");
+    if (goldDocRefs.length > GOLD_DOC_MAX) return setError("最多关联 10 个片段");
     if (tags.length > TAG_MAX) return setError("最多 5 个标签");
     if (tags.some((tag) => tag.length > TAG_LEN_MAX)) return setError(`标签不超过 ${TAG_LEN_MAX} 字`);
     setError(null);
     setSaving(true);
     try {
       if (value) {
-        await updateEvalCase(set.id, value.id, { question: trimmed, goldPoints, goldDocIds, tags });
+        await updateEvalCase(set.id, value.id, { question: trimmed, goldPoints, goldDocRefs, tags });
         // 更新分支**不可**复用 §19.2 的入集文案：后端只在 `req.status !== undefined` 时才写
         // status，而本抽屉从不传 status → 已审核用例保存后**仍是 reviewed**（只是 v+1）。
         // 沿用「状态：待审核」会与事实相反，诱使用户去「重新审核」一条从未离开 reviewed 的
@@ -730,7 +718,7 @@ function CaseDrawer({
         // 恰恰是本波刻意保住的产品语义。
         message.success(`已保存，已生成新版本 v${value.version + 1}`);
       } else {
-        await createEvalCase(set.id, { question: trimmed, goldPoints, goldDocIds, tags });
+        await createEvalCase(set.id, { question: trimmed, goldPoints, goldDocRefs, tags });
         message.success(`已加入评测集『${set.name}』，状态：待审核`); // §19.2 逐字
       }
       await onSaved();
@@ -786,19 +774,29 @@ function CaseDrawer({
             onChange={(e) => setGoldAnswer(e.target.value)}
           />
         </Form.Item>
+        {/* 原型 §5「gold 文档：检索选择器：退款政策 §2 ×」——已选 chunk 显示为可删 tag + 「添加」开选择器。 */}
         <Form.Item label="gold 文档" extra="选填，标了才能测召回">
-          <Select
-            aria-label="gold 文档"
-            mode="multiple"
-            allowClear
-            showSearch
-            optionFilterProp="label"
-            style={{ width: "100%" }}
-            placeholder="输入关键词筛选文档"
-            value={goldDocIds}
-            onChange={setGoldDocIds}
-            options={docs.map((doc) => ({ value: doc.id, label: doc.name }))}
-          />
+          <Space size={[4, 8]} wrap style={{ width: "100%" }}>
+            {goldDocRefs.map((ref, index) => {
+              const label =
+                ref.chunkId === null
+                  ? `${ref.docName || ref.docId.slice(0, 8)}（整篇）`
+                  : `${ref.docName || ref.docId.slice(0, 8)}${ref.section ? ` ${ref.section}` : ""}`;
+              return (
+                <Tag
+                  key={`${ref.docId}:${ref.chunkId ?? "doc"}:${index}`}
+                  closable
+                  onClose={(e) => {
+                    e.preventDefault();
+                    setGoldDocRefs((prev) => prev.filter((_, i) => i !== index));
+                  }}
+                >
+                  {label}
+                </Tag>
+              );
+            })}
+            <GoldRefSelector value={goldDocRefs} onChange={setGoldDocRefs} kbIds={set.kbIds} />
+          </Space>
         </Form.Item>
         <Form.Item label="标签" extra={`最多 ${TAG_MAX} 个，每个 ≤${TAG_LEN_MAX} 字`}>
           <Select
@@ -1101,6 +1099,8 @@ function StartRunModal({
   const [settings, setSettings] = useState<OnlineEvalSettingsResponse | null>(null);
   const [judgeModelId, setJudgeModelId] = useState<string | undefined>();
   const [embeddingModelId, setEmbeddingModelId] = useState<string | undefined>();
+  // §6/F5：每题重复（1-5，默认 1）。
+  const [repeatCount, setRepeatCount] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
@@ -1167,6 +1167,7 @@ function StartRunModal({
         configVersionId: versionId,
         judgeModelId,
         embeddingModelId,
+        repeatCount,
         force,
       });
       message.success("评测已开始，预计 3~6 分钟"); // §19.2 逐字
@@ -1228,20 +1229,33 @@ function StartRunModal({
             }))}
           />
         </Form.Item>
-        <Form.Item label="裁判模型" required>
-          <Select
-            aria-label="裁判模型"
-            data-testid="judge-select"
-            style={{ width: "100%" }}
-            value={judgeModelId}
-            onChange={setJudgeModelId}
-            options={(settings?.models.judges ?? []).map((model) => ({
-              value: model.id,
-              disabled: !model.available,
-              label: `${model.name}${model.available ? "" : "（不可用）"}`,
-            }))}
-          />
-        </Form.Item>
+        {/* 原型 §6：裁判模型与「每题重复」同排。 */}
+        <Flex gap={12}>
+          <Form.Item label="裁判模型" required style={{ flex: 1 }}>
+            <Select
+              aria-label="裁判模型"
+              data-testid="judge-select"
+              style={{ width: "100%" }}
+              value={judgeModelId}
+              onChange={setJudgeModelId}
+              options={(settings?.models.judges ?? []).map((model) => ({
+                value: model.id,
+                disabled: !model.available,
+                label: `${model.name}${model.available ? "" : "（不可用）"}`,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item label="每题重复" style={{ width: 140 }}>
+            <Select
+              aria-label="每题重复"
+              data-testid="repeat-select"
+              style={{ width: "100%" }}
+              value={repeatCount}
+              onChange={setRepeatCount}
+              options={[1, 2, 3, 4, 5].map((n) => ({ value: n, label: `${n} 次` }))}
+            />
+          </Form.Item>
+        </Flex>
         <Form.Item label="Embedding 模型" required>
           <Select
             aria-label="Embedding 模型"
@@ -1258,7 +1272,7 @@ function StartRunModal({
         </Form.Item>
         {/* 原型 §6 预估条（前端本地估算，非后端返回） */}
         <div style={{ background: "#fafafa", borderRadius: 6, padding: "8px 12px", fontSize: 12 }}>
-          {estimate(set.reviewedCaseCount)}
+          {estimate(set.reviewedCaseCount, repeatCount)}
         </div>
         {error && (
           <div style={{ marginTop: 8 }}>
