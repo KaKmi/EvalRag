@@ -162,6 +162,13 @@
       "when": 1784500000000,
       "tag": "0022_eval_w2b",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1784600000000,
+      "tag": "0023_eval_run_active_slot",
+      "breakpoints": true
     }
   ]
 }

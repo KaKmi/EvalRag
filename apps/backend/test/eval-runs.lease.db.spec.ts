@@ -266,4 +266,29 @@ describeDb("eval run lease + reaper（真库三值逻辑）", () => {
     const id = await insertRun("running", "w1", new Date(Date.now() + EVAL_RUN_LEASE_MS));
     expect(await repo.tryAcquireLease(id, "w2", new Date(), EVAL_RUN_LEASE_MS)).toBe(false);
   });
+
+  // ——— 缺口 13：活跃槽位是 PG 约束，不是口头约定 ————————————————————
+  it("已有活跃 run 时再插一条 → 23505，且约束名正是 service 判别所依赖的那个", async () => {
+    await insertRun("queued", null, null);
+    // 约束名是契约：eval-runs.service.ts 的 23505 → 409 判别按它精确匹配
+    await expect(insertRun("queued", null, null)).rejects.toMatchObject({
+      code: "23505",
+      constraint: "eval_runs_single_active_unique",
+    });
+  });
+
+  it("同一行 queued → running 不撞索引（索引键在两态间不变）", async () => {
+    const id = await insertRun("queued", null, null);
+    const now = new Date();
+    expect(await repo.tryAcquireLease(id, "w1", now, EVAL_RUN_LEASE_MS)).toBe(true);
+    expect(await repo.markRunning(id, "w1", now)).toBe(true);
+    expect((await statusOf(id)).status).toBe("running");
+  });
+
+  it("回收后槽位真释放 —— 立刻能插新 run", async () => {
+    const id = await insertRun("queued", null, null, ago(EVAL_RUN_REAP_GRACE_MS + 60_000));
+    expect(await repo.reapAbandonedRuns(new Date())).toEqual([id]);
+    // 不抛即通过：槽位已随 status 转终态而释放
+    await insertRun("queued", null, null);
+  });
 });

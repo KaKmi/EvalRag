@@ -162,6 +162,21 @@ export const evalRuns = pgTable(
     check("eval_runs_scope_check", sql`${t.scope} IN ('all')`),
     index("eval_runs_idempotency_idx").on(t.setId, t.configVersionId, t.createdAt), // 1h 幂等查询
     index("eval_runs_active_idx").on(t.status), // queued/running 并发检查
+    /**
+     * 018 §12 缺口 13：**「全局同时最多 1 个 run」的唯一硬保证**。
+     *
+     * `create()` 的 `findActiveRun()` 只是快速路径与文案来源——它与 `insertRun()`
+     * 之间无事务、无锁，两个并发请求会双双越过它（TOCTOU 双开）。后果非良性：
+     * 第二条 run 干等到超过一个 GRACE 后被回收器判 failed，**无声失败**。
+     * 删掉本索引 = 把缺口 13 原样放回来。
+     *
+     * 索引表达式在部分索引内恒为 true ⇒ 至多一行活跃。终态行不在谓词内、不占槽位。
+     * 迁移见 `drizzle/0023_eval_run_active_slot.sql`；冲突判别见
+     * `eval-runs.repository.ts` 的 `isSingleActiveRunConflict`（按此名精确匹配）。
+     */
+    uniqueIndex("eval_runs_single_active_unique")
+      .on(sql`(${t.status} IN ('queued','running'))`)
+      .where(sql`${t.status} IN ('queued','running')`),
   ],
 );
 
