@@ -14,6 +14,7 @@
     "db:backfill-prompts": "tsx src/db/backfill-prompt-contracts.ts",
     "db:backfill-applications": "tsx src/db/backfill-applications.ts",
     "test:db": "cross-env RUN_DB_TESTS=1 jest --runInBand test/prompts.migration.spec.ts test/applications.migration.spec.ts test/judge-version.migration.spec.ts test/conversations.evaluation-turn.spec.ts test/evaluations.repository.spec.ts test/eval-runs.lease.db.spec.ts test/eval-sets.aggregate.db.spec.ts test/eval-w2b.migration.spec.ts",
+    "test:infra": "cross-env RUN_DB_TESTS=1 RUN_CLICKHOUSE_TESTS=1 jest --runInBand test/eval-runs.e2e.spec.ts test/eval-run-isolation.spec.ts test/evaluations.e2e.spec.ts test/eval-w2b.e2e.spec.ts test/evaluations.clickhouse.spec.ts test/traces.repository.quality.spec.ts",
     "db:seed": "tsx src/db/seed.ts",
     "observability:verify": "node scripts/verify-observability.mjs"
   },

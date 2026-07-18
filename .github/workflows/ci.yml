@@ -28,3 +28,81 @@ jobs:
       # turbo 的 test/build 都 dependsOn ^build，无需额外构建步骤
       - run: pnpm test
       - run: pnpm build
+
+  db:
+    name: real-postgres (test:db)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: codecrush
+          POSTGRES_PASSWORD: codecrush
+          POSTGRES_DB: codecrush
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U codecrush -d codecrush"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      MIGRATION_TEST_DATABASE_URL: postgres://codecrush:codecrush@localhost:5432/codecrush_mig_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 专用一次性库：spec 自己会 DROP SCHEMA public CASCADE，故不能用主库
+      - name: create migration test database
+        run: PGPASSWORD=codecrush psql -h localhost -U codecrush -d codecrush -c 'CREATE DATABASE codecrush_mig_test'
+      # jest 的 moduleNameMapper 直指各包 src，无需先 build
+      # test:db 自带 RUN_DB_TESTS=1 与 --runInBand —— 两者都不得删
+      - run: pnpm --filter @codecrush/backend test:db
+
+  infra:
+    name: postgres + clickhouse + collector (test:infra)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIGRATION_TEST_DATABASE_URL: postgres://codecrush:codecrush@localhost:5432/codecrush_mig_test
+      CLICKHOUSE_URL: http://localhost:8123
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 刻意复用开发者天天跑的那条命令（AGENTS.md:19），CI 与本地同构、零配置漂移。
+      # 不用 GitHub services：三个服务都要挂载仓库内文件（collector 的 config.yaml
+      # 决定 create_schema:true —— 没有它就没有 otel_traces 表；clickhouse 的
+      # users.d/*.xml 决定 default 用户可连），而 services 容器在 checkout 之前启动。
+      - name: start infra
+        run: docker compose -f infra/docker-compose.yml --profile infra up -d --wait
+      - name: create migration test database
+        run: docker compose -f infra/docker-compose.yml exec -T postgres psql -U codecrush -d codecrush -c 'CREATE DATABASE codecrush_mig_test'
+      # --wait 只等有 healthcheck 的服务，collector 没有 healthcheck。
+      # otel_traces 由 collector 的 clickhouse exporter 建（create_schema: true）；
+      # 测试 harness 直接往该表 insert（helpers/evaluation-infra.ts:94），表不在就直接炸。
+      # 必须显式等，且等不到要**失败**——静默继续会让测试以「查不到数据」的形式假失败。
+      - name: wait for otel_traces table
+        run: |
+          # collector 可能延迟到首次导出才建表：先 POST 一条最小 OTLP 触发建表，再轮询。
+          curl -s -X POST "http://localhost:4318/v1/traces" \
+            -H 'Content-Type: application/json' -d '{"resourceSpans":[]}' >/dev/null || true
+          for i in $(seq 1 60); do
+            if [ "$(curl -s "$CLICKHOUSE_URL" --data-binary 'EXISTS TABLE otel_traces')" = "1" ]; then
+              echo "otel_traces ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::otel_traces never appeared; collector logs follow"
+          docker compose -f infra/docker-compose.yml logs otel-collector
+          exit 1
+      - run: pnpm --filter @codecrush/backend test:infra
+      - name: dump infra logs on failure
+        if: failure()
+        run: docker compose -f infra/docker-compose.yml logs --tail 200
