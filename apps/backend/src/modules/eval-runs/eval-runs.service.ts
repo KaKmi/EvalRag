@@ -220,8 +220,14 @@ export class EvalRunsService {
     }
     // 入队失败必须把 run 收成 failed 再抛：插行与入队不在同一事务，publish 抛出会留下一条
     // **永远 queued 且没有任何 job 会来跑**的孤儿 run —— 而 queued 同样占着全局串行位，
-    // 且回收器只认 `running`（queued 的 lease_until 恒 NULL，无从判活），
-    // stop() 也只置信号不改状态 → 又是一个永久死锁，只能人工改库。
+    // stop() 也只置信号不改状态。
+    //
+    // 回收器**能**兜底：reapAbandonedRuns 有两条臂（running 看租约过期、queued 看
+    // created_at 过期 **且** 无人持租，见 eval-runs.repository.ts 的 or(...)），所以
+    // queued 孤儿最终会被收成 failed —— 不要据本段重复实现一遍回收。
+    // 但它要等满一个 EVAL_RUN_REAP_GRACE_MS（15 分钟；该宽限期是 15(c) 的 deadline 锚点，
+    // 存在的理由是「重试永远先于回收」，不可为了这里的手感调小）。发起侧没有理由把这 15
+    // 分钟的全局串行位空窗甩给用户 —— 我们这里就知道 publish 挂了，当场收口即可。
     try {
       await this.queue.publish(
         EVAL_RUN_JOB,
