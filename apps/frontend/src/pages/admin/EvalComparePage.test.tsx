@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { EvalCompareResponse } from "@codecrush/contracts";
 import EvalComparePage from "./EvalComparePage";
@@ -134,4 +134,17 @@ it("延迟/Token 黄底行常显", async () => {
 it("缺 a/b → 选择器态", async () => {
   renderAt("/admin/eval/compare");
   expect(await screen.findByText("选择同一评测集的两个 run 进行对比")).toBeInTheDocument();
+});
+
+it("选择一侧后禁用另一评测集的 run", async () => {
+  vi.mocked(client.getEvalRuns).mockResolvedValue([
+    runSummary,
+    { ...runSummary, id: "run-same-set", configVersionLabel: "v7" },
+    { ...runSummary, id: "run-other-set", setId: "set-2", setName: "其他评测集" },
+  ]);
+  renderAt("/admin/eval/compare?a=run-a");
+
+  const candidate = await screen.findByRole("combobox", { name: "候选 run" });
+  fireEvent.mouseDown(candidate);
+  expect(await screen.findByTitle("其他评测集 · v6")).toHaveAttribute("aria-disabled", "true");
 });

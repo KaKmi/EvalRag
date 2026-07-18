@@ -122,26 +122,29 @@ export default function EvalRunsPage() {
       key: "status",
       width: 170,
       // §17.3：状态 tag「运行中」带进度百分比
-      render: (_: unknown, row) => (
-        <Flex align="center" gap={8}>
-          <Tag color={RUN_STATUS_COLOR[row.status]} style={{ margin: 0 }}>
-            {RUN_STATUS_LABEL[row.status]}
-          </Tag>
-          {row.status === "running" && row.totalCases > 0 && (
-            <Progress
-              type="line"
-              size="small"
-              style={{ width: 60, margin: 0 }}
-              percent={Math.round((row.doneCases / row.totalCases) * 100)}
-            />
-          )}
-          {(row.status === "partial" || row.status === "budget_stop") && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {row.doneCases}/{row.totalCases}
-            </Text>
-          )}
-        </Flex>
-      ),
+      render: (_: unknown, row) => {
+        const totalUnits = row.totalCases * row.repeatCount;
+        return (
+          <Flex align="center" gap={8}>
+            <Tag color={RUN_STATUS_COLOR[row.status]} style={{ margin: 0 }}>
+              {RUN_STATUS_LABEL[row.status]}
+            </Tag>
+            {row.status === "running" && totalUnits > 0 && (
+              <Progress
+                type="line"
+                size="small"
+                style={{ width: 60, margin: 0 }}
+                percent={Math.round((row.doneCases / totalUnits) * 100)}
+              />
+            )}
+            {(row.status === "partial" || row.status === "budget_stop") && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {row.doneCases}/{totalUnits}
+              </Text>
+            )}
+          </Flex>
+        );
+      },
     },
     {
       title: "综合分",

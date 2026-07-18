@@ -46,6 +46,7 @@ import {
   importEvalCases,
   updateEvalCase,
 } from "../../api/client";
+import { downloadCsv as downloadCsvFile } from "../../utils/csv";
 import { GoldRefSelector } from "./GoldRefSelector";
 
 const { Title, Text } = Typography;
@@ -80,9 +81,6 @@ function splitGoldPoints(goldAnswer: string): string[] {
 }
 
 // —— CSV：前端解析（018 决策 D13）——
-
-/** U+FEFF。用码点构造而非字面量：字面 BOM 在编辑器里不可见，被改坏了没人看得出来。 */
-const BOM = String.fromCharCode(0xfeff);
 
 /** RFC4180 风格解析：支持引号包裹、字段内逗号/换行、`""` 转义。 */
 function parseCsv(text: string): string[][] {
@@ -156,19 +154,9 @@ function readCsv(text: string): { rows: ImportRow[] } | { error: string } {
   };
 }
 
-function csvCell(value: string): string {
-  return /[",\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
-}
-
 /** BOM + CRLF：Excel 直接双击打开不乱码。 */
 function downloadCsv(filename: string, table: string[][]): void {
-  const csv = table.map((cells) => cells.map(csvCell).join(",")).join("\r\n");
-  const url = URL.createObjectURL(new Blob([BOM + csv], { type: "text/csv;charset=utf-8" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  downloadCsvFile(filename, table, { bom: true, lineEnding: "\r\n" });
 }
 
 /**

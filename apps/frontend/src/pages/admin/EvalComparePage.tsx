@@ -21,6 +21,7 @@ import type {
   EvalRunListItem,
 } from "@codecrush/contracts";
 import { EvalCompareIncomparableError, getEvalCompare, getEvalRuns } from "../../api/client";
+import { downloadCsv, type CsvValue } from "../../utils/csv";
 import { SideBySidePanel, type ReplayScores } from "./ReplayModal";
 
 const { Title, Text } = Typography;
@@ -126,6 +127,14 @@ export default function EvalComparePage() {
   // 选择器：同评测集的终态 run。
   const TERMINAL: EvalRunListItem["status"][] = ["done", "partial", "budget_stop"];
   const comparableRuns = runs.filter((r) => TERMINAL.includes(r.status));
+  const selectedA = comparableRuns.find((r) => r.id === a);
+  const selectedB = comparableRuns.find((r) => r.id === b);
+  const runOptions = (counterpart: EvalRunListItem | undefined) =>
+    comparableRuns.map((r) => ({
+      value: r.id,
+      label: `${r.setName} · ${r.configVersionLabel}`,
+      disabled: counterpart !== undefined && r.setId !== counterpart.setId,
+    }));
 
   if (incomparable) {
     return (
@@ -156,7 +165,7 @@ export default function EvalComparePage() {
             placeholder="基线（较早）"
             value={a || undefined}
             onChange={(v) => setParams({ a: v, ...(b ? { b } : {}) })}
-            options={comparableRuns.map((r) => ({ value: r.id, label: `${r.setName} · ${r.configVersionLabel}` }))}
+            options={runOptions(selectedB)}
           />
           <Select
             aria-label="候选 run"
@@ -164,7 +173,7 @@ export default function EvalComparePage() {
             placeholder="候选（较新）"
             value={b || undefined}
             onChange={(v) => setParams({ ...(a ? { a } : {}), b: v })}
-            options={comparableRuns.map((r) => ({ value: r.id, label: `${r.setName} · ${r.configVersionLabel}` }))}
+            options={runOptions(selectedA)}
           />
         </Flex>
       </div>
@@ -196,20 +205,17 @@ export default function EvalComparePage() {
   ];
 
   const exportCsv = () => {
-    const lines = ["指标,基线,候选,Δ"];
-    for (const m of metricRows) {
-      lines.push(`${METRIC_LABEL[m.key]},${m.a ?? ""},${m.b ?? ""},${m.delta ?? ""}`);
-    }
-    lines.push("");
-    lines.push("#,问题,基线判定,候选判定");
-    for (const c of data.cases) lines.push(`${c.seq},"${c.question}",${c.a.verdict},${c.b.verdict}`);
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `eval-compare-${a}-${b}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    const table: CsvValue[][] = [
+      ["指标", "基线", "候选", "Δ"],
+      ...metricRows.map((m) => [METRIC_LABEL[m.key], m.a, m.b, m.delta]),
+      [],
+      ["#", "问题", "基线判定", "候选判定"],
+      ...data.cases.map((c) => [c.seq, c.question, c.a.verdict, c.b.verdict]),
+    ];
+    downloadCsv(`eval-compare-${a}-${b}.csv`, table, {
+      alwaysQuote: true,
+      neutralizeFormulas: true,
+    });
   };
 
   return (

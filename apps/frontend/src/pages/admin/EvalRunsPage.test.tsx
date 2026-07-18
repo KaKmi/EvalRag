@@ -73,3 +73,14 @@ it("勾选 1 行 → 「对比」disabled", async () => {
   fireEvent.click(screen.getAllByRole("checkbox")[1]);
   expect(await screen.findByRole("button", { name: /对\s*比/ })).toBeDisabled();
 });
+
+it("repeatCount > 1 时按执行单元计算运行进度和中断计数", async () => {
+  vi.mocked(client.getEvalRuns).mockResolvedValue([
+    run({ id: "run-running", status: "running", totalCases: 2, doneCases: 3, repeatCount: 3 }),
+    run({ id: "run-partial", status: "partial", totalCases: 2, doneCases: 4, repeatCount: 3 }),
+  ]);
+  renderPage();
+
+  expect(await screen.findByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+  expect(screen.getByText("4/6")).toBeInTheDocument();
+});
