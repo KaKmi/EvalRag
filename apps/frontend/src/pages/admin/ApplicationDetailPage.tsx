@@ -1281,6 +1281,53 @@ function ReleaseCheckResult({ check }: { check: ReleaseCheck }) {
             ? "还有问题没解决，暂不能上线"
             : `检查状态：${check.status}`}
       </div>
+      {/*
+        B1/F5：**无 node 的 issue 的渲染出口**。
+        下面的节点卡片按 `i.node === node` 过滤，而评测门禁 issue 天然没有 node 字段
+        ——不在这里单独渲染，它们一条都显示不出来，门禁做了等于没做。
+
+        分区判据用**排除法**（`severity !== "warning"` 才算阻断）：
+        `toReleaseCheck` 是手写映射，库中历史行不过 Zod，severity 可能是 undefined；
+        若写成白名单 `=== "error"`，历史的阻断 issue 会被误渲染成「不阻断的提示」。
+      */}
+      {(() => {
+        const globalIssues = check.issues.filter((i) => !i.node);
+        if (globalIssues.length === 0) return null;
+        const blocking = globalIssues.filter((i) => i.severity !== "warning");
+        const advisory = globalIssues.filter((i) => i.severity === "warning");
+        return (
+          <>
+            {blocking.length > 0 && (
+              <Alert
+                type="error"
+                showIcon
+                message="发布检查未通过"
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {blocking.map((i) => (
+                      <li key={i.code}>{i.message}</li>
+                    ))}
+                  </ul>
+                }
+              />
+            )}
+            {advisory.length > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                message="评测提示（不阻断上线）"
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {advisory.map((i) => (
+                      <li key={i.code}>{i.message}</li>
+                    ))}
+                  </ul>
+                }
+              />
+            )}
+          </>
+        );
+      })()}
       {PROMPT_NODES.map((node) => {
         const s = summary?.[node];
         const nodeIssues = check.issues.filter((i) => i.node === node);
