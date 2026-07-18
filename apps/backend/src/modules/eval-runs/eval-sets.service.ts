@@ -8,6 +8,7 @@ import type {
   CreateEvalCaseRequest,
   CreateEvalSetRequest,
   EvalCase,
+  EvalCaseRef,
   EvalCaseStatus,
   EvalSet,
   ImportEvalCasesRequest,
@@ -63,6 +64,11 @@ function toEvalCase({ case: row, version }: EvalCaseWithVersion): EvalCase {
 @Injectable()
 export class EvalSetsService {
   constructor(private readonly repo: EvalSetsRepository) {}
+
+  /** B1/F2：这条 trace 已进过哪些评测集（Trace 详情按钮两态）。未入集返回 []，不是 null。 */
+  async findCaseRefsBySourceTrace(sourceTraceId: string): Promise<EvalCaseRef[]> {
+    return this.repo.findCaseRefsBySourceTrace(sourceTraceId);
+  }
 
   async list(): Promise<EvalSet[]> {
     return (await this.repo.listAggregates()).map(toEvalSet);

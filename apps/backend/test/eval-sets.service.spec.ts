@@ -22,6 +22,8 @@ interface CaseFixture {
   goldDocIds?: string[];
   tags?: string[];
   goldStale?: boolean;
+  sourceTraceId?: string;
+  deletedAt?: Date;
 }
 
 function makeSet(id: string, name: string): EvalSetRow {
@@ -52,9 +54,9 @@ function setup(opts: { existingNames?: string[]; cases?: CaseFixture[] } = {}) {
       status: fixture.status ?? "draft",
       currentVersion: version,
       goldStale: fixture.goldStale ?? false,
-      sourceTraceId: null,
+      sourceTraceId: fixture.sourceTraceId ?? null,
       createdAt: now,
-      deletedAt: null,
+      deletedAt: fixture.deletedAt ?? null,
     });
     versions.push({
       id: `${fixture.id}-v${version}`,
@@ -77,6 +79,14 @@ function setup(opts: { existingNames?: string[]; cases?: CaseFixture[] } = {}) {
   const repo = {
     async findSetById(id: string): Promise<EvalSetRow | undefined> {
       return sets.find((s) => s.id === id && s.deletedAt === null);
+    },
+    async findCaseRefsBySourceTrace(sourceTraceId: string) {
+      return cases
+        .filter((c) => c.sourceTraceId === sourceTraceId && c.deletedAt === null)
+        .flatMap((c) => {
+          const set = sets.find((s) => s.id === c.setId && s.deletedAt === null);
+          return set ? [{ setId: set.id, setName: set.name, caseId: c.id }] : [];
+        });
     },
     async findSetByName(name: string): Promise<EvalSetRow | undefined> {
       return sets.find((s) => s.deletedAt === null && s.name.toLowerCase() === name.toLowerCase());
@@ -380,5 +390,57 @@ describe("EvalSetsService", () => {
     expect(res.imported).toBe(0);
     expect(res.errors).toEqual([{ row: 1, message: "第 1 行缺少 gold_answer" }]);
     expect(cases).toHaveLength(0);
+  });
+});
+
+// —— B1/F2：Trace 详情「加入评测集」按钮的两态判据 ——
+
+describe("findCaseRefsBySourceTrace", () => {
+  const TRACE = "a".repeat(32);
+
+  it("已入集的 trace 返回集合信息", async () => {
+    const { service } = setup({
+      cases: [{ id: "c1", setId: "s1", status: "draft", sourceTraceId: TRACE }],
+    });
+    await expect(service.findCaseRefsBySourceTrace(TRACE)).resolves.toEqual([
+      { setId: "s1", setName: "默认集", caseId: "c1" },
+    ]);
+  });
+
+  it("未入集返回空数组（不是 null）", async () => {
+    const { service } = setup({ cases: [] });
+    await expect(service.findCaseRefsBySourceTrace("b".repeat(32))).resolves.toEqual([]);
+  });
+
+  it("软删的用例不算已入集", async () => {
+    const { service } = setup({
+      cases: [
+        { id: "c1", setId: "s1", status: "draft", sourceTraceId: TRACE, deletedAt: new Date() },
+      ],
+    });
+    await expect(service.findCaseRefsBySourceTrace(TRACE)).resolves.toEqual([]);
+  });
+
+  it("同一条 trace 进了多个集时全部返回", async () => {
+    const { service, sets } = setup({
+      cases: [
+        { id: "c1", setId: "s1", status: "draft", sourceTraceId: TRACE },
+        { id: "c2", setId: "s2", status: "draft", sourceTraceId: TRACE },
+      ],
+    });
+    sets.push({
+      id: "s2",
+      name: "第二个集",
+      description: "",
+      kbIds: [],
+      createdBy: "admin",
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    });
+    await expect(service.findCaseRefsBySourceTrace(TRACE)).resolves.toEqual([
+      { setId: "s1", setName: "默认集", caseId: "c1" },
+      { setId: "s2", setName: "第二个集", caseId: "c2" },
+    ]);
   });
 });

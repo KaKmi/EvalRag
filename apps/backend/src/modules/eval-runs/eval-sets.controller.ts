@@ -8,16 +8,19 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
 } from "@nestjs/common";
 import {
   CreateEvalCaseRequestSchema,
   CreateEvalSetRequestSchema,
+  EvalCaseRefQuerySchema,
   ImportEvalCasesRequestSchema,
   UpdateEvalCaseRequestSchema,
   UpdateEvalSetRequestSchema,
   type EvalCase,
   type EvalCaseListResponse,
+  type EvalCaseRefListResponse,
   type EvalSet,
   type EvalSetListResponse,
   type ImportEvalCasesResponse,
@@ -31,6 +34,16 @@ type AuthedRequest = { user: AuthenticatedUser };
 @Controller("eval/sets")
 export class EvalSetsController {
   constructor(private readonly service: EvalSetsService) {}
+
+  /**
+   * B1/F2：必须声明在**所有含 `:id` 的路由之前**——否则一旦有人补上 `@Get(":id")`，
+   * "case-refs" 会被当成 id 吞掉（`eval-runs.controller.ts:49` 记过这个真实教训）。
+   */
+  @Get("case-refs") caseRefs(@Query() raw: unknown): Promise<EvalCaseRefListResponse> {
+    const parsed = EvalCaseRefQuerySchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues);
+    return this.service.findCaseRefsBySourceTrace(parsed.data.sourceTraceId);
+  }
 
   @Get() list(): Promise<EvalSetListResponse> {
     return this.service.list();

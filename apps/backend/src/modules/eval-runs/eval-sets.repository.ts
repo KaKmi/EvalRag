@@ -1,4 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
+import type { EvalCaseRef } from "@codecrush/contracts";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
@@ -141,6 +142,25 @@ export class EvalSetsRepository {
   }
 
   /** 大小写不敏感查重（走 `eval_sets_name_unique` 的 `lower(name) WHERE deleted_at IS NULL` 部分索引）。 */
+  /**
+   * B1/F2：这条 trace 已进过哪些评测集（Trace 详情按钮的两态判据）。
+   * 软删的用例与软删的集都不算——按钮会因此显示「加入评测集」而不是「已在评测集」，
+   * 用户可以重新入集，这正是期望行为。
+   */
+  async findCaseRefsBySourceTrace(sourceTraceId: string): Promise<EvalCaseRef[]> {
+    return this.db
+      .select({ setId: evalCases.setId, setName: evalSets.name, caseId: evalCases.id })
+      .from(evalCases)
+      .innerJoin(evalSets, eq(evalSets.id, evalCases.setId))
+      .where(
+        and(
+          eq(evalCases.sourceTraceId, sourceTraceId),
+          isNull(evalCases.deletedAt),
+          isNull(evalSets.deletedAt),
+        ),
+      );
+  }
+
   async findSetByName(name: string): Promise<EvalSetRow | undefined> {
     const rows = await this.db
       .select()
