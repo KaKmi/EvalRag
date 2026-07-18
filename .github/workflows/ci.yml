@@ -83,14 +83,16 @@ jobs:
       - name: start infra
         run: docker compose -f infra/docker-compose.yml --profile infra up -d --wait
       - name: create migration test database
-        run: docker compose -f infra/docker-compose.yml exec -T postgres psql -U codecrush -d codecrush -c 'CREATE DATABASE codecrush_mig_test'
+        run: docker compose -f infra/docker-compose.yml --profile infra exec -T postgres psql -U codecrush -d codecrush -c 'CREATE DATABASE codecrush_mig_test'
       # --wait 只等有 healthcheck 的服务，collector 没有 healthcheck。
       # otel_traces 由 collector 的 clickhouse exporter 建（create_schema: true）；
       # 测试 harness 直接往该表 insert（helpers/evaluation-infra.ts:94），表不在就直接炸。
       # 必须显式等，且等不到要**失败**——静默继续会让测试以「查不到数据」的形式假失败。
       - name: wait for otel_traces table
         run: |
-          # collector 可能延迟到首次导出才建表：先 POST 一条最小 OTLP 触发建表，再轮询。
+          # 建表发生在 exporter 的 Start()，**轮询才是真正的机制**。这条空 OTLP POST 只是
+          # 一个廉价的兜底探针（万一某版本改成首次导出才建表），空 resourceSpans 不产生
+          # 任何 span，失败也无所谓（|| true）。
           curl -s -X POST "http://localhost:4318/v1/traces" \
             -H 'Content-Type: application/json' -d '{"resourceSpans":[]}' >/dev/null || true
           for i in $(seq 1 60); do
@@ -100,9 +102,9 @@ jobs:
             sleep 1
           done
           echo "::error::otel_traces never appeared; collector logs follow"
-          docker compose -f infra/docker-compose.yml logs otel-collector
+          docker compose -f infra/docker-compose.yml --profile infra logs otel-collector
           exit 1
       - run: pnpm --filter @codecrush/backend test:infra
       - name: dump infra logs on failure
         if: failure()
-        run: docker compose -f infra/docker-compose.yml logs --tail 200
+        run: docker compose -f infra/docker-compose.yml --profile infra logs --tail 200
