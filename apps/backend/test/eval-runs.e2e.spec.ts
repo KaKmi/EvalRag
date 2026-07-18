@@ -54,6 +54,28 @@ jest.setTimeout(180_000);
 const hex32 = () => randomUUID().replaceAll("-", "");
 const hex16 = () => hex32().slice(0, 16);
 
+/**
+ * N 方汇合闸：前 N−1 个到达者挂起，第 N 个到达时一起放行。
+ *
+ * 用途见「缺口 13」的 TOCTOU 用例：真并发下两个请求**是否**同时落在
+ * 预检与 INSERT 之间的窗口里，取决于事件循环与连接池的调度，靠 `Promise.all`
+ * 碰运气会是 flake 之源（碰不上时预检先命中，测的就不是唯一索引了）。
+ * 用闸把「两个请求都已越过预检、都停在插入点」变成**确定性**前置条件，
+ * 于是那条 409 只可能来自真库的原子兜底。
+ */
+function createBarrier(parties: number): () => Promise<void> {
+  let arrived = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return async () => {
+    arrived += 1;
+    if (arrived >= parties) release();
+    await gate;
+  };
+}
+
 const APP_ID = randomUUID();
 const CONFIG_VERSION_ID = randomUUID();
 const ACTOR = "e2e@codecrush.dev";
@@ -571,6 +593,80 @@ describeInfra("E-W2a 离线评测闭环（HTTP e2e，真 PG + 真 ClickHouse）"
     expect(conflict.body.message).toBe("已有评测正在运行，请等待完成或先停止");
     // force 也绕不过全局串行（串行守卫在幂等检查之前）。
     await startRun(setId, { force: true }).expect(409);
+  });
+
+  // ═══════════════ 缺口 13：全局「同时至多 1 个活跃 run」的原子性（HTTP 层） ═══════════════
+  //
+  // 与紧邻上面那条 §9.8 的分工（刻意不重复）：
+  //  · §9.8 是**串行**的——第一个 POST 已经返回后才发第二个，命中的是 service 的
+  //    `findActiveRun()` 快速路径。它证明不了并发安全：那条预检与 INSERT 之间既无事务
+  //    也无锁，两个请求本来就能双双越过它（018 §12 缺口 13 的 TOCTOU）。
+  //  · 下面两条钉的是**并发**语义，且经真 HTTP + 真唯一索引。
+
+  /** 库里当前 queued/running 的行数——「至多 1」这个不变式的唯一权威判据。 */
+  async function activeRunCount(): Promise<number> {
+    const res = await harness.pool.query(
+      "SELECT count(*)::int AS n FROM eval_runs WHERE status IN ('queued','running')",
+    );
+    return res.rows[0].n as number;
+  }
+
+  it("缺口 13 · 真并发同时 POST /api/eval/runs → 恰好 1 个 201 + 1 个 409，库里只留 1 条活跃 run", async () => {
+    const setId = await seedReviewedSet("并发双开集", [GOOD_QUESTION]);
+
+    // 同一轮事件循环里一起发出，不等第一个返回。
+    const results = await Promise.all([startRun(setId), startRun(setId)]);
+    const statuses = results.map((r) => r.status).sort((a, b) => a - b);
+
+    // 无论 409 由预检还是由唯一索引给出，对调用方可见的结论必须是同一条：只有一个赢家。
+    expect(statuses).toEqual([201, 409]);
+    expect(await activeRunCount()).toBe(1);
+
+    const created = results.find((r) => r.status === 201)!;
+    const rejected = results.find((r) => r.status === 409)!;
+    expect(created.body.status).toBe("queued");
+    // 两条 409 路径（预检 / 23505 兜底）抛的是同一个 ConflictException ⇒ 文案对调用方一致，
+    // 且**不是**幂等冲突那种裸 `{code, recentRunId}` 形状（前端按形状分流，见 §9.8 注释）。
+    expect(rejected.body.message).toBe("已有评测正在运行，请等待完成或先停止");
+    expect(rejected.body.code).toBeUndefined();
+  });
+
+  it("缺口 13 · 两个请求双双越过预检（TOCTOU 窗口）→ 唯一索引原子兜底仍是 1 个 201 + 1 个 409", async () => {
+    const setId = await seedReviewedSet("TOCTOU 集", [GOOD_QUESTION]);
+
+    // 闸设在**插入点**上：两个请求都到齐才放行 ⇒ 两者都已越过 `findActiveRun()` 预检
+    // （此刻库里还是空的，预检本就放行），预检因此在本用例里完全出局。
+    // 于是那条 409 只可能来自 `eval_runs_single_active_unique` 的 23505 → ConflictException。
+    const barrier = createBarrier(2);
+    const realInsertRun = evalRunsRepo.insertRun.bind(evalRunsRepo);
+    const insertSpy = jest
+      .spyOn(evalRunsRepo, "insertRun")
+      .mockImplementation(async (input: Parameters<typeof realInsertRun>[0]) => {
+        await barrier();
+        return await realInsertRun(input);
+      });
+
+    try {
+      const results = await Promise.all([startRun(setId), startRun(setId)]);
+      const statuses = results.map((r) => r.status).sort((a, b) => a - b);
+
+      // 两个请求确实都到了插入点（= 预检双双放行），否则本用例测的就不是原子兜底。
+      expect(insertSpy).toHaveBeenCalledTimes(2);
+      expect(statuses).toEqual([201, 409]);
+      // 真库的原子性：两条 INSERT 都发出去了，只有一条落了地。
+      expect(await activeRunCount()).toBe(1);
+
+      const rejected = results.find((r) => r.status === 409)!;
+      // AC5：兜底 409 的响应体与既有全局串行 409 **逐字节相同**——前端按形状分流，
+      // 若哪天有人给它换文案或包一层 code，并发那一路会在前端被当成另一类错误。
+      expect(rejected.body).toEqual({
+        message: "已有评测正在运行，请等待完成或先停止",
+        error: "Conflict",
+        statusCode: 409,
+      });
+    } finally {
+      insertSpy.mockRestore();
+    }
   });
 
   it("§9.8 空集：0 条已审核用例 → 422「所选范围没有已审核用例」（原型 §19.2 逐字）", async () => {
