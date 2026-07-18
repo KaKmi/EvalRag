@@ -1,8 +1,12 @@
 import {
   ChatRequestSchema,
   ChatStreamEventSchema,
+  ReplayRequestSchema,
+  ReplayScoresEventSchema,
   type ChatRequest,
   type ChatStreamEvent,
+  type ReplayRequest,
+  type ReplayStreamEvent,
 } from "@codecrush/contracts";
 
 const TOKEN_KEY = "token";
@@ -70,6 +74,60 @@ export async function* openChatStream(
       if (payload !== null) {
         yield ChatStreamEventSchema.parse(JSON.parse(payload));
       }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * E-W2b F7：单条重放 SSE 流。帧类型 = C 端 `ChatStreamEvent` + 重放专用 `replay_scores`。
+ * 复用 chat 流的 fetch/解析模式；限频 429 / 版本 422 在写 SSE 头前抛（干净 HTTP 状态）。
+ */
+export async function* streamReplay(
+  req: ReplayRequest,
+  signal?: AbortSignal,
+): AsyncIterable<ReplayStreamEvent> {
+  const parsed = ReplayRequestSchema.parse(req);
+  const token = localStorage.getItem(TOKEN_KEY);
+  const resp = await fetch("/api/eval/replay", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(parsed),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    throw new ChatStreamError(resp.status, `replay stream failed: ${resp.status} ${resp.statusText}`);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const parseFrame = (payload: string): ReplayStreamEvent => {
+    const json: unknown = JSON.parse(payload);
+    if ((json as { type?: string }).type === "replay_scores") {
+      return ReplayScoresEventSchema.parse(json);
+    }
+    return ChatStreamEventSchema.parse(json);
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop() ?? "";
+      for (const frame of frames) {
+        const payload = extractDataPayload(frame);
+        if (payload === null) continue;
+        yield parseFrame(payload);
+      }
+    }
+    if (buf.trim()) {
+      const payload = extractDataPayload(buf);
+      if (payload !== null) yield parseFrame(payload);
     }
   } finally {
     reader.releaseLock();

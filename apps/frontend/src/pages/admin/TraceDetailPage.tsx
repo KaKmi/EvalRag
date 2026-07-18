@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Collapse, message, Segmented, Spin } from "antd";
+import { Button, Collapse, message, Segmented, Spin, Tooltip } from "antd";
 import type { TraceDetailResponse, TraceQualityDetail, TraceStatus } from "@codecrush/contracts";
 import { getTrace, getTraceQuality } from "../../api/client";
+import ReplayModal, { type ReplaySource } from "./ReplayModal";
 import {
   autoSelectSpan,
   buildOtlpJson,
@@ -37,6 +38,7 @@ export default function TraceDetailPage() {
   const [selSid, setSelSid] = useState<string | null>(null);
   const [view, setView] = useState<"timeline" | "tree">("timeline");
   const [jsonOpen, setJsonOpen] = useState(false);
+  const [replayOpen, setReplayOpen] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -150,6 +152,17 @@ export default function TraceDetailPage() {
           {st.label}
         </span>
         <div style={{ flex: 1 }} />
+        {/* 原型 §10 顶部操作组：本波仅「↻ 重放」（加入评测集/问题池等属其它波）。 */}
+        <Tooltip title={meta.agentId ? "" : "trace 缺少应用信息，无法重放"}>
+          <Button
+            type="primary"
+            ghost
+            disabled={!meta.agentId}
+            onClick={() => setReplayOpen(true)}
+          >
+            ↻ 重放
+          </Button>
+        </Tooltip>
         <div onClick={() => nav("/admin/prompts")} style={headBtn}>
           跳转 Prompt 版本 →
         </div>
@@ -157,6 +170,22 @@ export default function TraceDetailPage() {
           {"{ }"} 复制 JSON
         </div>
       </div>
+
+      <ReplayModal
+        open={replayOpen}
+        source={
+          meta.agentId
+            ? ({
+                applicationId: meta.agentId,
+                configVersionId: meta.promptVersionId ?? "",
+                question: meta.userInput,
+                sourceTraceId: data.traceId,
+                originalVersionLabel: meta.promptVersionId ? "原版本" : undefined,
+              } satisfies ReplaySource)
+            : null
+        }
+        onClose={() => setReplayOpen(false)}
+      />
 
       {/* meta 卡 */}
       <div

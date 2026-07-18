@@ -41,6 +41,8 @@ export type QualitySignal = z.infer<typeof QualitySignalSchema>;
 // —— M9 W2：Trace 详情 meta（头部六项聚合）——
 export const TraceDetailMetaSchema = z.object({
   userInput: z.string(),
+  /** 应用 id（读 `gen_ai.agent.id`；E-W2b 重放需据此拉配置版本列表）。加性，旧数据可 null。 */
+  agentId: z.string().nullable(),
   agentName: z.string().nullable(),
   genModel: z.string().nullable(),
   genModelVersion: z.string().nullable(), // W2 恒 null（无数据源）

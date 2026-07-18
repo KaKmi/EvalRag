@@ -333,7 +333,8 @@ SDK **不以 RAG 阶段名（改写/意图/召回…）为基元**，而以 Open
 
 - `apps/backend/src/modules/eval-runs` 拥有评测集/用例/用例版本/run/逐用例结果，以及 run 引擎（发起、停止、预算熔断、全局串行租约）。**它是新的依赖顶点**（`AGENTS.md` 边界 1 已同步）：run 引擎须同时驱动 chat 编排与 evaluations 判分，放进任一方都会耦死；置于两者之上则图仍无环。完整论证见 `018` 决策 A。
 - 允许的依赖边**仅**：`eval-runs → chat`（`OrchestrationService.runForEvaluation`）、`eval-runs → evaluations`（`EvaluationJudgeService.scoreOffline`）、`eval-runs → applications`（`resolveForTest`，preview=true 的显式版本解析）。**`evaluations` 与 `chat` 均不反向依赖 `eval-runs`**——017 的 evaluations 域边界不变。
-- 导出面最小化：`EvaluationsModule` 只导出 `EvaluationJudgeService`（不导出 4 个 evaluator——「怎么判分」是 evaluations 的域知识）；`ChatModule` 只新增导出 `OrchestrationService`。
+- 导出面最小化：`EvaluationsModule` 只导出 `EvaluationJudgeService` + `EvaluationsRepository`（E-W2b 重放判分复用在线设置）；`ChatModule` 只新增导出 `OrchestrationService`。
+- **E-W2b 反向依赖解耦（缺口 5 收口）**：`applications` 暴露 `registerDeletionGuard(guard)` 注册端口，`eval-runs` 注册「活跃 run 引用检查器」——依赖方向仍 `eval-runs → applications`，applications 不知道 eval-runs（回调解耦，lint 边界 0）。重放端点 `POST /eval/replay` 归 `eval-runs`（它已依赖 chat/applications/evaluations，是唯一无新边的落点；原型 §12.3 的 `POST /traces/:id/replay` 是 API 草案，改此以守依赖图，UI 行为不变）。
 - **离线 run 结果存 Postgres，绝不发 `rag.eval` span**：ClickHouse 的 `codecrush_eval_targets_mv` 只按 `SpanName='rag.eval'` 过滤、**不看 preview**，发 span 即污染屏1 在线总览。写侧隔离靠存储物理分离，不靠过滤条件。见 `018` 决策 B（附守护测试）。
 - run 产生的 preview trace 照常经 OTLP 进 ClickHouse（`rag.pipeline`，`preview=true` + `rag.eval.run_id`）——给编排 trace 打标 ≠ 发评测 span，前者不进 MV。
 - 队列 job 注册在 platform queue（`EVAL_RUN_QUEUE`），业务状态机留在 eval-runs；跨域引用（`application_id`/`config_version_id`/模型 id）只存 id、不建 FK。

@@ -22,6 +22,7 @@ function scores(overrides: Partial<OfflineEvaluationScores> = {}): OfflineEvalua
     answerRelevancy: 90,
     contextPrecision: 90,
     correctness: null,
+    citation: null,
     evidence: { faithfulness: ["ok"] },
     usage: { inputTokens: 0, outputTokens: 0 },
     ...overrides,
@@ -52,6 +53,12 @@ interface SetupOptions {
   scores?: Partial<OfflineEvaluationScores>;
   runStatus?: EvalRunRow["status"];
   recorded?: string[];
+  /** F5：每题重复次数（默认 1）。 */
+  repeatCount?: number;
+  /** F2：这些 seq 的用例带 gold 引用（用于检索指标回填断言）。 */
+  goldRefSeqs?: number[];
+  /** F2：这些 seq 的编排返回 retrievalExecuted=false（CHAT 短路）。 */
+  noRetrievalOn?: number[];
   /** 注入的 `AppConfigService.evalRunCaseTimeoutMs`（默认取离线默认值 120s）。 */
   caseTimeoutMs?: number;
 }
@@ -68,6 +75,7 @@ function setup(opts: SetupOptions = {}) {
     offlineJudgeVersion: "offline-v1",
     status: opts.runStatus ?? "queued",
     scope: "all",
+    repeatCount: opts.repeatCount ?? 1,
     caseVersionSnapshot: snapshot,
     totalCases: snapshot.length,
     doneCases: 0,
@@ -127,16 +135,24 @@ function setup(opts: SetupOptions = {}) {
       }
     },
     async listRecordedCaseVersionIds() {
-      return opts.recorded ?? [];
+      // F5：唯一索引现含 repeat_index → 返回 (caseVersionId, repeatIndex) 二元组。
+      return (opts.recorded ?? []).map((caseVersionId) => ({ caseVersionId, repeatIndex: 1 }));
     },
     async findCaseVersionsByIds(ids: string[]) {
-      return ids.map((id) => ({
-        id,
-        caseId: id.replace("cv-", "case-"),
-        version: 1,
-        question: `问题 ${id.replace("cv-", "")}`,
-        goldPoints: [] as string[],
-      }));
+      return ids.map((id) => {
+        const seq = Number(id.replace("cv-", ""));
+        return {
+          id,
+          caseId: id.replace("cv-", "case-"),
+          version: 1,
+          question: `问题 ${id.replace("cv-", "")}`,
+          goldPoints: [] as string[],
+          // F2：带 gold 引用的用例（doc 级 ref），供检索指标回填断言。
+          goldDocRefs: (opts.goldRefSeqs ?? []).includes(seq)
+            ? [{ docId: `d${seq}`, chunkId: null, docName: "", section: null }]
+            : [],
+        };
+      });
     },
   };
 
@@ -149,12 +165,16 @@ function setup(opts: SetupOptions = {}) {
       const timedOut = (opts.timeoutOn ?? []).includes(seq);
       const errored = (opts.errorOn ?? []).includes(seq);
       const empty = (opts.emptyAnswerOn ?? []).includes(seq);
+      const retrievalExecuted = !(opts.noRetrievalOn ?? []).includes(seq);
       return {
         traceId: `trace-${seq}`,
         // 编排失败与「成功但答案为空」在返回值上同形：error 事件不抛，生成器正常收尾。
         replyText: errored || empty ? "" : `回答 ${seq}`,
         // 真实 chunkId —— 绝不合成 c1/c2（Global Constraints）。
         hits: [{ chunkId: `chunk-${seq}`, text: `片段 ${seq}`, finalScore: 0.9 }],
+        // F2：检索排序列表（含 docId）——gold 指标据此比对；这里让 docId 匹配 goldRefSeqs 的 ref。
+        retrievedHits: [{ chunkId: `chunk-${seq}`, docId: `d${seq}` }],
+        retrievalExecuted,
         usage: { inputTokens: opts.usagePerCase ?? 0, outputTokens: 0 },
         isFallback: false,
         timedOut,
@@ -403,6 +423,71 @@ describe("EvalRunWorkerProcessor", () => {
     await processor.processRun("r1");
     expect(orchestration.runForEvaluation).toHaveBeenCalledTimes(1);
     expect(results.map((r) => r.seq)).toEqual([2]);
+  });
+
+  it("F5：repeatCount=2 × 1 用例 → 2 行、repeat_index 1..2、done_cases=2", async () => {
+    const { processor, results, runs } = setup({ snapshot: [c(1)], repeatCount: 2 });
+    await processor.processRun("r1");
+    expect(results).toHaveLength(2);
+    expect(results.map((r) => r.repeatIndex).sort()).toEqual([1, 2]);
+    expect(runs.get("r1")!.doneCases).toBe(2);
+  });
+
+  it("F5：重试续跑跳过已录 (caseVersionId, repeatIndex) unit", async () => {
+    const { processor, results } = setup({
+      snapshot: [c(1)],
+      repeatCount: 2,
+      runStatus: "running",
+      recorded: ["cv-1"], // repeatIndex=1 已录 → 只跑 repeatIndex=2
+    });
+    await processor.processRun("r1");
+    expect(results).toHaveLength(1);
+    expect(results[0].repeatIndex).toBe(2);
+  });
+
+  it("F2：带 gold 引用的用例回填检索三列；无 gold → 三列 null", async () => {
+    const { processor, results } = setup({ snapshot: [c(1), c(2)], goldRefSeqs: [1] });
+    await processor.processRun("r1");
+    const r1 = results.find((r) => r.seq === 1)!;
+    const r2 = results.find((r) => r.seq === 2)!;
+    // seq1 的 retrievedHits docId=d1 命中 goldRef d1 → 三列非空。
+    expect(r1.contextRecall).toBe(100);
+    expect(r1.ndcg5).toBe(100);
+    expect(r1.hitRate5).toBe(100);
+    // seq2 无 gold → 三列 null。
+    expect(r2.contextRecall).toBeNull();
+    expect(r2.ndcg5).toBeNull();
+    expect(r2.hitRate5).toBeNull();
+  });
+
+  it("F2：CHAT 短路（retrievalExecuted=false）→ 检索三列 null，即便有 gold", async () => {
+    const { processor, results } = setup({
+      snapshot: [c(1)],
+      goldRefSeqs: [1],
+      noRetrievalOn: [1],
+    });
+    await processor.processRun("r1");
+    expect(results[0].contextRecall).toBeNull();
+  });
+
+  it("F2：超时路径也回填检索三列（检索指标不依赖答案）", async () => {
+    const { processor, results } = setup({
+      snapshot: [c(1)],
+      goldRefSeqs: [1],
+      timeoutOn: [1],
+    });
+    await processor.processRun("r1");
+    expect(results[0].verdict).toBe("timeout");
+    expect(results[0].contextRecall).toBe(100); // 超时但检索列表仍在
+  });
+
+  it("F4：citation 分数写入结果行（来自 scoreOffline）", async () => {
+    const { processor, results } = setup({
+      snapshot: [c(1)],
+      scores: { citation: 67 },
+    });
+    await processor.processRun("r1");
+    expect(results[0].citation).toBe(67);
   });
 
   it("run 已是终态 → 幂等空转（pg-boss 重投递不该重跑一条跑完的 run）", async () => {

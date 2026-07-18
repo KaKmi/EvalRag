@@ -233,7 +233,7 @@ describe("traceDetail", () => {
     const spans = [mk({ spanId: "root", durationMs: 100 })];
     const json = JSON.parse(
       buildOtlpJson("a".repeat(32), {
-        userInput: "", agentName: null, genModel: null, genModelVersion: null, promptVersionId: null,
+        userInput: "", agentId: null, agentName: null, genModel: null, genModelVersion: null, promptVersionId: null,
         durationMs: 100, inputTokens: 0, outputTokens: 0, cost: null, status: "success", qualitySignals: [],
       }, spans),
     );

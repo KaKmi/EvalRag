@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Drawer,
+  Dropdown,
   Empty,
   Flex,
   Popconfirm,
@@ -14,17 +15,20 @@ import {
   Tooltip,
   Typography,
   message,
+  type MenuProps,
   type TableColumnsType,
 } from "antd";
 import { Link, useParams } from "react-router-dom";
 import type {
   EvalMetricKey,
   EvalRunReport,
+  EvalRunRepeat,
   EvalRunResult,
   EvalRunStatus,
   EvalVerdict,
 } from "@codecrush/contracts";
 import { ApiError, getEvalRunReport, stopEvalRun } from "../../api/client";
+import ReplayModal, { type ReplaySource } from "./ReplayModal";
 
 const { Title, Text } = Typography;
 
@@ -70,10 +74,16 @@ const METRIC_LABEL: Record<EvalMetricKey, string> = {
   answerRelevancy: "相关性",
   correctness: "正确率",
   contextPrecision: "精确率",
+  citation: "引用",
 };
 
-/** W2b 未实现的 4 项（018 决策 E）：不实现、不隐藏——按原型自带空态规则显示「—」。 */
-const PENDING_RETRIEVAL_METRICS = ["Context Recall", "NDCG@5", "命中率@5"];
+/** 检索层 gold 指标的两位小数 / 百分比格式化（原型 §7：`NDCG@5 0.81` / `命中率@5 92%`）。 */
+function formatNdcg5(value: number): string {
+  return (value / 100).toFixed(2);
+}
+function formatHitRate5(value: number): string {
+  return `${value}%`;
+}
 
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
@@ -124,6 +134,7 @@ export default function EvalRunDetailPage() {
   const [sortKey, setSortKey] = useState<EvalMetricKey | "min">("min");
   const [evidenceOf, setEvidenceOf] = useState<Row | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [replaySource, setReplaySource] = useState<ReplaySource | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -166,6 +177,10 @@ export default function EvalRunDetailPage() {
       answerRelevancy: null,
       contextPrecision: null,
       correctness: null,
+      citation: null,
+      contextRecall: null,
+      ndcg5: null,
+      hitRate5: null,
       minMetric: null,
       minScore: null,
       verdict: "unscored" as const,
@@ -174,6 +189,8 @@ export default function EvalRunDetailPage() {
       answer: "",
       durationMs: 0,
       error: null,
+      repeatCount: 1,
+      repeats: [],
       skipped: true,
     }));
     const score = (row: Row) => (sortKey === "min" ? row.minScore : row[sortKey]);
@@ -237,7 +254,27 @@ export default function EvalRunDetailPage() {
   }
 
   const { run, scorecard } = report;
-  const percent = run.totalCases > 0 ? Math.round((run.doneCases / run.totalCases) * 100) : 0;
+  // F5：进度分母是 unit 数（totalCases × repeatCount），doneCases 后端已按 unit 计。
+  const totalUnits = run.totalCases * run.repeatCount;
+  const percent = totalUnits > 0 ? Math.round((run.doneCases / totalUnits) * 100) : 0;
+
+  // F7：行尾「重放该条」打开 ReplayModal（预填 run 的 app/version + 行 question + previewTraceId）。
+  const onReplayRow = (row: Row) => {
+    if (!row.previewTraceId) return;
+    setReplaySource({
+      applicationId: run.applicationId,
+      configVersionId: run.configVersionId,
+      question: row.question,
+      sourceTraceId: row.previewTraceId,
+      originalAnswer: row.answer,
+      originalScores: {
+        faithfulness: row.faithfulness,
+        answerRelevancy: row.answerRelevancy,
+        contextPrecision: row.contextPrecision,
+      },
+      originalVersionLabel: run.configVersionLabel,
+    });
+  };
 
   const columns: TableColumnsType<Row> = [
     { title: "#", dataIndex: "seq", key: "seq", width: 56 },
@@ -288,7 +325,7 @@ export default function EvalRunDetailPage() {
         row.skipped ? (
           <Text type="secondary">—</Text>
         ) : (
-          <Flex gap={10}>
+          <Flex gap={10} align="center">
             {/* 原型 §7：「trace」= 评测与 Trace 的直接接点（preview trace 详情） */}
             {row.previewTraceId ? (
               <Link to={`/admin/traces/${row.previewTraceId}`}>trace</Link>
@@ -303,6 +340,25 @@ export default function EvalRunDetailPage() {
             >
               判分依据
             </Button>
+            {/* 原型 §7 行尾「…」快捷操作。本波仅「重放该条」（无 preview trace → 禁用）；
+                「加入问题池 / 标记忽略」属 E-W4，不做。 */}
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: [
+                  {
+                    key: "replay",
+                    label: "重放该条",
+                    disabled: row.previewTraceId === null,
+                    onClick: () => onReplayRow(row),
+                  },
+                ] satisfies MenuProps["items"],
+              }}
+            >
+              <Button type="link" size="small" style={{ padding: 0, height: "auto" }}>
+                …
+              </Button>
+            </Dropdown>
           </Flex>
         ),
     },
@@ -358,6 +414,7 @@ export default function EvalRunDetailPage() {
       <Flex gap={8} wrap style={{ marginBottom: 8 }}>
         <Card size="small" style={{ flex: "1 1 320px" }} title={<span style={{ color: "#1677ff" }}>检索层</span>}>
           <Flex wrap gap={8}>
+            {/* 精确率是 LLM 判分（不依赖 gold）——始终可点排序、显真值 */}
             <MetricCell
               label="Context Precision"
               metric="contextPrecision"
@@ -365,10 +422,35 @@ export default function EvalRunDetailPage() {
               active={sortKey === "contextPrecision"}
               onClick={() => setSortKey("contextPrecision")}
             />
-            {PENDING_RETRIEVAL_METRICS.map((label) => (
-              <PendingMetricCell key={label} label={label} total={run.totalCases} />
-            ))}
+            {/* gold-docs 三项（F2）：无 gold（withGold=0）时显「—」，格式化按原型 §7。 */}
+            <RetrievalMetricCell
+              label="Context Recall"
+              testId="scorecard-contextRecall"
+              aggregate={scorecard.retrieval.contextRecall}
+              noGold={scorecard.retrieval.goldCoverage.withGold === 0}
+            />
+            <RetrievalMetricCell
+              label="NDCG@5"
+              testId="scorecard-ndcg5"
+              aggregate={scorecard.retrieval.ndcg5}
+              noGold={scorecard.retrieval.goldCoverage.withGold === 0}
+              format={formatNdcg5}
+            />
+            <RetrievalMetricCell
+              label="命中率@5"
+              testId="scorecard-hitRate5"
+              aggregate={scorecard.retrieval.hitRate5}
+              noGold={scorecard.retrieval.goldCoverage.withGold === 0}
+              format={formatHitRate5}
+            />
           </Flex>
+          {/* 覆盖率行（原型 §7「gold 38/50 已标」）：有 gold → 已评/gold 计数；无 gold → 空态逐字。 */}
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {scorecard.retrieval.goldCoverage.withGold === 0
+              ? `未标 gold docs，0/${scorecard.retrieval.goldCoverage.total}`
+              : `已评 ${scorecard.retrieval.contextPrecision.scoredCount}/${scorecard.retrieval.contextPrecision.total}` +
+                ` · gold ${scorecard.retrieval.goldCoverage.withGold}/${scorecard.retrieval.goldCoverage.total}`}
+          </Text>
         </Card>
         <Card size="small" style={{ flex: "1 1 320px" }} title={<span style={{ color: "#722ed1" }}>生成层</span>}>
           <Flex wrap gap={8}>
@@ -393,7 +475,13 @@ export default function EvalRunDetailPage() {
               active={sortKey === "correctness"}
               onClick={() => setSortKey("correctness")}
             />
-            <PendingMetricCell label="Citation" total={run.totalCases} />
+            <MetricCell
+              label="Citation"
+              metric="citation"
+              aggregate={scorecard.generation.citation}
+              active={sortKey === "citation"}
+              onClick={() => setSortKey("citation")}
+            />
           </Flex>
         </Card>
       </Flex>
@@ -420,10 +508,21 @@ export default function EvalRunDetailPage() {
           locale={{ emptyText: <Empty description="暂无用例结果" /> }}
           // skipped 灰行（§17.3）
           onRow={(row) => (row.skipped ? { style: { background: "#fafafa" } } : {})}
+          // F5：每题重复 >1 的行可展开，看每次重复的逐次明细（顶层为非空均值）。
+          expandable={{
+            rowExpandable: (row) => !row.skipped && row.repeatCount > 1,
+            expandedRowRender: (row) => <RepeatDetail repeats={row.repeats} />,
+          }}
         />
       </Card>
 
       <EvidenceDrawer row={evidenceOf} onClose={() => setEvidenceOf(null)} />
+
+      <ReplayModal
+        open={replaySource !== null}
+        source={replaySource}
+        onClose={() => setReplaySource(null)}
+      />
     </div>
   );
 }
@@ -450,6 +549,8 @@ function StatusBanner({
   onStop: () => Promise<void>;
 }) {
   const { run, scorecard } = report;
+  // F5：进度分母是 unit 数（totalCases × repeatCount），与顶层 percent 同口径。
+  const totalUnits = run.totalCases * run.repeatCount;
   if (run.status === "done") return null;
 
   if (run.status === "queued" || run.status === "running") {
@@ -458,7 +559,7 @@ function StatusBanner({
         type="info"
         showIcon
         style={{ marginBottom: 8 }}
-        title={run.status === "queued" ? "排队中，等待执行" : `运行中 · ${run.doneCases}/${run.totalCases}`}
+        title={run.status === "queued" ? "排队中，等待执行" : `运行中 · ${run.doneCases}/${totalUnits}`}
         description={<Progress percent={percent} status="active" />}
         action={
           <Popconfirm
@@ -482,14 +583,14 @@ function StatusBanner({
     // §18.A：「手动停止，已完成 23/50」+ 剩余标 skipped
     partial: {
       type: "warning",
-      text: `手动停止，已完成 ${run.doneCases}/${run.totalCases}${
+      text: `手动停止，已完成 ${run.doneCases}/${totalUnits}${
         scorecard.skippedCount > 0 ? ` · ${scorecard.skippedCount} 条未跑` : ""
       }`,
     },
     // §18.A：「预算中断(500k)」
     budget_stop: {
       type: "warning",
-      text: `预算中断（${Math.round(run.tokenBudget / 1000)}k）· 已完成 ${run.doneCases}/${run.totalCases}${
+      text: `预算中断（${Math.round(run.tokenBudget / 1000)}k）· 已完成 ${run.doneCases}/${totalUnits}${
         scorecard.skippedCount > 0 ? ` · ${scorecard.skippedCount} 条未跑` : ""
       }`,
     },
@@ -547,18 +648,77 @@ function MetricCell({
 }
 
 /**
- * W2b 未实现的指标（018 决策 E）——**不隐藏**，按原型 §7 自带的空态规则展示：
- * 「检索层指标显示『—』并注『未标 gold docs』；记分卡该项旁标覆盖率」。
+ * 检索层 gold-docs 三指标（F2）——非 LLM 排序真值、不进 verdict/综合分，故不参与逐用例排序，
+ * 只读展示。`noGold`（本 run 快照无任何 gold 标注）→ 显「—」（原型 §7 空态，覆盖率行统一注）。
  */
-function PendingMetricCell({ label, total }: { label: string; total: number }) {
+function RetrievalMetricCell({
+  label,
+  testId,
+  aggregate,
+  noGold,
+  format,
+}: {
+  label: string;
+  testId: string;
+  aggregate: Aggregate;
+  noGold: boolean;
+  format?: (value: number) => string;
+}) {
+  const dash = noGold || aggregate.value === null;
   return (
     <Flex vertical gap={2} style={{ flex: "1 1 130px", padding: "4px 8px" }}>
       <Text style={{ fontSize: 12 }}>{label}</Text>
-      <b style={{ fontSize: 18, color: "rgba(0,0,0,.25)" }}>—</b>
-      <Text type="secondary" style={{ fontSize: 11 }}>
-        <span>未标 gold docs</span> · 已评 0/{total}
-      </Text>
+      <b data-testid={testId} style={{ fontSize: 18, color: dash ? "rgba(0,0,0,.25)" : scoreColor(aggregate.value) }}>
+        {dash ? "—" : format ? format(aggregate.value as number) : aggregate.value}
+      </b>
     </Flex>
+  );
+}
+
+/** F5：某用例重复次数 >1 时展开的逐次明细（每次的分数 / verdict / trace 链接）。 */
+function RepeatDetail({ repeats }: { repeats: EvalRunRepeat[] }) {
+  const columns: TableColumnsType<EvalRunRepeat> = [
+    { title: "次数", key: "repeatIndex", width: 72, render: (_: unknown, r) => `第 ${r.repeatIndex} 次` },
+    ...(["faithfulness", "answerRelevancy", "correctness", "contextPrecision", "citation"] as const).map(
+      (metric) => ({
+        title: METRIC_LABEL[metric],
+        key: metric,
+        width: 76,
+        render: (_: unknown, r: EvalRunRepeat) => (
+          <span style={{ color: scoreColor(r[metric]) }}>{r[metric] === null ? "—" : r[metric]}</span>
+        ),
+      }),
+    ),
+    {
+      title: "判定",
+      key: "verdict",
+      width: 88,
+      render: (_: unknown, r) => (
+        <Tag color={VERDICT_COLOR[r.verdict]} style={{ margin: 0 }}>
+          {VERDICT_LABEL[r.verdict]}
+        </Tag>
+      ),
+    },
+    {
+      title: "trace",
+      key: "trace",
+      width: 64,
+      render: (_: unknown, r) =>
+        r.previewTraceId ? (
+          <Link to={`/admin/traces/${r.previewTraceId}`}>trace</Link>
+        ) : (
+          <Text type="secondary">trace</Text>
+        ),
+    },
+  ];
+  return (
+    <Table<EvalRunRepeat>
+      size="small"
+      rowKey={(r) => r.repeatIndex}
+      columns={columns}
+      dataSource={repeats}
+      pagination={false}
+    />
   );
 }
 
@@ -567,13 +727,24 @@ const POINT_STATUS: Record<string, { label: string; color: string }> = {
   hit: { label: "一致", color: "green" },
   missing: { label: "缺失", color: "gold" },
   contradicted: { label: "矛盾", color: "red" },
+  // F4 Citation：`[supported]`/`[unsupported]`（citation.evaluator：每处引用是否真支持其结论）。
+  supported: { label: "支持", color: "green" },
+  unsupported: { label: "不支持", color: "red" },
 };
 
 /** §17.3「判分依据抽屉 Drawer 560px · eval_results.judge_evidence」。 */
 function EvidenceDrawer({ row, onClose }: { row: Row | null; onClose: () => void }) {
   return (
-    // antd v6：`width` 已废弃 → `size`（数值语义不变）。§17.3 的 560px 不变。
-    <Drawer title={`判分依据 · #${row?.seq ?? ""}`} size={560} open={row !== null} onClose={onClose}>
+    // 挂在当前页面而非延迟创建 body portal：React 19 + antd v6 开发态下可稳定响应首次点击。
+    <Drawer
+      title={`判分依据 · #${row?.seq ?? ""}`}
+      size={560}
+      open={row !== null}
+      onClose={onClose}
+      getContainer={false}
+      rootStyle={{ position: "fixed" }}
+      forceRender
+    >
       {row && (
         <>
           <Text strong>{row.question}</Text>
@@ -585,7 +756,7 @@ function EvidenceDrawer({ row, onClose }: { row: Row | null; onClose: () => void
               <Text style={{ whiteSpace: "pre-wrap" }}>{row.answer}</Text>
             </Card>
           )}
-          {(["faithfulness", "answerRelevancy", "correctness", "contextPrecision"] as const).map(
+          {(["faithfulness", "answerRelevancy", "correctness", "contextPrecision", "citation"] as const).map(
             (metric) => {
               const lines = row.evidence[metric];
               return (
@@ -618,9 +789,43 @@ function EvidenceDrawer({ row, onClose }: { row: Row | null; onClose: () => void
               );
             },
           )}
+          <RetrievalGoldCard row={row} />
         </>
       )}
     </Drawer>
+  );
+}
+
+/**
+ * 判分依据抽屉的检索层（gold-docs）分数简行（F2）——三项确定性指标**无 LLM evidence**，
+ * 只显分数；本用例无 gold（三项全 NULL）→「未标 gold docs」。比对细节留 trace 链接（spec F2）。
+ */
+function RetrievalGoldCard({ row }: { row: Row }) {
+  const noGold = row.contextRecall === null && row.ndcg5 === null && row.hitRate5 === null;
+  return (
+    <Card size="small" style={{ marginTop: 8 }} title="检索层（gold docs）">
+      {noGold ? (
+        <Text type="secondary">未标 gold docs</Text>
+      ) : (
+        <Flex gap={16} wrap>
+          <span>
+            Context Recall <b style={{ color: scoreColor(row.contextRecall) }}>{row.contextRecall ?? "—"}</b>
+          </span>
+          <span>
+            NDCG@5{" "}
+            <b style={{ color: scoreColor(row.ndcg5) }}>
+              {row.ndcg5 === null ? "—" : formatNdcg5(row.ndcg5)}
+            </b>
+          </span>
+          <span>
+            命中率@5{" "}
+            <b style={{ color: scoreColor(row.hitRate5) }}>
+              {row.hitRate5 === null ? "—" : formatHitRate5(row.hitRate5)}
+            </b>
+          </span>
+        </Flex>
+      )}
+    </Card>
   );
 }
 

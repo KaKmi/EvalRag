@@ -52,7 +52,7 @@ function toEvalCase({ case: row, version }: EvalCaseWithVersion): EvalCase {
     status: row.status as EvalCaseStatus,
     question: version.question,
     goldPoints: version.goldPoints,
-    goldDocIds: version.goldDocIds,
+    goldDocRefs: version.goldDocRefs,
     tags: version.tags,
     sourceTraceId: row.sourceTraceId,
     goldStale: row.goldStale,
@@ -132,7 +132,7 @@ export class EvalSetsService {
       content: {
         question: req.question,
         goldPoints: req.goldPoints,
-        goldDocIds: req.goldDocIds,
+        goldDocRefs: req.goldDocRefs,
         tags: req.tags,
       },
     });
@@ -151,13 +151,13 @@ export class EvalSetsService {
     const hasContentChange =
       req.question !== undefined ||
       req.goldPoints !== undefined ||
-      req.goldDocIds !== undefined ||
+      req.goldDocRefs !== undefined ||
       req.tags !== undefined;
     // 未传的内容字段沿用当前版本 —— 版本行是全量快照，不是增量。
     const nextContent: EvalCaseVersionContent = {
       question: req.question ?? version.question,
       goldPoints: req.goldPoints ?? version.goldPoints,
-      goldDocIds: req.goldDocIds ?? version.goldDocIds,
+      goldDocRefs: req.goldDocRefs ?? version.goldDocRefs,
       tags: req.tags ?? version.tags,
     };
 

@@ -41,6 +41,7 @@ function reviewed(seq: number): ReviewedCaseVersion {
     caseVersionId: `cv-${seq}`,
     question: `问题 ${seq}`,
     goldPoints: ["要点"],
+    goldDocRefs: [],
     seq,
   };
 }
@@ -69,6 +70,7 @@ function makeRun(overrides: Partial<EvalRunRow> = {}): EvalRunRow {
     error: null,
     createdBy: "admin",
     createdAt: now,
+    repeatCount: 1,
     ...overrides,
   };
 }
@@ -82,6 +84,8 @@ interface SetupOptions {
   results?: Partial<EvalRunResultWithCase>[];
   resolveThrows?: boolean;
   versionsThrow?: boolean;
+  /** F2：这些 caseVersionId 带 gold 引用（覆盖率断言）。 */
+  goldRefCaseVersionIds?: string[];
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -159,11 +163,16 @@ function setup(opts: SetupOptions = {}) {
             runId,
             caseVersionId: r.caseVersionId ?? `cv-${index + 1}`,
             seq: r.seq ?? index + 1,
+            repeatIndex: r.repeatIndex ?? 1,
             verdict: r.verdict ?? "pass",
             faithfulness: r.faithfulness ?? null,
             answerRelevancy: r.answerRelevancy ?? null,
             contextPrecision: r.contextPrecision ?? null,
             correctness: r.correctness ?? null,
+            citation: r.citation ?? null,
+            contextRecall: r.contextRecall ?? null,
+            ndcg5: r.ndcg5 ?? null,
+            hitRate5: r.hitRate5 ?? null,
             minMetric: r.minMetric ?? null,
             minScore: r.minScore ?? null,
             evidence: r.evidence ?? {},
@@ -189,6 +198,9 @@ function setup(opts: SetupOptions = {}) {
         version: 1,
         question: `问题 ${id.replace("cv-", "")}`,
         goldPoints: ["要点"],
+        goldDocRefs: (opts.goldRefCaseVersionIds ?? []).includes(id)
+          ? [{ docId: "d1", chunkId: null, docName: "", section: null }]
+          : [],
       }));
     },
   };

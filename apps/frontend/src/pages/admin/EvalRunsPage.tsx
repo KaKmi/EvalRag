@@ -1,10 +1,24 @@
-import { useCallback, useEffect, useState } from "react";
-import { Empty, Flex, Progress, Table, Tag, Typography, message, type TableColumnsType } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Button,
+  Empty,
+  Flex,
+  Progress,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+  type TableColumnsType,
+} from "antd";
 import { useNavigate } from "react-router-dom";
 import type { EvalRunListItem, EvalRunStatus } from "@codecrush/contracts";
 import { getEvalRuns } from "../../api/client";
 
 const { Title, Text } = Typography;
+
+/** F8：只有有结果的终态 run 可参与对比（同屏3 报告的 run population）。 */
+const COMPARABLE_STATUSES: EvalRunStatus[] = ["done", "partial", "budget_stop"];
 
 /** 原型 §7「run 列表页 /admin/eval/runs：时间倒序，列=评测集/配置版本/状态/综合分/耗时」。 */
 
@@ -47,6 +61,26 @@ export default function EvalRunsPage() {
   const navigate = useNavigate();
   const [runs, setRuns] = useState<EvalRunListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+
+  const selectedRuns = useMemo(
+    () => selectedKeys.map((k) => runs.find((r) => r.id === k)).filter((r): r is EvalRunListItem => !!r),
+    [selectedKeys, runs],
+  );
+  // 恰 2 个、同评测集、均为可对比终态（§17.3）。
+  const canCompare =
+    selectedRuns.length === 2 &&
+    selectedRuns[0].setId === selectedRuns[1].setId &&
+    selectedRuns.every((r) => COMPARABLE_STATUSES.includes(r.status));
+
+  const goCompare = () => {
+    if (!canCompare) return;
+    // a=较早、b=较新（按 createdAt 排）。
+    const [a, b] = [...selectedRuns].sort(
+      (x, y) => new Date(x.createdAt).getTime() - new Date(y.createdAt).getTime(),
+    );
+    navigate(`/admin/eval/compare?a=${a.id}&b=${b.id}`);
+  };
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -88,26 +122,29 @@ export default function EvalRunsPage() {
       key: "status",
       width: 170,
       // §17.3：状态 tag「运行中」带进度百分比
-      render: (_: unknown, row) => (
-        <Flex align="center" gap={8}>
-          <Tag color={RUN_STATUS_COLOR[row.status]} style={{ margin: 0 }}>
-            {RUN_STATUS_LABEL[row.status]}
-          </Tag>
-          {row.status === "running" && row.totalCases > 0 && (
-            <Progress
-              type="line"
-              size="small"
-              style={{ width: 60, margin: 0 }}
-              percent={Math.round((row.doneCases / row.totalCases) * 100)}
-            />
-          )}
-          {(row.status === "partial" || row.status === "budget_stop") && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {row.doneCases}/{row.totalCases}
-            </Text>
-          )}
-        </Flex>
-      ),
+      render: (_: unknown, row) => {
+        const totalUnits = row.totalCases * row.repeatCount;
+        return (
+          <Flex align="center" gap={8}>
+            <Tag color={RUN_STATUS_COLOR[row.status]} style={{ margin: 0 }}>
+              {RUN_STATUS_LABEL[row.status]}
+            </Tag>
+            {row.status === "running" && totalUnits > 0 && (
+              <Progress
+                type="line"
+                size="small"
+                style={{ width: 60, margin: 0 }}
+                percent={Math.round((row.doneCases / totalUnits) * 100)}
+              />
+            )}
+            {(row.status === "partial" || row.status === "budget_stop") && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {row.doneCases}/{totalUnits}
+              </Text>
+            )}
+          </Flex>
+        );
+      },
     },
     {
       title: "综合分",
@@ -140,6 +177,14 @@ export default function EvalRunsPage() {
             一次「评测集 × 配置版本」的完整跑分；点击行查看报告
           </Text>
         </div>
+        {/* §17.3：勾选恰 2 个同评测集终态 run → 顶部浮出「对比」主按钮。 */}
+        {selectedKeys.length > 0 && (
+          <Tooltip title={canCompare ? "" : "勾选同一评测集的 2 个 run 进行对比"}>
+            <Button type="primary" disabled={!canCompare} onClick={goCompare}>
+              对比
+            </Button>
+          </Tooltip>
+        )}
       </Flex>
 
       <Table<EvalRunListItem>
@@ -148,6 +193,10 @@ export default function EvalRunsPage() {
         columns={columns}
         // 后端已按 createdAt 倒序返回（原型 §7「时间倒序」），前端不再二次排序。
         dataSource={runs}
+        rowSelection={{
+          selectedRowKeys: selectedKeys,
+          onChange: (keys) => setSelectedKeys(keys as string[]),
+        }}
         pagination={{ pageSize: 20, hideOnSinglePage: true }}
         locale={{ emptyText: <Empty description="还没有评测记录" /> }}
         onRow={(row) => ({

@@ -112,8 +112,9 @@ export function repairInstruction(priorFailure: PriorJudgeFailure): string {
  * 重问，等价于业内的 repair/fix parser 模式（LangChain OutputFixingParser 等）。
  */
 export async function withJudgeRetry<T>(
-  // "correctness" 是 E-W2a 的加性扩宽（018 决策 D）——三个既有值一字未动。
-  metric: "faithfulness" | "answer relevancy" | "context precision" | "correctness",
+  // "correctness" 是 E-W2a 的加性扩宽（018 决策 D）；"citation" 是 E-W2b F4 的加性扩宽——
+  // 既有值一字未动。
+  metric: "faithfulness" | "answer relevancy" | "context precision" | "correctness" | "citation",
   attempt: (priorFailure?: PriorJudgeFailure) => Promise<T>,
 ): Promise<T> {
   let lastError: unknown;

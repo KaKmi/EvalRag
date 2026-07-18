@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ChatStreamEvent } from "./chat";
 
 const isoString = z.string().datetime({ offset: true });
 const uuid = z.string().uuid();
@@ -30,18 +31,22 @@ export type EvalRunStatus = z.infer<typeof EvalRunStatusSchema>;
 export const EvalVerdictSchema = z.enum(["pass", "weak", "low", "timeout", "unscored"]);
 export type EvalVerdict = z.infer<typeof EvalVerdictSchema>;
 
+/**
+ * `citation`（F4）仅供 evidence 键与 METRIC_LABEL 使用；**`minMetric` 永不产出该值**
+ * （EVAL_RUN_METRIC_KEYS argmin 序不含它，diff D1）——citation 不进 verdict/综合分。
+ * 检索层三项（contextRecall/ndcg5/hitRate5）不是 LLM 判分指标，不进本 enum（无 evidence 键）。
+ */
 export const EvalMetricKeySchema = z.enum([
   "faithfulness",
   "answerRelevancy",
   "contextPrecision",
   "correctness",
+  "citation",
 ]);
 export type EvalMetricKey = z.infer<typeof EvalMetricKeySchema>;
 
 /**
- * W2a scope：无 repeatCount。原型 §6 有该控件、§14 定义聚合口径为「取均值」(默认 1)，
- * 但 W2a 默认行为即 1，且加 repeat 维度要动 eval_run_results 唯一索引 → 与「范围」一并留 W2b
- * （018 已知缺口 3）。
+ * §6 弹窗「每题重复 1 次」；§19.1「每题重复：1-5 整数」；§14「取均值」(默认 1)。
  */
 export const CreateEvalRunRequestSchema = z.object({
   setId: uuid,
@@ -51,6 +56,8 @@ export const CreateEvalRunRequestSchema = z.object({
   embeddingModelId: uuid,
   /** true = 跳过 1h 幂等复用检查（用户点「仍重新运行」）。 */
   force: z.boolean().default(false),
+  /** §19.1：1-5 整数，默认 1；每题跑 N 次取非空均值（F5）。 */
+  repeatCount: z.number().int().min(1).max(5).default(1),
 });
 export type CreateEvalRunRequest = z.infer<typeof CreateEvalRunRequestSchema>;
 
@@ -65,6 +72,8 @@ export const EvalRunListItemSchema = z.object({
   overallScore: overallScoreValue.nullable(),
   totalCases: z.number().int().nonnegative(),
   doneCases: z.number().int().nonnegative(),
+  /** §14/F5：每题重复次数（1-5）。前端进度分母 = totalCases × repeatCount。 */
+  repeatCount: z.number().int().min(1).max(5),
   durationMs: z.number().int().nonnegative().nullable(),
   createdAt: isoString,
 });
@@ -81,13 +90,27 @@ const metricAggregate = z.object({
 });
 
 export const EvalRunScorecardSchema = z.object({
-  /** 检索层：W2a 只有 contextPrecision；recall/ndcg/hitRate 留 W2b（前端显示「—」+「未标 gold docs」）。 */
-  retrieval: z.object({ contextPrecision: metricAggregate }),
-  /** 生成层：W2a 三项；citation 留 W2b。 */
+  /**
+   * 检索层四指标（F2）。contextPrecision 是 LLM 判分；contextRecall/ndcg5/hitRate5 是
+   * gold-docs 排序真值指标（确定性，非 LLM）——均不进 verdict/综合分。`goldCoverage`
+   * 按**本 run 快照**用例的 goldDocRefs 非空数算（原型 §7「gold 38/50」旁标）。
+   */
+  retrieval: z.object({
+    contextPrecision: metricAggregate,
+    contextRecall: metricAggregate,
+    ndcg5: metricAggregate,
+    hitRate5: metricAggregate,
+    goldCoverage: z.object({
+      withGold: z.number().int().nonnegative(),
+      total: z.number().int().nonnegative(),
+    }),
+  }),
+  /** 生成层四项（citation F4：仅记分卡 + evidence，不进 verdict/综合分）。 */
   generation: z.object({
     faithfulness: metricAggregate,
     answerRelevancy: metricAggregate,
     correctness: metricAggregate,
+    citation: metricAggregate,
   }),
   passCount: z.number().int().nonnegative(),
   weakCount: z.number().int().nonnegative(),
@@ -99,16 +122,42 @@ export const EvalRunScorecardSchema = z.object({
 });
 export type EvalRunScorecard = z.infer<typeof EvalRunScorecardSchema>;
 
+/** 单次重复的完整明细（F5）。repeatCount=1 时顶层字段 == repeats[0] 明细。 */
+export const EvalRunRepeatSchema = z.object({
+  repeatIndex: z.number().int().min(1).max(5),
+  faithfulness: score.nullable(),
+  answerRelevancy: score.nullable(),
+  contextPrecision: score.nullable(),
+  correctness: score.nullable(),
+  citation: score.nullable(),
+  contextRecall: score.nullable(),
+  ndcg5: score.nullable(),
+  hitRate5: score.nullable(),
+  verdict: EvalVerdictSchema,
+  previewTraceId: z.string().nullable(),
+  answer: z.string(),
+  durationMs: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+  evidence: z.partialRecord(EvalMetricKeySchema, z.array(z.string())),
+});
+export type EvalRunRepeat = z.infer<typeof EvalRunRepeatSchema>;
+
 export const EvalRunResultSchema = z.object({
   seq: z.number().int().positive(),
   caseId: uuid,
   caseVersion: z.number().int().positive(),
   question: z.string(),
-  /** NULL = 未评（裁判失败/无 gold/超时）——绝不写 0（原型 §6）。 */
+  /** NULL = 未评（裁判失败/无 gold/超时）——绝不写 0（原型 §6）。顶层为**聚合值**（F5：非空均值）。 */
   faithfulness: score.nullable(),
   answerRelevancy: score.nullable(),
   contextPrecision: score.nullable(),
   correctness: score.nullable(),
+  /** F4：Citation（仅记分卡/evidence，不进 verdict/综合分）。 */
+  citation: score.nullable(),
+  /** F2：检索层 gold-docs 指标（确定性排序真值，不进 verdict/综合分）。 */
+  contextRecall: score.nullable(),
+  ndcg5: score.nullable(),
+  hitRate5: score.nullable(),
   minMetric: EvalMetricKeySchema.nullable(),
   minScore: score.nullable(),
   verdict: EvalVerdictSchema,
@@ -122,6 +171,9 @@ export const EvalRunResultSchema = z.object({
   answer: z.string(),
   durationMs: z.number().int().nonnegative(),
   error: z.string().nullable(),
+  /** F5：每题重复次数与逐次明细（repeatCount=1 时 repeats 长度 1）。 */
+  repeatCount: z.number().int().min(1).max(5),
+  repeats: z.array(EvalRunRepeatSchema),
 });
 export type EvalRunResult = z.infer<typeof EvalRunResultSchema>;
 
@@ -157,3 +209,30 @@ export const RecentEvalRunConflictSchema = z.object({
   recentRunId: uuid,
 });
 export type RecentEvalRunConflict = z.infer<typeof RecentEvalRunConflictSchema>;
+
+// —— F7 重放 replay ——
+
+/** `POST /eval/replay` 请求体。question 1-500 trim；sourceTraceId 32-hex（用于限频键）。 */
+export const ReplayRequestSchema = z.object({
+  applicationId: uuid,
+  configVersionId: uuid,
+  question: z.string().trim().min(1).max(500),
+  sourceTraceId: z.string().regex(/^[a-f0-9]{32}$/i),
+});
+export type ReplayRequest = z.infer<typeof ReplayRequestSchema>;
+
+/**
+ * 重放即时判分帧（**不进 `ChatStreamEventSchema`**——C 端契约零改动）。分数只走 SSE、
+ * 不落任何存储、不发任何 span（不变量 1）。裁判未配置/判分失败 → 不发该帧（前端显示「未评」）。
+ */
+export const ReplayScoresEventSchema = z.object({
+  type: z.literal("replay_scores"),
+  faithfulness: score.nullable(),
+  answerRelevancy: score.nullable(),
+  contextPrecision: score.nullable(),
+  evidence: z.partialRecord(EvalMetricKeySchema, z.array(z.string())),
+});
+export type ReplayScoresEvent = z.infer<typeof ReplayScoresEventSchema>;
+
+/** 重放流的帧类型：C 端 ChatStreamEvent + 重放专用 replay_scores。 */
+export type ReplayStreamEvent = ChatStreamEvent | ReplayScoresEvent;

@@ -118,6 +118,9 @@ import {
   type RetrievalTestRequest,
   RetrievalTestResponseSchema,
   type RetrievalTestResponse,
+  EvalCompareResponseSchema,
+  type EvalCompareResponse,
+  EvalCompareIncomparableSchema,
   UpdateDocumentMetadataRequestSchema,
   type UpdateDocumentMetadataRequest,
   UpdateKnowledgeBaseRequestSchema,
@@ -965,4 +968,27 @@ export async function stopEvalRun(runId: string): Promise<void> {
     method: "POST",
   });
   if (!resp.ok) throw await responseError(resp, `停止失败（${resp.status}）`);
+}
+
+/** 题库版本集合不一致时后端抛 409 `{code:"incomparable"}`——前端据此渲染红条「结论不可比」。 */
+export class EvalCompareIncomparableError extends Error {
+  constructor() {
+    super("两次评测的题库版本不一致，结论不可比");
+    this.name = "EvalCompareIncomparableError";
+  }
+}
+
+/** F8 屏4 版本对比。a=基线（较早 run）、b=候选（较新 run）。 */
+export async function getEvalCompare(a: string, b: string): Promise<EvalCompareResponse> {
+  const resp = await apiFetch(
+    `/api/eval/runs/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`,
+  );
+  if (!resp.ok) {
+    const body: unknown = await resp.json().catch(() => undefined);
+    if (resp.status === 409 && safeParse(EvalCompareIncomparableSchema, body)) {
+      throw new EvalCompareIncomparableError();
+    }
+    throw new Error(bodyMessage(body) ?? `对比失败（${resp.status}）`);
+  }
+  return EvalCompareResponseSchema.parse(await resp.json());
 }

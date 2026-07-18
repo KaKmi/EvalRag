@@ -50,9 +50,17 @@ interface PrepResult {
   /**
    * 018 决策 C：命中分块原文（含真实 chunkId / finalScore），供离线评测喂 Judge。
    * 内部结构，**不进 SSE 契约**（ChatCitation 没有 chunkId，且 text 可选——拼不出 Judge 输入）。
-   * 兜底/CHAT 分支为 []。
+   * 兜底/CHAT 分支为 []（未喂给生成的命中不作为判分依据）。
    */
   hits: TaggedHit[];
+  /**
+   * E-W2b F2：**阈值判定前**的合并命中（`mergeHits(perKb).slice(0, topN)` 的同一份数组），
+   * 供检索层 gold-docs 指标评「召回列表本身」的排序质量——reply 与兜底分支都带，CHAT 短路为 []。
+   * `hits` 语义是「已送生成」，本字段语义是「检索到的排序列表」，两者不同。
+   */
+  retrievedHits: TaggedHit[];
+  /** E-W2b F2：prep 完成且 intent ≠ CHAT（真正执行了检索）→ true；CHAT 短路 → false。 */
+  retrievalExecuted: boolean;
 }
 
 type TokenUsage = { inputTokens: number; outputTokens: number };
@@ -72,6 +80,11 @@ interface RunWithConfigOptions {
   onPrep?: (prep: PrepResult) => void;
   /** 编排累计 token 回调（决策 G：让 usage 出进程做预算熔断）。 */
   onUsage?: (usage: TokenUsage) => void;
+  /**
+   * E-W2b F1：外部中止信号，一路 plumb 进 prepare 的模型/embedding 调用与 reply 流式。
+   * 省略 → 行为与今日逐字节一致（线上 `run()` 不传）。
+   */
+  signal?: AbortSignal;
 }
 
 /** 018 决策 C：`runForEvaluation` 的返回值——离线 run 引擎构造 Judge 输入所需的一切。 */
@@ -80,6 +93,13 @@ export interface EvaluationRunOutcome {
   replyText: string;
   /** 真实 chunkId/text/finalScore —— 禁止合成 c1/c2（Global Constraints）。 */
   hits: Array<{ chunkId: string; text: string; finalScore: number }>;
+  /**
+   * E-W2b F2：阈值判定前的合并命中（按 rank 序），供检索层 gold-docs 指标。
+   * CHAT 短路 / prep 未完成 → []（配合 `retrievalExecuted=false`）。
+   */
+  retrievedHits: Array<{ chunkId: string; docId: string }>;
+  /** E-W2b F2：是否真正执行了检索（prep 完成且 intent ≠ CHAT）。false → 检索指标记 NULL。 */
+  retrievalExecuted: boolean;
   usage: TokenUsage;
   isFallback: boolean;
   timedOut: boolean;
@@ -99,6 +119,8 @@ interface ExecuteNodeOptions {
   spanEnrich?: (output: unknown) => Record<string, string | number | boolean>;
   onUsage?: (usage: TokenUsage) => void;
   onRepair?: (retryCount: number) => void;
+  /** E-W2b F1：外部中止信号（加性可选）。 */
+  signal?: AbortSignal;
 }
 
 class ChainMetricsAccumulator {
@@ -331,7 +353,7 @@ export class OrchestrationService {
     try {
       // —— 预备阶段：整段在 chainCtx 内（内部无 yield），子 span（rewrite/intent/检索）自动挂 chain ——
       prep = await runInContext(chainCtx, () =>
-        this.prepare(agentId, query, convId, cfg, metrics),
+        this.prepare(agentId, query, convId, cfg, metrics, opts?.signal),
       );
       persistCtx = { agentId, query, convId: prep.validConvId, userId };
       opts?.onPrep?.(prep); // 018 决策 C：把 hits 交给离线评测（在线路径无回调 → no-op）
@@ -341,7 +363,9 @@ export class OrchestrationService {
 
       if (prep.branch === "fallback") {
         // 兜底/CHAT：整段（streamText，无 delta 可吐），单 token yield
-        const text = await runInContext(chainCtx, () => this.streamNode(cfg.nodes.fallback, "fallback"));
+        const text = await runInContext(chainCtx, () =>
+          this.streamNode(cfg.nodes.fallback, "fallback", {}, opts?.signal),
+        );
         replyText = text;
         if (text) yield { type: "token", delta: text };
       } else {
@@ -356,6 +380,7 @@ export class OrchestrationService {
           {
             temperature: cfg.nodes.reply.temperature,
             metricsObserver: metrics.replyObserver,
+            signal: opts?.signal,
           },
           chainCtx,
         );
@@ -486,11 +511,16 @@ export class OrchestrationService {
     let timedOut = false;
     let error: string | undefined;
 
+    // E-W2b F1（018 缺口 9 收口）：AbortSignal 一路 plumb → 超时时**硬中断**在途模型/embedding
+    // 调用，本方法的墙钟上限 ≈ timeoutMs + 一次 fetch 中止延迟（毫秒级），不再由 provider
+    // HTTP 超时兜底。`timeoutMs` 此后既是判定阈值、也是真墙钟上限。
+    const abort = new AbortController();
     // 此处传 cfg.applicationId 作 agentId 是安全的（018 决策 C 已论证）：离线不传 convId
     // → resolveConvId 首行短路，走不到归属校验；且 persist 已跳过，无写入归属。
     const gen = this.runWithConfig(cfg.applicationId, cfg, query, undefined, undefined, {
       persist: false,
       evalRunId: opts.runId,
+      signal: abort.signal,
       onTrace: (id) => {
         traceId = id;
       },
@@ -502,23 +532,10 @@ export class OrchestrationService {
       },
     });
 
-    // 超时用 Promise.race 包住**每次** next()。
-    //
-    // ⚠️ 口径（peer review 实测订正，勿再写成「墙钟上限」）：`timeoutMs` 是**判定超时的阈值**，
-    // **不是** runForEvaluation 的墙钟上限。原因：JS 异步生成器规范规定，对**执行中**的
-    // 生成器调用 `return()` 会**排队**到当前 `next()` 完成之后，无法抢占。而 `prepare()`
-    // （rewrite + intent + 检索，全是模型/embedding 调用）整段跑在**第一个 next() 内且无 yield**
-    // —— 恰恰就是最典型的超时场景。实测：timeoutMs=300ms 时循环确实 300ms 就 break，但
-    // 本方法直到 in-flight 的 next() 自己结束（3005ms）才返回。
-    //
-    // 仍选择 await gen.return() 而非 fire-and-forget：
-    //  · 换来准确的 usage（那几个 token 是真花了的——不 await 就统计不到，预算会少算）；
-    //  · 换来确定性的 span 收尾与上游取消（同 controller 断连路径 chat.controller.ts:49-51），
-    //    否则 streamTextChunks 的 fetch 悬挂 + reply span 泄漏；
-    //  · 且串行 run 下不 await 会让下一条用例与上一条的在途请求重叠加压。
-    // 实际墙钟因此由底层 provider 的 HTTP 超时兜底，不是无界。
-    // 真正的硬中断需要把 AbortSignal 一路plumb 进模型调用 —— 留 W2b（018 已知缺口 9）。
     const deadline = Date.now() + opts.timeoutMs;
+    // 在途 next() 的引用：abort 会让它 reject（AbortError / 「被中止」），若不显式兜住就是
+    // unhandled rejection。timeout break 后在 finally 里 `.catch()` 掉它（AC1-1 断言 0 次）。
+    let pending: Promise<IteratorResult<ChatStreamEvent>> | undefined;
     try {
       for (;;) {
         const remaining = deadline - Date.now();
@@ -527,8 +544,9 @@ export class OrchestrationService {
           break;
         }
         let timer: NodeJS.Timeout | undefined;
+        pending = gen.next();
         const tick = await Promise.race([
-          gen.next(),
+          pending,
           new Promise<"timeout">((resolve) => {
             timer = setTimeout(() => resolve("timeout"), remaining);
           }),
@@ -540,17 +558,30 @@ export class OrchestrationService {
           timedOut = true;
           break;
         }
+        pending = undefined; // 本次 next() 已 settle，不需兜
         if (tick.done) break;
 
         const event = tick.value;
         if (event.type === "token") replyText += event.delta;
-        // 生成失败的两条路径（:367 首 token 熔断、:390 infra 失败）yield 本事件后
-        // **return 而不抛** —— 不在此捕获，调用方就只能看到 {replyText:"", timedOut:false}，
-        // 与「成功但答案为空」同形，进而把空串送去判分、编出假分数（见 EvaluationRunOutcome.error）。
+        // 生成失败的两条路径（首 token 熔断、infra 失败）yield 本事件后 **return 而不抛** ——
+        // 不在此捕获，调用方就只能看到 {replyText:"", timedOut:false}，与「成功但答案为空」
+        // 同形，进而把空串送去判分、编出假分数（见 EvaluationRunOutcome.error）。
         else if (event.type === "error") error = event.message;
       }
+    } catch (err) {
+      // abort 引发的 next() 拒绝 = 超时（不是 infra 失败，不冒泡触发 pg-boss 重试）。
+      if (abort.signal.aborted) {
+        timedOut = true;
+      } else {
+        throw err; // 真 infra 失败照旧冒泡（processRun 冒泡 → pg-boss 重试 ×3）。
+      }
     } finally {
-      // 对已读完/已抛错的生成器是安全 no-op；超时路径靠它触发 finally（span end + 上游取消）。
+      // 顺序要害：先 abort() 让在途 fetch 立刻 reject，再 gen.return()——否则 return() 会
+      // 排队到当前 next() 自然结束（provider HTTP 超时才 resolve），硬中断名存实亡。
+      if (timedOut) abort.abort();
+      // 兜住被抛弃的在途 next()：abort 会让它 reject，不接就是 unhandled rejection（AC1-1）。
+      if (pending) await pending.catch(() => undefined);
+      // 对已读完/已抛错/已 return 的生成器是安全 no-op；触发其 finally（span end + 上游取消）。
       try {
         await gen.return(undefined);
       } catch (err) {
@@ -566,11 +597,50 @@ export class OrchestrationService {
         text: h.text,
         finalScore: h.finalScore,
       })),
+      retrievedHits: (prep?.retrievedHits ?? []).map((h) => ({
+        chunkId: h.chunkId,
+        docId: h.docId,
+      })),
+      retrievalExecuted: prep?.retrievalExecuted ?? false,
       usage,
       isFallback: prep?.isFallback ?? false,
       timedOut,
       ...(error === undefined ? {} : { error }),
     };
+  }
+
+  /**
+   * E-W2b F7：单条重放（人在等的场景）。与 `runForEvaluation` 同一安全论证——不传 convId →
+   * IDOR 校验短路；persist=false 不落会话；preview=true 的 cfg → trace 天然被在线统计/候选集排除。
+   * **不打 evalRunId、不发 rag.eval span**（重放分数只走 SSE 帧，不落存储）。
+   *
+   * 超时口径：重放沿用在线 **30s 首 token 熔断**（`streamTextChunks` 内建），不用 120s 批跑口径。
+   * onPrep/onTrace 透传：Service 据此捕获 hits（判分输入）与 traceId（span 树 Tab）。
+   */
+  async *runForReplay(
+    cfg: ResolvedApplicationConfig,
+    query: string,
+    opts: {
+      signal?: AbortSignal;
+      onPrep?: (prep: { hits: Array<{ chunkId: string; text: string; finalScore: number }> }) => void;
+      onTrace?: (traceId: string) => void;
+    } = {},
+  ): AsyncGenerator<ChatStreamEvent> {
+    yield* this.runWithConfig(cfg.applicationId, cfg, query, undefined, undefined, {
+      persist: false,
+      signal: opts.signal,
+      onTrace: opts.onTrace,
+      onPrep: opts.onPrep
+        ? (prep) =>
+            opts.onPrep!({
+              hits: prep.hits.map((h) => ({
+                chunkId: h.chunkId,
+                text: h.text,
+                finalScore: h.finalScore,
+              })),
+            })
+        : undefined,
+    });
   }
 
   /** 预备阶段：rewrite→intent→路由→检索→兜底判定，产出 PrepResult。无 yield，供 runInContext 包裹挂父。 */
@@ -580,6 +650,7 @@ export class OrchestrationService {
     convId: string | undefined,
     cfg: Awaited<ReturnType<ApplicationsService["resolvePublic"]>>,
     metrics: ChainMetricsAccumulator,
+    signal?: AbortSignal,
   ): Promise<PrepResult> {
     const kbRows = await this.kbs.findByIds(cfg.kbIds);
     const kbNameById = new Map(kbRows.map((k) => [k.id, k.name]));
@@ -594,7 +665,7 @@ export class OrchestrationService {
       "rewrite",
       { query, history },
       {},
-      { onUsage: metrics.addPrepUsage, onRepair: metrics.addRepair },
+      { onUsage: metrics.addPrepUsage, onRepair: metrics.addRepair, signal },
     );
     const rewrittenQuery = rewrite.rewrittenQuery;
 
@@ -617,6 +688,7 @@ export class OrchestrationService {
         },
         onUsage: metrics.addPrepUsage,
         onRepair: metrics.addRepair,
+        signal,
       },
     );
     const intent = intentOut.intent;
@@ -634,6 +706,8 @@ export class OrchestrationService {
         reasons,
         fallbackInfo: { reasons, scopeKbNames: [] },
         hits: [], // CHAT 短路不检索
+        retrievedHits: [], // F2：CHAT 短路 → 无检索列表
+        retrievalExecuted: false,
       };
     }
 
@@ -650,11 +724,13 @@ export class OrchestrationService {
         metrics.addRetrieval(r.multi, Boolean(r.rerankModelId));
         return {
           kbId: r.kbId,
-          hits: (await this.retrieval.test(r, metrics.addDegradation)).hits,
+          hits: (await this.retrieval.test(r, metrics.addDegradation, signal)).hits,
         };
       }),
     );
-    const hits: TaggedHit[] = mergeHits(perKb).slice(0, cfg.retrieval.topN);
+    // F2：merged.slice 是「阈值判定前」的检索排序列表——retrievedHits 与（过阈值后的）hits 共享此源。
+    const retrievedHits: TaggedHit[] = mergeHits(perKb).slice(0, cfg.retrieval.topN);
+    const hits: TaggedHit[] = retrievedHits;
 
     // 5) 兜底判定：rerank 开启时用 rerankThreshold（缺省回退平台阈值）
     const threshold = cfg.retrieval.rerankEnabled
@@ -686,6 +762,9 @@ export class OrchestrationService {
         fallbackInfo,
         // 检索层兜底：命中未过阈值 → 不喂给生成，也不作为判分依据（与 citations=[] 同口径）
         hits: [],
+        // F2：兜底不等于没检索——召回列表本身照常带出供 gold 指标评排序质量。
+        retrievedHits,
+        retrievalExecuted: true,
       };
     }
 
@@ -708,6 +787,8 @@ export class OrchestrationService {
       reasons: [],
       fallbackInfo,
       hits, // 018 决策 C：真实命中（含 chunkId/finalScore），与 citations 1:1 同序
+      retrievedHits, // F2：与 hits 同源（reply 分支未过阈值判定不改变列表）
+      retrievalExecuted: true,
     };
   }
 
@@ -749,6 +830,7 @@ export class OrchestrationService {
         temperature: node.temperature,
         spanEnrich: options.spanEnrich,
         metricsObserver: options.onRepair ? { onRepair: options.onRepair } : undefined,
+        signal: options.signal,
       },
     );
     if (r.usage) options.onUsage?.(r.usage);
@@ -759,6 +841,7 @@ export class OrchestrationService {
     node: ResolvedNodeConfig,
     name: "reply" | "fallback",
     payload: { input?: Record<string, unknown>; reserved?: unknown } = {},
+    signal?: AbortSignal,
   ): Promise<string> {
     const r = await this.nodeRuntime.streamText(
       name,
@@ -767,7 +850,7 @@ export class OrchestrationService {
       node.modelId,
       payload.input ?? {},
       payload.reserved ?? {},
-      { temperature: node.temperature },
+      { temperature: node.temperature, signal },
     );
     return r.text;
   }

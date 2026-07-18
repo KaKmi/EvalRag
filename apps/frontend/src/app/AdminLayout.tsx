@@ -64,6 +64,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/admin/gaps": "知识缺口",
   "/admin/eval/sets": "评测集",
   "/admin/eval/runs": "效果评测",
+  "/admin/eval/compare": "版本对比",
 };
 
 function getSelectedKey(pathname: string): string {

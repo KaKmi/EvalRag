@@ -11,6 +11,7 @@ import {
   type EvalRunResultRow,
   type EvalRunRow,
   type EvalRunSnapshotEntry,
+  type GoldDocRefRow,
 } from "./schema";
 
 export interface NewEvalRunInput {
@@ -21,6 +22,8 @@ export interface NewEvalRunInput {
   embeddingModelId: string;
   caseVersionSnapshot: EvalRunSnapshotEntry[];
   totalCases: number;
+  /** §14/F5：每题重复次数（默认 1）。 */
+  repeatCount: number;
   createdBy: string;
 }
 
@@ -44,17 +47,27 @@ export interface EvalCaseVersionContent {
   version: number;
   question: string;
   goldPoints: string[];
+  /** F2 检索层 gold 指标消费。 */
+  goldDocRefs: GoldDocRefRow[];
 }
 
 export interface NewEvalRunResultInput {
   runId: string;
   caseVersionId: string;
   seq: number;
+  /** F5：本行第几次重复（1-5）。 */
+  repeatIndex: number;
   verdict: string;
   faithfulness: number | null;
   answerRelevancy: number | null;
   contextPrecision: number | null;
   correctness: number | null;
+  /** F4：Citation。 */
+  citation: number | null;
+  /** F2：检索层 gold 指标。 */
+  contextRecall: number | null;
+  ndcg5: number | null;
+  hitRate5: number | null;
   minMetric: string | null;
   minScore: number | null;
   evidence: Record<string, string[]>;
@@ -115,6 +128,24 @@ export class EvalRunsRepository {
   async findRunById(id: string): Promise<EvalRunRow | undefined> {
     const rows = await this.db.select().from(evalRuns).where(eq(evalRuns.id, id)).limit(1);
     return rows[0];
+  }
+
+  /**
+   * F6：存在 queued/running 的 run 引用该应用 → 拦其删除（保护正在跑/排队的评测）。
+   * 终态 run 引用不拦（历史报告优雅降级，见 eval-runs.service UNRESOLVED_VERSION_LABEL）。
+   */
+  async existsActiveRunByApplicationId(applicationId: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ one: sql`1` })
+      .from(evalRuns)
+      .where(
+        and(
+          eq(evalRuns.applicationId, applicationId),
+          inArray(evalRuns.status, [...ACTIVE_STATUSES]),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   /** 全局串行：任一 queued/running 的 run 都挡住新发起（原型 §6）。 */
@@ -399,11 +430,16 @@ export class EvalRunsRepository {
         runId: evalRunResults.runId,
         caseVersionId: evalRunResults.caseVersionId,
         seq: evalRunResults.seq,
+        repeatIndex: evalRunResults.repeatIndex,
         verdict: evalRunResults.verdict,
         faithfulness: evalRunResults.faithfulness,
         answerRelevancy: evalRunResults.answerRelevancy,
         contextPrecision: evalRunResults.contextPrecision,
         correctness: evalRunResults.correctness,
+        citation: evalRunResults.citation,
+        contextRecall: evalRunResults.contextRecall,
+        ndcg5: evalRunResults.ndcg5,
+        hitRate5: evalRunResults.hitRate5,
         minMetric: evalRunResults.minMetric,
         minScore: evalRunResults.minScore,
         evidence: evalRunResults.evidence,
@@ -420,16 +456,25 @@ export class EvalRunsRepository {
       .from(evalRunResults)
       .innerJoin(evalCaseVersions, eq(evalCaseVersions.id, evalRunResults.caseVersionId))
       .where(eq(evalRunResults.runId, runId))
-      .orderBy(sql`${evalRunResults.minScore} ASC NULLS LAST`, asc(evalRunResults.seq));
+      // F5：先按 seq，再按 repeat_index——聚合按 caseVersionId 分组，明细按重复序稳定。
+      .orderBy(asc(evalRunResults.seq), asc(evalRunResults.repeatIndex));
   }
 
-  /** 重试续跑用：已落结果行的用例版本 id（唯一索引 `(run_id, case_version_id)` 的对偶）。 */
-  async listRecordedCaseVersionIds(runId: string): Promise<string[]> {
+  /**
+   * 重试续跑用：已落结果行的 `(caseVersionId, repeatIndex)` 二元组（F5：唯一索引现含 repeat_index）。
+   * worker 据此跳过已录 unit，避免撞唯一索引。
+   */
+  async listRecordedCaseVersionIds(
+    runId: string,
+  ): Promise<Array<{ caseVersionId: string; repeatIndex: number }>> {
     const rows = await this.db
-      .select({ caseVersionId: evalRunResults.caseVersionId })
+      .select({
+        caseVersionId: evalRunResults.caseVersionId,
+        repeatIndex: evalRunResults.repeatIndex,
+      })
       .from(evalRunResults)
       .where(eq(evalRunResults.runId, runId));
-    return rows.map((row) => row.caseVersionId);
+    return rows;
   }
 
   /** 快照条目 → 用例版本内容（版本行不可变、永不删，故按 id 直取即可）。 */
@@ -442,6 +487,7 @@ export class EvalRunsRepository {
         version: evalCaseVersions.version,
         question: evalCaseVersions.question,
         goldPoints: evalCaseVersions.goldPoints,
+        goldDocRefs: evalCaseVersions.goldDocRefs,
       })
       .from(evalCaseVersions)
       .where(inArray(evalCaseVersions.id, ids));
@@ -459,6 +505,7 @@ export class EvalRunsRepository {
         offlineJudgeVersion: evalRuns.offlineJudgeVersion,
         status: evalRuns.status,
         scope: evalRuns.scope,
+        repeatCount: evalRuns.repeatCount,
         caseVersionSnapshot: evalRuns.caseVersionSnapshot,
         totalCases: evalRuns.totalCases,
         doneCases: evalRuns.doneCases,

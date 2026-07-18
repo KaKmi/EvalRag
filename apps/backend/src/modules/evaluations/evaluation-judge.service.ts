@@ -1,5 +1,6 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
 import { AnswerRelevancyEvaluator } from "./answer-relevancy.evaluator";
+import { CitationEvaluator } from "./citation.evaluator";
 import { ContextPrecisionEvaluator } from "./context-precision.evaluator";
 import { CorrectnessEvaluator } from "./correctness.evaluator";
 import type {
@@ -27,6 +28,11 @@ export class EvaluationJudgeService {
      * 验收标准「E-W1 测试原样通过」。运行时 DI 恒注入（evaluations.module.ts 的 providers 有它）。
      */
     @Optional() private readonly correctness?: CorrectnessEvaluator,
+    /**
+     * E-W2b F4：第 5 参同样 `@Optional()` 追加在末尾（同 correctness 先例）——既有测试少参
+     * 构造本 service 不许编译失败。运行时 DI 恒注入（evaluations.module.ts providers 含它）。
+     */
+    @Optional() private readonly citation?: CitationEvaluator,
   ) {}
 
   /**
@@ -82,9 +88,17 @@ export class EvaluationJudgeService {
       wantsCorrectness
         ? this.correctness!.score({ ...input, goldPoints }, modelIds.judgeModelId)
         : Promise.resolve(null),
+      // F4：citation evaluator 内部对无角标返回 null（未评），不调模型——单指标隔离同其余四项。
+      this.citation ? this.citation.score(input, modelIds.judgeModelId) : Promise.resolve(null),
     ]);
 
-    const keys = ["faithfulness", "answerRelevancy", "contextPrecision", "correctness"] as const;
+    const keys = [
+      "faithfulness",
+      "answerRelevancy",
+      "contextPrecision",
+      "correctness",
+      "citation",
+    ] as const;
     const scores: Record<string, number | null> = {};
     const evidence: Record<string, string[]> = {};
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
@@ -120,6 +134,7 @@ export class EvaluationJudgeService {
       answerRelevancy: scores.answerRelevancy,
       contextPrecision: scores.contextPrecision,
       correctness: scores.correctness,
+      citation: scores.citation,
       evidence,
       usage,
     };

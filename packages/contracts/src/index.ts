@@ -20,4 +20,5 @@ export * from "./chat";
 export * from "./conversations";
 export * from "./eval-sets";
 export * from "./eval-runs";
+export * from "./eval-compare";
 export * from "./pagination";

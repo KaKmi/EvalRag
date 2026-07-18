@@ -101,6 +101,7 @@ type ClickHouseTraceRow = {
 /** 冷库/无 root 兜底的零值 meta（仍满足契约）。 */
 export const EMPTY_TRACE_META: TraceDetailMeta = {
   userInput: "",
+  agentId: null,
   agentName: null,
   genModel: null,
   genModelVersion: null,
@@ -163,6 +164,8 @@ function buildTraceMeta(spans: TraceSpan[]): TraceDetailMeta {
   };
   return {
     userInput: String(a["codecrush.io.input"] ?? ""),
+    // E-W2b：读根 span 的 gen_ai.agent.id（编排 E-W1 起写规范 applicationId）——重放需据此拉配置版本。
+    agentId: (a["gen_ai.agent.id"] as string) || null,
     agentName: (a["gen_ai.agent.name"] as string) || null,
     genModel: (genModel as string) || null,
     genModelVersion: null,

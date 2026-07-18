@@ -34,6 +34,7 @@ describe("trace contracts", () => {
       // M9 W2：meta 变必填、span 加 statusMessage
       meta: {
         userInput: "",
+        agentId: null,
         agentName: null,
         genModel: null,
         genModelVersion: null,
@@ -89,6 +90,7 @@ describe("M9 W2 详情契约", () => {
   };
   const meta = {
     userInput: "怎么退款",
+    agentId: "app1",
     agentName: "退款助手",
     genModel: "deepseek-v3",
     genModelVersion: null,
