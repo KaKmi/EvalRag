@@ -131,6 +131,7 @@ export class ApplicationsService {
     if (req.name !== undefined) patch.name = req.name;
     if (req.description !== undefined) patch.description = req.description;
     if (req.enabled !== undefined) patch.enabled = req.enabled;
+    if (req.evalGateEnabled !== undefined) patch.evalGateEnabled = req.evalGateEnabled;
     let updated;
     try {
       updated = await this.repo.updateBase(id, { ...patch, updatedBy: actor });
@@ -673,6 +674,7 @@ export class ApplicationsService {
       name: row.name,
       description: row.description,
       enabled: row.enabled,
+      evalGateEnabled: row.evalGateEnabled,
       productionVersion: row.productionVersion,
       productionConfigVersionId: row.productionConfigVersionId,
       latestVersion: row.latestVersion,

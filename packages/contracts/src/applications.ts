@@ -72,6 +72,8 @@ export const ApplicationSchema = z.strictObject({
   name: z.string().min(1),
   description: z.string(),
   enabled: z.boolean(),
+  /** B1/F5：上线门禁开关。开启后前端「去上线」按钮在门禁不满足时 disabled；后端永远软放行。 */
+  evalGateEnabled: z.boolean(),
   productionVersion: z.number().int().positive().nullable(),
   productionConfigVersionId: z.string().min(1).nullable(),
   latestVersion: z.number().int().positive(),
@@ -117,6 +119,7 @@ export const UpdateApplicationRequestSchema = z.strictObject({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   enabled: z.boolean().optional(),
+  evalGateEnabled: z.boolean().optional(),
 });
 export type UpdateApplicationRequest = z.infer<typeof UpdateApplicationRequestSchema>;
 
