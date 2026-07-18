@@ -31,6 +31,7 @@ import { RELEASE_CHECK_JOB, RELEASE_CHECK_QUEUE } from "../../platform/queue/que
 import type { Queue } from "../../platform/queue/queue.port";
 import { ApplicationsRepository, type ApplicationListRow } from "./applications.repository";
 import { computeFingerprint, type FingerprintInput } from "./fingerprint";
+import { normalizeIssueSeverity } from "./release-check.severity";
 import type { ApplicationConfigVersionRow, ReleaseCheckRow } from "./schema";
 
 const APPLICATION_TAG_CAP = 20;
@@ -522,7 +523,7 @@ export class ApplicationsService {
       configVersionId: row.configVersionId,
       configFingerprint: row.configFingerprint,
       status: row.status,
-      issues: row.issues,
+      issues: normalizeIssueSeverity(row.issues),
       sampleSummary: row.sampleSummary,
       startedAt: row.startedAt?.toISOString() ?? null,
       finishedAt: row.finishedAt?.toISOString() ?? null,

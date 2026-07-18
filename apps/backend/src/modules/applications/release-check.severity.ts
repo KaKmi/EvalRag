@@ -14,3 +14,20 @@ import type { ReleaseCheckIssue } from "@codecrush/contracts";
 export function hasBlockingIssue(issues: readonly ReleaseCheckIssue[]): boolean {
   return issues.some((issue) => issue.severity !== "warning");
 }
+
+/**
+ * 纵深防御（**不替代** `hasBlockingIssue` 的排除法）：`toReleaseCheck`
+ * （applications.service.ts:518-533，第 525 行 `issues: row.issues`）是逐字段手写映射，
+ * 库中 M7b 时代写入的 jsonb 行没有 `severity` 且**不过 Zod** ⇒ 原样透出就是 `undefined`。
+ * 前端要按 severity 分区渲染（warning=评测提示、error=阻断），拿到 `undefined` 会落进
+ * 「既不是 warning 也没显式 error」的模糊地带。故在响应边界把缺失值补成 `error`——
+ * 与 Zod `.default("error")` 同一口径，语义零变化（排除法下 undefined 本就算阻断）。
+ *
+ * ⚠️ 补这一层**不意味着**下游可以改用白名单 `=== "error"`：本函数只覆盖
+ * `toReleaseCheck` 这一个出口，任何绕过它直接读 `row.issues` 的路径仍会拿到 `undefined`。
+ */
+export function normalizeIssueSeverity(
+  issues: readonly ReleaseCheckIssue[],
+): ReleaseCheckIssue[] {
+  return issues.map((issue) => (issue.severity ? issue : { ...issue, severity: "error" }));
+}

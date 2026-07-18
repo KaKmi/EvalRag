@@ -1,5 +1,8 @@
 import { ReleaseCheckIssueSchema } from "@codecrush/contracts";
-import { hasBlockingIssue } from "../src/modules/applications/release-check.severity";
+import {
+  hasBlockingIssue,
+  normalizeIssueSeverity,
+} from "../src/modules/applications/release-check.severity";
 
 describe("ReleaseCheckIssue severity", () => {
   it("旧数据没有 severity 字段时解析为 error（向后兼容）", () => {
@@ -49,5 +52,23 @@ describe("ReleaseCheckIssue severity", () => {
       typeof hasBlockingIssue
     >[0];
     expect(hasBlockingIssue(legacy)).toBe(true);
+  });
+
+  /**
+   * 【纵深防御钉，勿删】
+   * toReleaseCheck 的手写映射把库中历史 jsonb 行原样透出（severity 为 undefined），
+   * 前端要按 severity 分区渲染，拿到 undefined 会落进模糊地带。响应边界必须补默认 error。
+   * 注意这**不**允许下游改用白名单判据——本函数只覆盖 toReleaseCheck 一个出口。
+   */
+  it("normalizeIssueSeverity 把历史行的缺失 severity 补成 error，warning 不被改写", () => {
+    const legacy = [
+      { code: "NO_KB", message: "至少需要一个知识库" },
+      { code: "EVAL_GATE_REGRESSION", message: "存在 5 条回退用例", severity: "warning" },
+    ] as unknown as Parameters<typeof normalizeIssueSeverity>[0];
+    const normalized = normalizeIssueSeverity(legacy);
+    expect(normalized[0].severity).toBe("error");
+    expect(normalized[1].severity).toBe("warning");
+    // 补默认后阻断判据结论不变（排除法本就把 undefined 算作阻断）
+    expect(hasBlockingIssue(normalized)).toBe(hasBlockingIssue(legacy));
   });
 });
