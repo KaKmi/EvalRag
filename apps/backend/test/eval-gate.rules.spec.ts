@@ -26,6 +26,29 @@ describe("buildGateIssues", () => {
     ]);
   });
 
+  /**
+   * 【勿删】overallScore 是 ROUND(...,1) 的一位小数，故 -0.3 真实可达。
+   * 若用 Math.round 格式化，会弹出「综合分下降 0 分」——一条自我否定的警告。
+   */
+  it("小数跌幅不得被舍成 0：-0.3 → 「综合分下降 0.3 分」", () => {
+    const issues = buildGateIssues(
+      { kind: "compared", finishedAt: FRESH, regressedCount: 0, overallDelta: 79.9 - 80.2 },
+      NOW,
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toBe("综合分下降 0.3 分");
+    // 反向断言：绝不能出现「下降 0 分」这种自相矛盾的文案
+    expect(issues[0].message).not.toContain("下降 0 分");
+  });
+
+  it("整数跌幅不带尾随 .0（保持原型口径「下降 4 分」）", () => {
+    const issues = buildGateIssues(
+      { kind: "compared", finishedAt: FRESH, regressedCount: 0, overallDelta: -4 },
+      NOW,
+    );
+    expect(issues[0].message).toBe("综合分下降 4 分");
+  });
+
   it("无回退且综合不降 → 零 issue", () => {
     expect(
       buildGateIssues(

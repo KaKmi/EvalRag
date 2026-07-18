@@ -60,7 +60,7 @@ export class ReleaseCheckProcessor implements OnModuleInit {
 
     await this.repo.markReleaseCheckRunning(checkId);
     try {
-      await this.run(checkId, check.configVersionId);
+      await this.run(checkId, check.configVersionId, check.applicationId);
     } catch (err) {
       // review P2-2：基础设施异常（DB 抖动/未知错误）不能让 check 永久卡 running——
       // 标 failed 让轮询方拿到终态；mark 自身失败则异常上抛，靠 retryLimit=1 重投 + 僵尸窗口兜底。
@@ -75,7 +75,11 @@ export class ReleaseCheckProcessor implements OnModuleInit {
     }
   }
 
-  private async run(checkId: string, configVersionId: string): Promise<void> {
+  private async run(
+    checkId: string,
+    configVersionId: string,
+    applicationId: string,
+  ): Promise<void> {
     const version = await this.repo.findVersionById(configVersionId);
     if (!version) {
       await this.repo.markReleaseCheckResult(checkId, {
@@ -129,15 +133,15 @@ export class ReleaseCheckProcessor implements OnModuleInit {
     }
 
     // B1/F5：评测门禁——**纯附加**的 warning issue。
-    // 放在 blocked 计算之前是安全的：collectEvalGateIssues 恒返回 warning 级
-    // （provider 抛错也只降级成 UNAVAILABLE warning），故它无论如何都不参与阻断判定。
-    // 拿不到 applicationId 就跳过——门禁缺结论时 fail-open，绝不因此让发布变红。
-    const check = await this.repo.findReleaseCheckById(checkId);
-    if (check) {
-      issues.push(
-        ...(await this.applications.collectEvalGateIssues(check.applicationId, configVersionId)),
-      );
-    }
+    // collectEvalGateIssues 恒返回 warning 级（provider 抛错也只降级成 UNAVAILABLE warning），
+    // 故它无论如何都不参与阻断判定。
+    //
+    // ⚠️ applicationId 由 process() 透传而来，**不在这里重新查库**：
+    // review P1——门禁路径上任何未被 try/catch 罩住的 I/O，一旦抖动就会冒泡到
+    // process() 的 catch，把一次本已抽样成功的 check 写成 failed + INTERNAL_ERROR(error 级)，
+    // 于是 publishProduction 抛 422。那正是 fail-open 明令禁止的形状：
+    // 读取异常必须放行并降级成 warning，绝不能因门禁而拒发布。
+    issues.push(...(await this.applications.collectEvalGateIssues(applicationId, configVersionId)));
 
     const blocked = hasBlockingIssue(issues);
     await this.repo.markReleaseCheckResult(checkId, {

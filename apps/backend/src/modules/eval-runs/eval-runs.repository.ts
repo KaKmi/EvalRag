@@ -156,7 +156,8 @@ export class EvalRunsRepository {
 
   /**
    * B1/F5：候选侧（B）——该应用该配置版本的最新终态 run。
-   * 按 createdAt 降序（与 finishedAt 可能为 null 的行为无关，创建序是稳定的）。
+   * 先按 finishedAt 降序：新鲜度判定用的就是 finishedAt，排序键与语义必须一致，
+   * 否则「后创建但先结束」的 run 会顶掉真正最新的结论。createdAt 作同值兜底。
    */
   async findLatestFinishedRun(
     applicationId: string,
@@ -172,7 +173,7 @@ export class EvalRunsRepository {
           inArray(evalRuns.status, [...GATE_FINISHED_STATUSES]),
         ),
       )
-      .orderBy(desc(evalRuns.createdAt))
+      .orderBy(desc(evalRuns.finishedAt), desc(evalRuns.createdAt))
       .limit(1);
     return rows[0];
   }
@@ -195,7 +196,7 @@ export class EvalRunsRepository {
           inArray(evalRuns.status, [...GATE_FINISHED_STATUSES]),
         ),
       )
-      .orderBy(desc(evalRuns.createdAt))
+      .orderBy(desc(evalRuns.finishedAt), desc(evalRuns.createdAt))
       .limit(1);
     return rows[0];
   }

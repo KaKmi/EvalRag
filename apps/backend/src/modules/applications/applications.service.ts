@@ -569,7 +569,16 @@ export class ApplicationsService {
     applicationId: string,
     configVersionId: string,
   ): Promise<ReleaseCheckIssue[]> {
-    if (!this.evalGateProvider) return [];
+    if (!this.evalGateProvider) {
+      // 未注册有两种可能：只起 applications 的部署（预期内），或 eval-runs 侧注册器
+      // 还没跑完 onModuleInit（启动窗口，毫秒级）。两种都 fail-open 返回空，
+      // 但必须留一条日志——否则「没有门禁结论」与「门禁说没问题」在 UI 上无从区分，
+      // 正是 UNAVAILABLE 文案要避免的那种误读。
+      this.logger.warn(
+        `eval gate provider 未注册，本次不产出门禁结论 app=${applicationId} version=${configVersionId}`,
+      );
+      return [];
+    }
     try {
       const issues = await this.evalGateProvider(applicationId, configVersionId);
       // 纵深防御：provider 万一产出了 error 级 issue，也不得让它获得阻断力——

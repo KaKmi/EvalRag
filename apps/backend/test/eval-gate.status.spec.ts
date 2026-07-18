@@ -28,9 +28,10 @@ function service(app: Record<string, unknown> = {}) {
     })),
     findTagNamesByAppIds: jest.fn(async () => new Map<string, string[]>()),
   };
+  // 构造参数个数必须与真实构造函数一致（5 个）——backend 的 test/ 不过 tsc
+  // （tsconfig include 只有 src），多写一个参数不会有任何编译期提示。
   return new ApplicationsService(
     repo as never,
-    {} as never,
     {} as never,
     {} as never,
     {} as never,
