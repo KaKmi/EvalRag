@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import type { EvalRunReport, EvalRunResult } from "@codecrush/contracts";
+import type { EvalRunRepeat, EvalRunReport, EvalRunResult } from "@codecrush/contracts";
 import * as api from "../../api/client";
 import EvalRunDetailPage from "./EvalRunDetailPage";
 
@@ -15,6 +15,25 @@ vi.mock("antd", async (importOriginal) => {
 
 const TRACE = "a".repeat(32);
 
+const repeat = (over: Partial<EvalRunRepeat> = {}): EvalRunRepeat => ({
+  repeatIndex: 1,
+  faithfulness: 96,
+  answerRelevancy: 93,
+  contextPrecision: 90,
+  correctness: 95,
+  citation: 88,
+  contextRecall: 85,
+  ndcg5: 81,
+  hitRate5: 92,
+  verdict: "pass",
+  previewTraceId: TRACE,
+  answer: "7 天内无理由退",
+  durationMs: 1200,
+  error: null,
+  evidence: {},
+  ...over,
+});
+
 const result = (over: Partial<EvalRunResult> = {}): EvalRunResult => ({
   seq: 1,
   caseId: "case-1",
@@ -24,6 +43,10 @@ const result = (over: Partial<EvalRunResult> = {}): EvalRunResult => ({
   answerRelevancy: 93,
   contextPrecision: 90,
   correctness: 95,
+  citation: 88,
+  contextRecall: 85,
+  ndcg5: 81,
+  hitRate5: 92,
   minMetric: "contextPrecision",
   minScore: 90,
   verdict: "pass",
@@ -32,6 +55,8 @@ const result = (over: Partial<EvalRunResult> = {}): EvalRunResult => ({
   answer: "7 天内无理由退",
   durationMs: 1200,
   error: null,
+  repeatCount: 1,
+  repeats: [repeat()],
   ...over,
 });
 
@@ -61,6 +86,7 @@ function report(over: Overrides = {}): EvalRunReport {
       overallScore: 82,
       totalCases: 2,
       doneCases: 2,
+      repeatCount: 1,
       durationMs: 192_000,
       createdAt: "2026-07-14T06:20:00.000Z",
       judgeModelId: "judge-1",
@@ -73,11 +99,18 @@ function report(over: Overrides = {}): EvalRunReport {
       ...over.run,
     },
     scorecard: {
-      retrieval: { contextPrecision: aggregate(78) },
+      retrieval: {
+        contextPrecision: aggregate(78),
+        contextRecall: aggregate(85),
+        ndcg5: aggregate(81),
+        hitRate5: aggregate(92),
+        goldCoverage: { withGold: 38, total: 50 },
+      },
       generation: {
         faithfulness: aggregate(91),
         answerRelevancy: aggregate(88),
         correctness: aggregate(82),
+        citation: aggregate(86),
       },
       passCount: 1,
       weakCount: 0,
@@ -155,20 +188,58 @@ it("未评指标显示「—」而不是 0", async () => {
   expect(cell).not.toHaveTextContent("0");
 });
 
-it("检索层未实现指标显示「—」+「未标 gold docs」注", async () => {
+it("检索层记分卡渲染四个真实指标 + 覆盖率行（F2）", async () => {
   renderReport();
-  // W2b 的 4 项（Context Recall / NDCG@5 / 命中率@5 / Citation）：不实现也不隐藏
-  const notes = await screen.findAllByText("未标 gold docs");
-  expect(notes).toHaveLength(4);
   expect(await screen.findByText("Context Recall")).toBeInTheDocument();
-  expect(screen.getByText("Citation")).toBeInTheDocument();
-  // 已实现的 Context Precision 仍显示真实分数
+  expect(screen.getByTestId("scorecard-contextRecall")).toHaveTextContent("85");
+  // NDCG@5：契约存 0-100 整数（81），前端渲染两位小数
+  expect(screen.getByText("NDCG@5")).toBeInTheDocument();
+  expect(screen.getByTestId("scorecard-ndcg5")).toHaveTextContent("0.81");
+  // 命中率@5：渲染为百分比
+  expect(screen.getByText("命中率@5")).toBeInTheDocument();
+  expect(screen.getByTestId("scorecard-hitRate5")).toHaveTextContent("92%");
+  // 覆盖率行：已评（精确率覆盖率）· gold（快照标注数/总数）
+  expect(screen.getByText("已评 2/2 · gold 38/50")).toBeInTheDocument();
+  // 精确率仍显真值
+  expect(screen.getByTestId("scorecard-contextPrecision")).toHaveTextContent("78");
+});
+
+it("生成层第 4 格 Citation 渲染真实分数（F4）", async () => {
+  renderReport();
+  expect(await screen.findByText("Citation")).toBeInTheDocument();
+  expect(screen.getByTestId("scorecard-citation")).toHaveTextContent("86");
+});
+
+it("无 gold 的 run：检索层三项显「—」+「未标 gold docs」空态（F2 原型 §7 逐字）", async () => {
+  renderReport({
+    scorecard: {
+      retrieval: {
+        contextPrecision: aggregate(78),
+        contextRecall: aggregate(null, 0),
+        ndcg5: aggregate(null, 0),
+        hitRate5: aggregate(null, 0),
+        goldCoverage: { withGold: 0, total: 50 },
+      },
+    },
+  });
+  expect(await screen.findByText("未标 gold docs，0/50")).toBeInTheDocument();
+  // gold 三项均显「—」，精确率不受影响（LLM 判分，不依赖 gold）
+  expect(screen.getByTestId("scorecard-contextRecall")).toHaveTextContent("—");
+  expect(screen.getByTestId("scorecard-ndcg5")).toHaveTextContent("—");
+  expect(screen.getByTestId("scorecard-hitRate5")).toHaveTextContent("—");
   expect(screen.getByTestId("scorecard-contextPrecision")).toHaveTextContent("78");
 });
 
 it("记分卡未评均值显示「—」而不是 0", async () => {
   renderReport({
-    scorecard: { generation: { faithfulness: aggregate(null, 0), answerRelevancy: aggregate(88), correctness: aggregate(82) } },
+    scorecard: {
+      generation: {
+        faithfulness: aggregate(null, 0),
+        answerRelevancy: aggregate(88),
+        correctness: aggregate(82),
+        citation: aggregate(86),
+      },
+    },
   });
   const cell = await screen.findByTestId("scorecard-faithfulness");
   expect(cell).toHaveTextContent("—");
@@ -251,6 +322,55 @@ it("trace 链接指向 preview trace 详情", async () => {
   renderReport();
   const link = await screen.findByRole("link", { name: "trace" });
   expect(link).toHaveAttribute("href", `/admin/traces/${TRACE}`);
+});
+
+it("判分依据抽屉展示 Citation 段（支持/不支持 tag）与检索层 gold 分数（F4/F2）", async () => {
+  renderReport({
+    results: [
+      result({
+        citation: 50,
+        evidence: {
+          citation: ["[supported] 7 天内无理由退 —— 有依据", "[unsupported] 运费需自理 —— 未见于上下文"],
+        },
+      }),
+    ],
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "判分依据" }));
+  // citation evidence 行的 supported/unsupported → 绿「支持」/红「不支持」tag
+  expect(await screen.findByText("支持")).toBeInTheDocument();
+  expect(screen.getByText("不支持")).toBeInTheDocument();
+  expect(screen.getByText("7 天内无理由退 —— 有依据")).toBeInTheDocument();
+  // 检索层（gold docs）分数简行：抽屉指标卡区追加三项确定性分数（无 LLM evidence 行）
+  const goldCard = screen.getByText("检索层（gold docs）").closest(".ant-card");
+  expect(goldCard).not.toBeNull();
+  expect(within(goldCard as HTMLElement).getByText("Context Recall")).toBeInTheDocument();
+});
+
+it("每题重复 >1 的行可展开显示逐次明细（F5）", async () => {
+  renderReport({
+    results: [
+      result({
+        repeatCount: 3,
+        repeats: [
+          repeat({ repeatIndex: 1, faithfulness: 96 }),
+          repeat({ repeatIndex: 2, faithfulness: 88 }),
+          repeat({ repeatIndex: 3, faithfulness: 92 }),
+        ],
+      }),
+    ],
+  });
+  await screen.findAllByTestId("cell-faithfulness");
+  const expandBtn = document.querySelector<HTMLElement>(".ant-table-row-expand-icon-collapsed");
+  expect(expandBtn).not.toBeNull();
+  fireEvent.click(expandBtn as HTMLElement);
+  expect(await screen.findByText("第 1 次")).toBeInTheDocument();
+  expect(screen.getByText("第 2 次")).toBeInTheDocument();
+  expect(screen.getByText("第 3 次")).toBeInTheDocument();
+});
+
+it("进度分母按 unit 数（totalCases × repeatCount）", async () => {
+  renderReport({ run: { status: "running", doneCases: 5, totalCases: 2, repeatCount: 3 } });
+  expect(await screen.findByText(/运行中 · 5\/6/)).toBeInTheDocument();
 });
 
 // QA P3-4：任何加载失败都渲染「评测报告不存在」，与真 404 无法区分——QA 期间实际造成误诊。
