@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button, Collapse, message, Segmented, Spin, Tooltip } from "antd";
-import type { TraceDetailResponse, TraceQualityDetail, TraceStatus } from "@codecrush/contracts";
-import { getTrace, getTraceQuality } from "../../api/client";
+import type {
+  EvalCaseRef,
+  TraceDetailResponse,
+  TraceQualityDetail,
+  TraceStatus,
+} from "@codecrush/contracts";
+import { getEvalCaseRefs, getTrace, getTraceQuality } from "../../api/client";
+import AddToEvalSetModal from "./AddToEvalSetModal";
 import ReplayModal, { type ReplaySource } from "./ReplayModal";
 import {
   autoSelectSpan,
@@ -39,6 +45,9 @@ export default function TraceDetailPage() {
   const [view, setView] = useState<"timeline" | "tree">("timeline");
   const [jsonOpen, setJsonOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
+  // B1/F2：这条 trace 已进过哪些评测集——决定按钮是「+ 加入评测集」还是「已在评测集 · 查看」。
+  const [caseRefs, setCaseRefs] = useState<EvalCaseRef[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -62,10 +71,26 @@ export default function TraceDetailPage() {
       .catch(() => {
         if (live) setQualityError(true);
       });
+    // B1/F2：按钮两态的判据。取不到就当「未入集」——按钮显示「+ 加入评测集」，
+    // 用户点了会走后端真实校验，不会因为这一次读失败而做错事。
+    getEvalCaseRefs(traceId)
+      .then((refs) => {
+        if (live) setCaseRefs(refs);
+      })
+      .catch(() => {
+        if (live) setCaseRefs([]);
+      });
     return () => {
       live = false;
     };
   }, [traceId]);
+
+  /** 入集成功后就地刷新按钮态（原型 §17.6「成功 toast + 按钮态切换」）。 */
+  const refreshCaseRefs = () => {
+    void getEvalCaseRefs(traceId)
+      .then(setCaseRefs)
+      .catch(() => undefined);
+  };
 
   const spans = useMemo(() => data?.spans ?? [], [data]);
   const root = useMemo(() => rootSpanOf(spans), [spans]);
@@ -130,7 +155,7 @@ export default function TraceDetailPage() {
 
   return (
     <div>
-      {/* 头部：返回 + traceId + 状态 + 跳 Prompt / 复制 JSON（无重放/加入评测集，M11） */}
+      {/* 头部：返回 + traceId + 状态 + 加入评测集 / 重放 / 跳 Prompt / 复制 JSON */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
         <div onClick={() => nav("/admin/traces")} style={headBtn}>
           ← 返回列表
@@ -152,7 +177,16 @@ export default function TraceDetailPage() {
           {st.label}
         </span>
         <div style={{ flex: 1 }} />
-        {/* 原型 §10 顶部操作组：本波仅「↻ 重放」（加入评测集/问题池等属其它波）。 */}
+        {/*
+          原型 §10 顶部操作组（`:388` 顺序：加入评测集 → 加入问题池 → 重放 → 跳 Prompt → 复制）。
+          「+ 加入问题池」属屏5 问题池，留 B2；此处只做「加入评测集」与既有「重放」。
+        */}
+        {caseRefs.length > 0 ? (
+          // 原型 §17.6 `:647`「已在集:按钮变「已在评测集·查看」」
+          <Button onClick={() => nav("/admin/eval/sets")}>已在评测集 · 查看</Button>
+        ) : (
+          <Button onClick={() => setAddOpen(true)}>+ 加入评测集</Button>
+        )}
         <Tooltip title={meta.agentId ? "" : "trace 缺少应用信息，无法重放"}>
           <Button
             type="primary"
@@ -170,6 +204,17 @@ export default function TraceDetailPage() {
           {"{ }"} 复制 JSON
         </div>
       </div>
+
+      <AddToEvalSetModal
+        open={addOpen}
+        sourceTraceId={traceId}
+        question={meta.userInput ?? ""}
+        onClose={() => setAddOpen(false)}
+        onDone={() => {
+          setAddOpen(false);
+          refreshCaseRefs();
+        }}
+      />
 
       <ReplayModal
         open={replayOpen}

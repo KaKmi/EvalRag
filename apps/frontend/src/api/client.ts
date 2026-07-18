@@ -26,8 +26,10 @@ import {
   ApplicationTagListResponseSchema,
   type ApplicationTagListResponse,
   type MoveApplicationTagRequest,
+  EvalCaseRefListResponseSchema,
   EvalGateStatusSchema,
   ReleaseCheckSchema,
+  type EvalCaseRefListResponse,
   type EvalGateStatus,
   type ReleaseCheck,
   PublishProductionRequestSchema,
@@ -901,6 +903,12 @@ async function deleteVoid(path: string, fallback: string): Promise<void> {
 
 const setPath = (id: string) => `/api/eval/sets/${encodeURIComponent(id)}`;
 
+/** B1/F2：这条 trace 已进过哪些评测集（Trace 详情按钮两态）。 */
+export const getEvalCaseRefs = (sourceTraceId: string): Promise<EvalCaseRefListResponse> =>
+  getJson(
+    `/api/eval/sets/case-refs?sourceTraceId=${encodeURIComponent(sourceTraceId)}`,
+    EvalCaseRefListResponseSchema,
+  );
 export const getEvalSets = (): Promise<EvalSetListResponse> =>
   getJson("/api/eval/sets", EvalSetListResponseSchema);
 export const createEvalSet = (req: CreateEvalSetRequest): Promise<EvalSet> =>

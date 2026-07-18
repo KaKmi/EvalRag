@@ -1,10 +1,18 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { TraceDetailResponse } from "@codecrush/contracts";
 import TraceDetailPage from "./TraceDetailPage";
 import * as client from "../../api/client";
 
-vi.mock("../../api/client", () => ({ getTrace: vi.fn(), getTraceQuality: vi.fn() }));
+vi.mock("../../api/client", () => ({
+  getTrace: vi.fn(),
+  getTraceQuality: vi.fn(),
+  // B1/F2：「加入评测集」按钮两态的数据源；弹窗内部还会用到集列表与创建接口。
+  getEvalCaseRefs: vi.fn(),
+  getEvalSets: vi.fn(),
+  createEvalCase: vi.fn(),
+  createEvalSet: vi.fn(),
+}));
 const mocked = vi.mocked(client);
 
 const detail: TraceDetailResponse = {
@@ -76,8 +84,11 @@ function renderAt(id: string) {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   mocked.getTrace.mockResolvedValue(detail);
   mocked.getTraceQuality.mockResolvedValue({ status: "unscored" });
+  mocked.getEvalCaseRefs.mockResolvedValue([]);
+  mocked.getEvalSets.mockResolvedValue([]);
 });
 
 describe("TraceDetailPage (M9 W2)", () => {
@@ -177,4 +188,31 @@ describe("TraceDetailPage (M9 W2)", () => {
       "low",
     );
   });
+});
+
+// —— B1/F2：「加入评测集」按钮两态（原型 §17.6 `:647`）——
+
+it("未入集 → 显示「+ 加入评测集」，点击开弹窗", async () => {
+  mocked.getEvalCaseRefs.mockResolvedValue([]);
+  renderAt("a".repeat(32));
+  const btn = await screen.findByRole("button", { name: "+ 加入评测集" });
+  fireEvent.click(btn);
+  expect(await screen.findByText("加入评测集")).toBeInTheDocument();
+  expect(screen.getByPlaceholderText("留空则进集后为待补 gold")).toBeInTheDocument();
+});
+
+it("已入集 → 按钮变「已在评测集 · 查看」，不再显示加入按钮", async () => {
+  mocked.getEvalCaseRefs.mockResolvedValue([
+    { setId: "s1", setName: "售后核心 50 题", caseId: "c1" },
+  ]);
+  renderAt("a".repeat(32));
+  expect(await screen.findByRole("button", { name: "已在评测集 · 查看" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "+ 加入评测集" })).not.toBeInTheDocument();
+});
+
+/** 读 case-refs 失败不能把按钮弄没——退回「未入集」态，用户仍可尝试入集（后端会真实校验）。 */
+it("case-refs 读取失败 → 退回「+ 加入评测集」态", async () => {
+  mocked.getEvalCaseRefs.mockRejectedValue(new Error("boom"));
+  renderAt("a".repeat(32));
+  expect(await screen.findByRole("button", { name: "+ 加入评测集" })).toBeInTheDocument();
 });
