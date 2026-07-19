@@ -12,7 +12,6 @@ import {
   Select,
   Space,
   Spin,
-  Statistic,
   Switch,
   Tooltip,
   Typography,
@@ -33,6 +32,7 @@ import {
 } from "../../api/client";
 import { MetricChart } from "../../components/MetricChart";
 import { buildMetricTraceLink, toOverviewQuery, type QualityRange } from "./qualityViewModel";
+import { QualityMetricCard } from "./QualityMetricCard";
 
 type TrendTooltipParam = {
   axisValue?: string;
@@ -376,36 +376,20 @@ export default function QualityPage() {
           ) : (
             <>
               <Flex gap={12} wrap style={{ marginBottom: 16 }}>
-                {METRICS.map(({ key, label }) => {
-                  const metric = overview.metrics[key];
-                  return (
-                    <Card
-                      key={key}
-                      hoverable
-                      role="button"
-                      data-testid={`metric-${key}`}
-                      aria-label={`${label} ${metric.value ?? "暂无"}`}
-                      onClick={() =>
-                        navigate(buildMetricTraceLink(key, metric.threshold, activeQuery.from!))
-                      }
-                      style={{ flex: "1 1 200px", borderColor: metric.low ? "#ffccc7" : undefined }}
-                      styles={{ body: { padding: 18 } }}
-                    >
-                      <Statistic
-                        title={label}
-                        value={metric.value ?? "—"}
-                        styles={{ content: { color: metric.low ? "#cf1322" : "#1677ff" } }}
-                      />
-                      {metric.sampleCount < 20 ? (
-                        <Text style={{ color: "#d48806" }}>样本不足</Text>
-                      ) : metric.previousDelta !== null ? (
-                        <Text type={metric.previousDelta >= 0 ? "success" : "danger"}>
-                          {metric.previousDelta >= 0 ? "▲" : "▼"} {Math.abs(metric.previousDelta)}
-                        </Text>
-                      ) : null}
-                    </Card>
-                  );
-                })}
+                {METRICS.map(({ key, label }) => (
+                  // 卡片本体已抽成共享组件（看板摘要行复用同一个），四种状态判定只此一处。
+                  <QualityMetricCard
+                    key={key}
+                    label={label}
+                    metric={overview.metrics[key]}
+                    testId={`metric-${key}`}
+                    onClick={() =>
+                      navigate(
+                        buildMetricTraceLink(key, overview.metrics[key].threshold, activeQuery.from!),
+                      )
+                    }
+                  />
+                ))}
               </Flex>
 
               <Card title="质量趋势" style={{ marginBottom: 16 }}>
