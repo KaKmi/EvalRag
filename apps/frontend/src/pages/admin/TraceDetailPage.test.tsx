@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { TraceDetailResponse } from "@codecrush/contracts";
+import { message } from "antd";
 import TraceDetailPage from "./TraceDetailPage";
 import * as client from "../../api/client";
 
@@ -14,7 +15,16 @@ vi.mock("../../api/client", () => ({
   createEvalSet: vi.fn(),
   // B1/F3：质量面板「立即评测」/「重试」的入队入口。
   scoreTraceNow: vi.fn(),
+  // B2a Task 8：「+ 加入问题池」（021 决策 B：前端组合，不产生后端反向边）。
+  createGapItem: vi.fn(),
 }));
+vi.mock("antd", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("antd")>();
+  return {
+    ...actual,
+    message: { ...actual.message, error: vi.fn(), success: vi.fn(), info: vi.fn() },
+  };
+});
 const mocked = vi.mocked(client);
 
 const detail: TraceDetailResponse = {
@@ -254,9 +264,7 @@ it("trace 无用户问题 → 「+ 加入评测集」禁用", async () => {
   mocked.getEvalCaseRefs.mockResolvedValue([]);
   mocked.getTrace.mockResolvedValue({ ...detail, meta: { ...detail.meta, userInput: "" } });
   renderAt("a".repeat(32));
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "+ 加入评测集" })).toBeDisabled(),
-  );
+  await waitFor(() => expect(screen.getByRole("button", { name: "+ 加入评测集" })).toBeDisabled());
 });
 
 // === B1/F3：质量面板四态（原型 §18.D 状态机 + 补充状态示例 :659-660）===
@@ -386,4 +394,98 @@ it("已评态不显示「立即评测」", async () => {
   renderAt(TID);
   await screen.findByTestId("quality-score-faithfulness");
   expect(screen.queryByRole("button", { name: "立即评测" })).not.toBeInTheDocument();
+});
+
+// ───────────────────── B2a Task 8：加入问题池（原型 `:388` / §19.2 `:753`） ─────────────────────
+
+/** 顶部操作组的顺序照原型 `:388`：加入评测集 → **加入问题池** → 重放 → 跳 Prompt → 复制 OTLP。 */
+it("顶部操作组五项按原型 `:388` 的顺序排列", async () => {
+  renderAt(TID);
+  await screen.findByRole("button", { name: "+ 加入问题池" });
+  // 加入评测集 → 加入问题池 → 重放 → 跳转 Prompt 版本 → 复制 OTLP。
+  // 只断言「入池在入集之后」是不够的——把它挪到重放之后照样能过。
+  // ⚠️ 第五项原型写的是「复制 OTLP」，现有实现是「{ } 复制 JSON」——**M9 的既有偏离**，
+  // 不属本波改动范围，此处照实现断言并留档（已记入 ledger 待回写 002）。
+  const labels = ["+ 加入评测集", "+ 加入问题池", "↻ 重放", "跳转 Prompt 版本 →", /复制 JSON/];
+  const nodes = labels.map((text) => screen.getByText(text));
+  for (let i = 1; i < nodes.length; i += 1) {
+    expect(
+      nodes[i - 1].compareDocumentPosition(nodes[i]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  }
+});
+
+it("问题超过 500 字时给可读文案，而不是把 ZodError 的 JSON 弹给用户", async () => {
+  // 线上 ChatRequestSchema.query 没有长度上限，600 字的真实提问会出现；而契约的
+  // question 是 .max(500)。不本地拦的话 postJson 会在发请求前同步抛 ZodError，
+  // 其 message 是一坨序列化 issues，而这一屏没有可改问题的输入框 —— 等于死路。
+  mocked.getTrace.mockResolvedValue({
+    ...detail,
+    meta: { ...detail.meta, userInput: "退".repeat(501) },
+  });
+  renderAt(TID);
+  fireEvent.click(await screen.findByRole("button", { name: "+ 加入问题池" }));
+
+  await waitFor(() =>
+    expect(message.error).toHaveBeenCalledWith("问题超过 500 字，无法直接加入问题池"),
+  );
+  expect(mocked.createGapItem).not.toHaveBeenCalled();
+});
+
+it("入池失败时给出错误文案，不静默", async () => {
+  mocked.createGapItem.mockRejectedValue(new Error("服务器开小差"));
+  renderAt(TID);
+  fireEvent.click(await screen.findByRole("button", { name: "+ 加入问题池" }));
+
+  await waitFor(() => expect(message.error).toHaveBeenCalledWith("服务器开小差"));
+});
+
+it("trace 没有用户问题时按钮禁用（点了也入不了池）", async () => {
+  mocked.getTrace.mockResolvedValue({ ...detail, meta: { ...detail.meta, userInput: "  " } });
+  renderAt(TID);
+  const btn = await screen.findByRole("button", { name: "+ 加入问题池" });
+  expect(btn).toBeDisabled();
+});
+
+it("入池带 source=manual_trace 与根 span 的 startTime，成功 toast 逐字照 §19.2", async () => {
+  mocked.createGapItem.mockResolvedValue({
+    clusterId: "c1",
+    joinedExisting: false,
+    representativeQuestion: "怎么退款",
+    freq: 1,
+  });
+  renderAt(TID);
+  fireEvent.click(await screen.findByRole("button", { name: "+ 加入问题池" }));
+
+  await waitFor(() =>
+    expect(mocked.createGapItem).toHaveBeenCalledWith({
+      question: "怎么退款",
+      source: "manual_trace",
+      sourceTraceId: TID,
+      // 不带它的话该样本只进累计 freq、不进 freq30d，屏5 会把「刚断言是真实流量」的样本
+      // 显示成「近30天 0」。根 chain span 的 startTime 就是 trace 开始时间。
+      traceStartTime: "2026-07-13T09:11:00.000Z",
+    }),
+  );
+  expect(message.success).toHaveBeenCalledWith("已加入问题池");
+});
+
+it("已在池时给出原型 `:648` 的「已在缺口『…』(×N) 中」提示，而不是报错", async () => {
+  mocked.createGapItem.mockResolvedValue({
+    clusterId: "c1",
+    joinedExisting: true,
+    representativeQuestion: "能开专票吗",
+    freq: 23,
+  });
+  renderAt(TID);
+  fireEvent.click(await screen.findByRole("button", { name: "+ 加入问题池" }));
+
+  await waitFor(() => expect(message.info).toHaveBeenCalled());
+  // 逐字核对原型 §19.2 的文案：「该问题已在缺口『能开专票吗』(×23) 中 · 查看」。
+  const { container } = render(
+    <>{(vi.mocked(message.info).mock.calls[0][0] as { content: React.ReactNode }).content}</>,
+  );
+  expect(container.textContent).toContain("该问题已在缺口『能开专票吗』(×23) 中");
+  expect(container.textContent).toContain("查看");
+  expect(message.error).not.toHaveBeenCalled();
 });

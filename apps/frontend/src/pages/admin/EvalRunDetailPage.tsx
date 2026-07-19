@@ -27,7 +27,7 @@ import type {
   EvalRunStatus,
   EvalVerdict,
 } from "@codecrush/contracts";
-import { ApiError, getEvalRunReport, stopEvalRun } from "../../api/client";
+import { ApiError, createGapItem, getEvalRunReport, stopEvalRun } from "../../api/client";
 import { formatHitRate5, formatNdcg5 } from "./evalShared";
 import ReplayModal, { type ReplaySource } from "./ReplayModal";
 
@@ -128,6 +128,8 @@ export default function EvalRunDetailPage() {
   const [evidenceOf, setEvidenceOf] = useState<Row | null>(null);
   const [stopping, setStopping] = useState(false);
   const [replaySource, setReplaySource] = useState<ReplaySource | null>(null);
+  /** B2a Task 8：正在入池的行（防连点——两次往返里第二次会回 joinedExisting，看起来像自己加重了）。 */
+  const [poolingRow, setPoolingRow] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -251,6 +253,56 @@ export default function EvalRunDetailPage() {
   const totalUnits = run.totalCases * run.repeatCount;
   const percent = totalUnits > 0 ? Math.round((run.doneCases / totalUnits) * 100) : 0;
 
+  /**
+   * B2a Task 8：行尾「加入问题池」（021 决策 B：**前端组合**，后端不产生 `eval-runs → gaps` 反向边）。
+   *
+   * `source` 是 **`offline_run`** 而不是 `manual_trace`——这条样本来自离线重跑，不是真实用户流量。
+   * 后端据此把它排除在 `freq30d` 的 30 天滚动窗口之外（只进累计 `freq`），
+   * 也排除在 `followUpRatio` 的分母之外。传错会让离线重跑的量污染「最近有多少真实用户踩到」。
+   *
+   * `traceStartTime` **要传**（peer review 纠正了我最初"不传"的判断）：它不止喂 `freq30d`，
+   * 还决定 `traceExpired`（NULL ⇒ 恒 false ⇒ 30 天后那条 preview trace 链接仍是蓝的、
+   * 点进去撞「未找到该 Trace」，而同簇的 online 成员会正确置灰——同一张表两种表现）
+   * 与簇内排序（`NULLS LAST` 恒沉底）。传它**不会**污染任何统计：上面两个口径都按 `source`
+   * 独立排除了 `offline_run`。语义上它就是「这个样本的 trace 何时产生」，对离线重跑而言
+   * 就是 run 的开始时间；「是不是真实流量」由 `source` 列单独承载。
+   * 必须 `toISOString()` 归一化：`run.startedAt` 是 `.datetime({offset:true})`，
+   * 而 gaps 请求侧是 `.datetime()`（不收 offset），带 `+08:00` 直传会在客户端 zod 就炸。
+   */
+  const addRowToPool = async (row: Row) => {
+    if (!row.previewTraceId || poolingRow) return;
+    setPoolingRow(row.previewTraceId);
+    try {
+      const startedAt = run.startedAt ? new Date(run.startedAt) : null;
+      const result = await createGapItem({
+        question: row.question,
+        source: "offline_run",
+        sourceTraceId: row.previewTraceId,
+        ...(startedAt && !Number.isNaN(startedAt.getTime()) && startedAt.getTime() <= Date.now()
+          ? { traceStartTime: startedAt.toISOString() }
+          : {}),
+      });
+      if (result.joinedExisting) {
+        // 原型 §19.2 `:753` 逐字：「该问题已在缺口『…』(×N) 中 · 查看」。
+        // 尾部的「查看」是这条 toast 里唯一可执行的部分，不能省。
+        message.info({
+          content: (
+            <span>
+              该问题已在缺口『{result.representativeQuestion}』(×{result.freq}) 中 ·{" "}
+              <Link to="/admin/gaps">查看</Link>
+            </span>
+          ),
+        });
+      } else {
+        message.success("已加入问题池");
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "加入问题池失败");
+    } finally {
+      setPoolingRow(null);
+    }
+  };
+
   // F7：行尾「重放该条」打开 ReplayModal（预填 run 的 app/version + 行 question + previewTraceId）。
   const onReplayRow = (row: Row) => {
     if (!row.previewTraceId) return;
@@ -300,7 +352,8 @@ export default function EvalRunDetailPage() {
         { text: "超时", value: "timeout" },
         { text: "未跑", value: "skipped" },
       ],
-      onFilter: (value, row) => (value === "skipped" ? row.skipped : !row.skipped && row.verdict === value),
+      onFilter: (value, row) =>
+        value === "skipped" ? row.skipped : !row.skipped && row.verdict === value,
       render: (_: unknown, row) =>
         row.skipped ? (
           <Tag style={{ margin: 0 }}>未跑</Tag>
@@ -333,8 +386,12 @@ export default function EvalRunDetailPage() {
             >
               判分依据
             </Button>
-            {/* 原型 §7 行尾「…」快捷操作。本波仅「重放该条」（无 preview trace → 禁用）；
-                「加入问题池 / 标记忽略」属 E-W4，不做。 */}
+            {/*
+              原型 §7 行尾「…」快捷操作（`:322`：重放该条 / 加入问题池 / 标记忽略）。
+              「标记忽略」**本波不渲染**：`EvalRunResult` 上没有任何可落这个标记的字段，
+              而 B2a 明令不改 eval-runs 的 schema。若把它做成「入池后顺手忽略整个缺口簇」，
+              一条用例的判断就会连坐簇里其他所有成员——那不是忽略，是误伤。留给有字段之后再做。
+            */}
             <Dropdown
               trigger={["click"]}
               menu={{
@@ -344,6 +401,13 @@ export default function EvalRunDetailPage() {
                     label: "重放该条",
                     disabled: row.previewTraceId === null,
                     onClick: () => onReplayRow(row),
+                  },
+                  {
+                    key: "pool",
+                    label: "加入问题池",
+                    // 没跑出 preview trace 就没有可引用的样本 id（`source_trace_id` 是幂等键）。
+                    disabled: row.previewTraceId === null || poolingRow !== null,
+                    onClick: () => void addRowToPool(row),
                   },
                 ] satisfies MenuProps["items"],
               }}
@@ -396,16 +460,15 @@ export default function EvalRunDetailPage() {
         </Flex>
       </Card>
 
-      <StatusBanner
-        report={report}
-        percent={percent}
-        stopping={stopping}
-        onStop={stop}
-      />
+      <StatusBanner report={report} percent={percent} stopping={stopping} onStop={stop} />
 
       {/* 记分卡两块（原型 §7：检索层 / 生成层）。点某指标 → 逐用例表按该指标升序（§17.3）。 */}
       <Flex gap={8} wrap style={{ marginBottom: 8 }}>
-        <Card size="small" style={{ flex: "1 1 320px" }} title={<span style={{ color: "#1677ff" }}>检索层</span>}>
+        <Card
+          size="small"
+          style={{ flex: "1 1 320px" }}
+          title={<span style={{ color: "#1677ff" }}>检索层</span>}
+        >
           <Flex wrap gap={8}>
             {/* 精确率是 LLM 判分（不依赖 gold）——始终可点排序、显真值 */}
             <MetricCell
@@ -445,7 +508,11 @@ export default function EvalRunDetailPage() {
                 ` · gold ${scorecard.retrieval.goldCoverage.withGold}/${scorecard.retrieval.goldCoverage.total}`}
           </Text>
         </Card>
-        <Card size="small" style={{ flex: "1 1 320px" }} title={<span style={{ color: "#722ed1" }}>生成层</span>}>
+        <Card
+          size="small"
+          style={{ flex: "1 1 320px" }}
+          title={<span style={{ color: "#722ed1" }}>生成层</span>}
+        >
           <Flex wrap gap={8}>
             <MetricCell
               label="Faithfulness"
@@ -552,7 +619,9 @@ function StatusBanner({
         type="info"
         showIcon
         style={{ marginBottom: 8 }}
-        title={run.status === "queued" ? "排队中，等待执行" : `运行中 · ${run.doneCases}/${totalUnits}`}
+        title={
+          run.status === "queued" ? "排队中，等待执行" : `运行中 · ${run.doneCases}/${totalUnits}`
+        }
         description={<Progress percent={percent} status="active" />}
         action={
           <Popconfirm
@@ -572,7 +641,10 @@ function StatusBanner({
     );
   }
 
-  const banner: Record<"partial" | "budget_stop" | "failed", { type: "warning" | "error"; text: string }> = {
+  const banner: Record<
+    "partial" | "budget_stop" | "failed",
+    { type: "warning" | "error"; text: string }
+  > = {
     // §18.A：「手动停止，已完成 23/50」+ 剩余标 skipped
     partial: {
       type: "warning",
@@ -629,7 +701,10 @@ function MetricCell({
         }}
       >
         <Text style={{ fontSize: 12 }}>{label}</Text>
-        <b data-testid={`scorecard-${metric}`} style={{ fontSize: 18, color: scoreColor(aggregate.value) }}>
+        <b
+          data-testid={`scorecard-${metric}`}
+          style={{ fontSize: 18, color: scoreColor(aggregate.value) }}
+        >
           {aggregate.value === null ? "—" : aggregate.value}
         </b>
         <Text type="secondary" style={{ fontSize: 11 }}>
@@ -662,7 +737,10 @@ function RetrievalMetricCell({
   return (
     <Flex vertical gap={2} style={{ flex: "1 1 130px", padding: "4px 8px" }}>
       <Text style={{ fontSize: 12 }}>{label}</Text>
-      <b data-testid={testId} style={{ fontSize: 18, color: dash ? "rgba(0,0,0,.25)" : scoreColor(value) }}>
+      <b
+        data-testid={testId}
+        style={{ fontSize: 18, color: dash ? "rgba(0,0,0,.25)" : scoreColor(value) }}
+      >
         {value === null || dash ? "—" : format ? format(value) : value}
       </b>
     </Flex>
@@ -672,17 +750,22 @@ function RetrievalMetricCell({
 /** F5：某用例重复次数 >1 时展开的逐次明细（每次的分数 / verdict / trace 链接）。 */
 function RepeatDetail({ repeats }: { repeats: EvalRunRepeat[] }) {
   const columns: TableColumnsType<EvalRunRepeat> = [
-    { title: "次数", key: "repeatIndex", width: 72, render: (_: unknown, r) => `第 ${r.repeatIndex} 次` },
-    ...(["faithfulness", "answerRelevancy", "correctness", "contextPrecision", "citation"] as const).map(
-      (metric) => ({
-        title: METRIC_LABEL[metric],
-        key: metric,
-        width: 76,
-        render: (_: unknown, r: EvalRunRepeat) => (
-          <span style={{ color: scoreColor(r[metric]) }}>{r[metric] === null ? "—" : r[metric]}</span>
-        ),
-      }),
-    ),
+    {
+      title: "次数",
+      key: "repeatIndex",
+      width: 72,
+      render: (_: unknown, r) => `第 ${r.repeatIndex} 次`,
+    },
+    ...(
+      ["faithfulness", "answerRelevancy", "correctness", "contextPrecision", "citation"] as const
+    ).map((metric) => ({
+      title: METRIC_LABEL[metric],
+      key: metric,
+      width: 76,
+      render: (_: unknown, r: EvalRunRepeat) => (
+        <span style={{ color: scoreColor(r[metric]) }}>{r[metric] === null ? "—" : r[metric]}</span>
+      ),
+    })),
     {
       title: "判定",
       key: "verdict",
@@ -742,47 +825,51 @@ function EvidenceDrawer({ row, onClose }: { row: Row | null; onClose: () => void
       {row && (
         <>
           <Text strong>{row.question}</Text>
-          {row.error && (
-            <Alert type="error" showIcon style={{ marginTop: 8 }} title={row.error} />
-          )}
+          {row.error && <Alert type="error" showIcon style={{ marginTop: 8 }} title={row.error} />}
           {row.answer && (
             <Card size="small" title="回答" style={{ marginTop: 8 }}>
               <Text style={{ whiteSpace: "pre-wrap" }}>{row.answer}</Text>
             </Card>
           )}
-          {(["faithfulness", "answerRelevancy", "correctness", "contextPrecision", "citation"] as const).map(
-            (metric) => {
-              const lines = row.evidence[metric];
-              return (
-                <Card
-                  key={metric}
-                  size="small"
-                  style={{ marginTop: 8 }}
-                  title={
-                    <Flex align="center" gap={8}>
-                      <span>{METRIC_LABEL[metric]}</span>
-                      <b style={{ color: scoreColor(row[metric]) }}>
-                        {row[metric] === null ? "—" : row[metric]}
-                      </b>
-                    </Flex>
-                  }
-                >
-                  {/*
+          {(
+            [
+              "faithfulness",
+              "answerRelevancy",
+              "correctness",
+              "contextPrecision",
+              "citation",
+            ] as const
+          ).map((metric) => {
+            const lines = row.evidence[metric];
+            return (
+              <Card
+                key={metric}
+                size="small"
+                style={{ marginTop: 8 }}
+                title={
+                  <Flex align="center" gap={8}>
+                    <span>{METRIC_LABEL[metric]}</span>
+                    <b style={{ color: scoreColor(row[metric]) }}>
+                      {row[metric] === null ? "—" : row[metric]}
+                    </b>
+                  </Flex>
+                }
+              >
+                {/*
                     「未评」的判据是**分数为 NULL**，不是 evidence 键缺失：契约里
                     evidence 只收评出来的指标（partialRecord），但反过来「有分无依据」
                     也可能发生（如 contextPrecision 无检索片段时的兜底），那不是未评。
                   */}
-                  {row[metric] === null ? (
-                    <Text type="secondary">该指标未评——裁判失败/超时/无 gold 可对照，不计入均值</Text>
-                  ) : lines === undefined || lines.length === 0 ? (
-                    <Text type="secondary">本次未返回判分依据</Text>
-                  ) : (
-                    lines.map((line, index) => <EvidenceLine key={index} line={line} />)
-                  )}
-                </Card>
-              );
-            },
-          )}
+                {row[metric] === null ? (
+                  <Text type="secondary">该指标未评——裁判失败/超时/无 gold 可对照，不计入均值</Text>
+                ) : lines === undefined || lines.length === 0 ? (
+                  <Text type="secondary">本次未返回判分依据</Text>
+                ) : (
+                  lines.map((line, index) => <EvidenceLine key={index} line={line} />)
+                )}
+              </Card>
+            );
+          })}
           <RetrievalGoldCard row={row} />
         </>
       )}
@@ -803,7 +890,8 @@ function RetrievalGoldCard({ row }: { row: Row }) {
       ) : (
         <Flex gap={16} wrap>
           <span>
-            Context Recall <b style={{ color: scoreColor(row.contextRecall) }}>{row.contextRecall ?? "—"}</b>
+            Context Recall{" "}
+            <b style={{ color: scoreColor(row.contextRecall) }}>{row.contextRecall ?? "—"}</b>
           </span>
           <span>
             NDCG@5{" "}

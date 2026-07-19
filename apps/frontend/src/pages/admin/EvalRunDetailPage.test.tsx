@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { message } from "antd";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { EvalRunRepeat, EvalRunReport, EvalRunResult } from "@codecrush/contracts";
 import * as api from "../../api/client";
@@ -6,11 +7,11 @@ import EvalRunDetailPage from "./EvalRunDetailPage";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/client")>();
-  return { ...actual, getEvalRunReport: vi.fn(), stopEvalRun: vi.fn() };
+  return { ...actual, getEvalRunReport: vi.fn(), stopEvalRun: vi.fn(), createGapItem: vi.fn() };
 });
 vi.mock("antd", async (importOriginal) => {
   const actual = await importOriginal<typeof import("antd")>();
-  return { ...actual, message: { error: vi.fn(), success: vi.fn() } };
+  return { ...actual, message: { error: vi.fn(), success: vi.fn(), info: vi.fn() } };
 });
 
 const TRACE = "a".repeat(32);
@@ -169,14 +170,29 @@ it("点记分卡指标 → 逐用例表按该指标升序", async () => {
   renderReport({
     results: [
       // 忠实度更低、但最差指标（正确率 20）更高 → 默认排序在后，按忠实度排序后浮顶
-      result({ seq: 1, faithfulness: 30, correctness: 90, minMetric: "faithfulness", minScore: 30 }),
-      result({ seq: 2, caseId: "case-2", faithfulness: 99, correctness: 20, minMetric: "correctness", minScore: 20 }),
+      result({
+        seq: 1,
+        faithfulness: 30,
+        correctness: 90,
+        minMetric: "faithfulness",
+        minScore: 30,
+      }),
+      result({
+        seq: 2,
+        caseId: "case-2",
+        faithfulness: 99,
+        correctness: 20,
+        minMetric: "correctness",
+        minScore: 20,
+      }),
     ],
   });
   const before = await screen.findAllByTestId("cell-faithfulness");
   expect(before[0]).toHaveTextContent("99");
   fireEvent.click(screen.getByTestId("scorecard-faithfulness"));
-  await waitFor(() => expect(screen.getAllByTestId("cell-faithfulness")[0]).toHaveTextContent("30"));
+  await waitFor(() =>
+    expect(screen.getAllByTestId("cell-faithfulness")[0]).toHaveTextContent("30"),
+  );
 });
 
 it("未评指标显示「—」而不是 0", async () => {
@@ -306,7 +322,11 @@ it("未跑用例渲染为灰行且指标全「—」", async () => {
 });
 
 it("判分依据抽屉逐指标展示证据，未评指标说明不计入均值", async () => {
-  renderReport({ results: [result({ correctness: null, evidence: { faithfulness: ["[hit] 7 天内无理由退 —— 一致"] } })] });
+  renderReport({
+    results: [
+      result({ correctness: null, evidence: { faithfulness: ["[hit] 7 天内无理由退 —— 一致"] } }),
+    ],
+  });
   fireEvent.click(await screen.findByRole("button", { name: "判分依据" }));
   expect(await screen.findByRole("dialog", { name: "判分依据 · #1" })).toBeVisible();
   expect(await screen.findByText("7 天内无理由退 —— 一致")).toBeInTheDocument();
@@ -331,7 +351,10 @@ it("判分依据抽屉展示 Citation 段（支持/不支持 tag）与检索层 
       result({
         citation: 50,
         evidence: {
-          citation: ["[supported] 7 天内无理由退 —— 有依据", "[unsupported] 运费需自理 —— 未见于上下文"],
+          citation: [
+            "[supported] 7 天内无理由退 —— 有依据",
+            "[unsupported] 运费需自理 —— 未见于上下文",
+          ],
         },
       }),
     ],
@@ -422,5 +445,59 @@ describe("加载失败：404 与「没读回来」必须可区分", () => {
     // 报告真渲染出来了（逐用例表出现），且失败态收走
     expect((await screen.findAllByTestId("cell-faithfulness"))[0]).toHaveTextContent("96");
     expect(screen.queryByText("评测报告加载失败")).not.toBeInTheDocument();
+  });
+
+  // ─────────── B2a Task 8：行尾「加入问题池」（原型 `:322`：重放该条 / 加入问题池 / 标记忽略） ───────────
+
+  it("行尾「…」提供「加入问题池」，且以 source=offline_run 提交", async () => {
+    vi.mocked(api.createGapItem).mockResolvedValue({
+      clusterId: "c1",
+      joinedExisting: false,
+      representativeQuestion: "课程可以退款吗",
+      freq: 1,
+    });
+    renderReport({ results: [result({ previewTraceId: TRACE })] });
+    await screen.findAllByTestId("cell-faithfulness");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "…" })[0]);
+    fireEvent.click(await screen.findByText("加入问题池"));
+
+    await waitFor(() =>
+      expect(api.createGapItem).toHaveBeenCalledWith({
+        question: "课程可以退款吗",
+        // **必须是 offline_run**：这条来自离线重跑，不是真实用户流量。传成 manual_trace
+        // 会让它混进 freq30d 的 30 天滚动窗口与 followUpRatio 的分母，污染「最近多少真人踩到」。
+        source: "offline_run",
+        sourceTraceId: TRACE,
+        // 传 run 的开始时间。它不喂统计（freq30d / followUpRatio 都按 source 排除了
+        // offline_run），但决定 `traceExpired`——不传的话 30 天后这条 preview trace 链接
+        // 仍是蓝的、点进去撞「未找到该 Trace」，而同簇的 online 成员会正确置灰。
+        traceStartTime: "2026-07-14T06:20:01.000Z",
+      }),
+    );
+    expect(message.success).toHaveBeenCalledWith("已加入问题池");
+  });
+
+  it("没有 preview trace 的行不能加入问题池（没有可引用的样本 id）", async () => {
+    renderReport({ results: [result({ previewTraceId: null })] });
+    await screen.findAllByTestId("cell-faithfulness");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "…" })[0]);
+    const item = await screen.findByText("加入问题池");
+    expect(item.closest(".ant-dropdown-menu-item")).toHaveClass("ant-dropdown-menu-item-disabled");
+  });
+
+  /**
+   * 「标记忽略」本波**不渲染**：`EvalRunResult` 上没有可落这个标记的字段，而 B2a 明令不改
+   * eval-runs 的 schema。做成「入池后顺手忽略整个缺口簇」的话，一条用例的判断会连坐簇里
+   * 其他全部成员——那不是忽略，是误伤。
+   */
+  it("暂不渲染「标记忽略」（没有可落标记的字段）", async () => {
+    renderReport({ results: [result({ previewTraceId: TRACE })] });
+    await screen.findAllByTestId("cell-faithfulness");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "…" })[0]);
+    await screen.findByText("加入问题池");
+    expect(screen.queryByText("标记忽略")).not.toBeInTheDocument();
   });
 });
