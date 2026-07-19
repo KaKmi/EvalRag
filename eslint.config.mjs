@@ -139,9 +139,14 @@ export default tseslint.config(
   //
   // 注意它**不是**通用模块 DAG 强制器：本仓没装 eslint-plugin-boundaries，其余依赖边靠
   // docs/design/003 的边表 + review 守（见 003「依赖规则的真实强制力」）。
+  //
+  // 作用范围是**整个 apps/backend/src**，不是只有 modules/：`gaps → platform/{clickhouse,persistence,queue}`
+  // 是允许边，所以 `platform → gaps` 同样成环，而 platform 恰好不在 modules/ 下。
+  // 两个必需的豁免：① gaps 域自身；② 组装根 app.module.ts —— 它必须 import GapsModule 才能注册，
+  // 「任何文件都不许 import gaps」写成规则是不可满足的。
   {
-    files: ["apps/backend/src/modules/**/*.ts"],
-    ignores: ["apps/backend/src/modules/gaps/**/*.ts"],
+    files: ["apps/backend/src/**/*.ts"],
+    ignores: ["apps/backend/src/modules/gaps/**/*.ts", "apps/backend/src/app.module.ts"],
     rules: {
       "no-restricted-imports": [
         "error",

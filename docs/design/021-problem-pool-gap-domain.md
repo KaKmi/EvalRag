@@ -283,11 +283,12 @@ ignored          ──[恢复]──►        pending
    **实测 `eslint-plugin-boundaries` / `eslint-plugin-import` 根本没安装**（`package.json`），
    `eslint.config.mjs` 只有 4 个包级 `no-restricted-imports` 块（前端 / contracts / otel-conventions / otel），
    且**全是黑名单**——只列了几个禁止项，**不等于**对应的不变量。
-   本波新增 **Boundary ⑤**（ESLint 核心规则、零新依赖）机械强制**「无人 import `gaps`」这一条**，
+   本波新增 **Boundary ⑤**（ESLint 核心规则、零新依赖）机械强制**「`apps/backend/src` 下除 gaps 域自身与组装根 `app.module.ts` 外，无人 import `gaps`」**，
    并订正上述失实表述。**它不是通用模块 DAG 强制器**（那需要 `eslint-plugin-boundaries`）；
    尤其注意「跨域只走 barrel、禁止直接 import `adapters/`」**完全没有** lint 兜底，
    而「共享包只依赖 zod」也只是部分兜底（`packages/contracts` 里 `import "pg"` 当前是绿的）。
-   逐条强制力对照表见 `003`「依赖规则的真实强制力」与 `AGENTS.md`「依赖边界」。
+   规则字面禁掉了什么，见 `003`「依赖规则的真实强制力」与 `AGENTS.md`「依赖边界」的规则表
+   （那两处只陈述事实，**不做**逐条覆盖度判定）。
 
    > **Boundary ⑤ 的匹配写法有坑**（第一版踩过，peer review 抓出）：`no-restricted-imports` 的 `group`
    > 走 gitignore 式匹配，`"../gaps/*"` **只匹配深度恰为 1 的相对路径**（`../../gaps/x` 会漏），
