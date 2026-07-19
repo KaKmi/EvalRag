@@ -195,6 +195,43 @@ describe("EvaluationJudgeService", () => {
     expect(models.chat).toHaveBeenCalledTimes(2);
   });
 
+  // —— 末次失败原因必须进 message（2026-07-19 真实故障：三处落点都只读 message，
+  // 原因挂在 cause 上被层层丢弃，导致只能另写探针复现才定位到 max_tokens 截断）——
+  it("把末次失败原因与返回长度折进 message，并对截断给出可执行提示", async () => {
+    // 半截 JSON = 被 max_tokens 截断的形状
+    const truncated = '{"claims":[{"claim":"教材第9课讲刺头处理","supported":true,"rea';
+    models.chat.mockResolvedValue({ content: truncated });
+
+    await expect(judge.score(inputWithThreeContexts, modelIds)).rejects.toThrow(
+      /not valid JSON/,
+    );
+    await expect(judge.score(inputWithThreeContexts, modelIds)).rejects.toThrow(
+      new RegExp(`返回长度 ${truncated.length} 字符`),
+    );
+    await expect(judge.score(inputWithThreeContexts, modelIds)).rejects.toThrow(/max_tokens/);
+  });
+
+  it("schema 失败（JSON 完整、字段不对）不误报成截断", async () => {
+    models.chat.mockResolvedValue({
+      content: JSON.stringify({ claims: [{ claim: "x", supported: "yes", reason: "y" }] }),
+    });
+
+    const err = await judge.score(inputWithThreeContexts, modelIds).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/failed schema validation/);
+    // 关键：这类失败拿到的是完整 JSON，提示 max_tokens 会把人带偏
+    expect((err as Error).message).not.toMatch(/max_tokens/);
+  });
+
+  it("message 不得夹带 rawOutput 正文——它含用户答案与检索内容，会随 span 进 ClickHouse", async () => {
+    const secret = "员工张三的绩效评估结论是不予续约";
+    models.chat.mockResolvedValue({ content: `{"claims":[{"claim":"${secret}","supp` });
+
+    const err = await judge.score(inputWithThreeContexts, modelIds).catch((e: Error) => e);
+    expect((err as Error).message).not.toContain(secret);
+    // 但长度要在，长度才是区分「截断」与「格式跑偏」的依据
+    expect((err as Error).message).toMatch(/返回长度 \d+ 字符/);
+  });
+
   it("does not retry an unknown internal programming error", async () => {
     const attempt = jest.fn(async () => {
       throw new TypeError("internal invariant broken");

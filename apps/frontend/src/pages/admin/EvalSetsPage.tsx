@@ -51,7 +51,7 @@ import { downloadCsv as downloadCsvFile } from "../../utils/csv";
 import { GoldRefSelector } from "./GoldRefSelector";
 import { GOLD_DOC_MAX } from "./evalShared";
 
-const { Title, Text } = Typography;
+const { Title, Text, Paragraph } = Typography;
 
 /** 原型 §5 屏2「评测集管理(gold 题库)」/ §6「发起评测」/ §17.2 组件与状态矩阵 / §19.1 校验 / §19.2 文案。 */
 
@@ -556,11 +556,39 @@ function CasesTable({
       title: "gold 要点",
       key: "goldPoints",
       width: 260,
+      // 判分是**逐要点**比对的（correctness 对每条要点单独判一致/缺失/矛盾），所以
+      // 「几条」才是这一格最该先被看到的信息；把 N 条拼成一段长文本既读不了、也丢掉了
+      // 「要点是可数单位」这个语义。故：条数打头 + 首条预览（省略号 + 悬浮看全量列表），
+      // 完整编辑仍走行点击的抽屉（原型：行点击开编辑抽屉）。
       render: (_: unknown, row) =>
         row.goldPoints.length === 0 ? (
           <Text type="secondary">—</Text>
         ) : (
-          <Text style={{ fontSize: 12 }}>{row.goldPoints.join("；")}</Text>
+          <Tooltip
+            styles={{ root: { maxWidth: 520 } }}
+            title={
+              <ol style={{ margin: 0, paddingLeft: 18 }}>
+                {row.goldPoints.map((point, index) => (
+                  <li key={index} style={{ marginBottom: 2 }}>
+                    {point}
+                  </li>
+                ))}
+              </ol>
+            }
+          >
+            <Space direction="vertical" size={0} style={{ display: "flex" }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {row.goldPoints.length} 条要点
+              </Text>
+              <Paragraph
+                type="secondary"
+                style={{ fontSize: 12, marginBottom: 0 }}
+                ellipsis={{ rows: 2 }}
+              >
+                {row.goldPoints[0]}
+              </Paragraph>
+            </Space>
+          </Tooltip>
         ),
     },
     {
