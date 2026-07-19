@@ -660,12 +660,24 @@ export class OrchestrationService {
     const history = await this.loadHistory(validConvId);
 
     // 1) rewrite：降级时契约 fallback 已回填原 query
+    //    B2a：把改写结果写到 rewrite 节点自己的 span（同 intent 节点的既有做法）。
+    //    读侧（问题池 021 决策 F）要拿它判「指代是否被消解」：非首轮且改写结果实质等于原文
+    //    = 改写没消解成功。此前该信息只存在于进程内——`codecrush.io.output` 只打在 chain 根
+    //    span 与 rag.eval span 上，rewrite 子 span 一条都没有，读侧无从取得。
+    //    setAttribute 是内存操作，不增延迟、不会让问答失败，不违反「埋点绝不进关键路径」。
     const rewrite = await this.executeNode<{ rewrittenQuery: string }>(
       cfg.nodes.rewrite,
       "rewrite",
       { query, history },
       {},
-      { onUsage: metrics.addPrepUsage, onRepair: metrics.addRepair, signal },
+      {
+        spanEnrich: (out) => ({
+          [RAG.REWRITE_QUERY]: (out as { rewrittenQuery: string }).rewrittenQuery ?? "",
+        }),
+        onUsage: metrics.addPrepUsage,
+        onRepair: metrics.addRepair,
+        signal,
+      },
     );
     const rewrittenQuery = rewrite.rewrittenQuery;
 

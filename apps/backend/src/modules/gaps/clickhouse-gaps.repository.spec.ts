@@ -108,7 +108,9 @@ describe("ClickHouseGapsRepository.listPoolCandidates", () => {
   it("reads the rewritten question from the existing codecrush_trace_spans view", () => {
     expect(captured.query).toContain("codecrush_trace_spans");
     expect(captured.query).toContain("attributes['rag.node.name'] = 'rewrite'");
-    expect(captured.query).toContain("rewrittenQuery");
+    // 读一等属性；曾经写的是从 codecrush.io.output 解 JSON 取 rewrittenQuery，
+    // 但那个属性根本没打在 rewrite 子 span 上（实测 198 条里 0 条），恒取空。
+    expect(captured.query).toContain("attributes['rag.rewrite.query']");
     // 本 story 只允许给 codecrush_traces 追加一个投影列，不得新建任何视图/表。
     expect(captured.query).not.toMatch(/CREATE\s+(OR\s+REPLACE\s+)?(VIEW|TABLE)/i);
   });
@@ -224,5 +226,22 @@ describe("游标必须保住纳秒精度（否则末行每页重复、游标永�
       100,
     );
     expect(captured().query_params.lastTs).toBe(raw);
+  });
+});
+
+describe("改写后的问题读一等属性，不解 codecrush.io.output 的 JSON", () => {
+  it("取 rag.rewrite.query —— io.output 根本没打在 rewrite 子 span 上", async () => {
+    const { repo, captured } = makeRepo();
+    await repo.listPoolCandidates(
+      { lastTs: "2026-07-01 00:00:00.000000000", lastTraceId: "t" },
+      new Date("2026-07-19T00:00:00.000Z"),
+      "online-v2",
+      100,
+    );
+    const sql = captured().query;
+    expect(sql).toContain("attributes['rag.rewrite.query']");
+    expect(sql).not.toContain("codecrush.io.output");
+    // 仍然只读既有视图，不新建任何视图。
+    expect(sql).toContain("codecrush_trace_spans");
   });
 });

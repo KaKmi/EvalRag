@@ -35,18 +35,19 @@ const LATEST_EVAL_SQL = `
  * 投影为 `attributes`，所以不需要（本波也不允许）新建任何视图。
  * `rag.node.name = 'rewrite'` 已在真库上核对过：实际取值就是 `rewrite`。
  *
- * ⚠️ 已知局限：当前 rewrite 节点 span **没有**发 `codecrush.io.output`
- * （`codecrush.io.output` 目前只打在 chain 根 span 与 rag.eval span 上），
- * 故本子查询在现网数据上恒返回空串 ⇒ `rewrittenQuestion` 恒为 null
- * ⇒ 应用层判为「指代未消解」。写成这个形状而非删掉，是因为结构本身是对的：
- * 一旦 rewrite 节点补上 output 埋点（orchestration 的 `spanEnrich` 机制已支持），
- * 这里无需改一个字就自动生效。
+ * 读的是**一等属性** `rag.rewrite.query`（`RAG.REWRITE_QUERY`），不是从
+ * `codecrush.io.output` 解 JSON —— 后者压根没打在 rewrite 子 span 上（只在 chain 根 span
+ * 与 rag.eval span 上），实测 198 条 rewrite span 里 0 条带它。B2a 已在 chat 编排的
+ * rewrite 节点补了 `spanEnrich`（与 intent 节点同款做法），这里直接取即可。
+ *
+ * ⚠️ 埋点是本次才加的：**在此之前产生的历史 trace 没有这个属性**，取到空串 ⇒
+ * `rewrittenQuestion` 为 null ⇒ 应用层按「指代未消解」处理。这对历史数据是安全的默认
+ * （宁可标记为待人工改写，也不要把答不对的题沉淀成 gold），新流量则自动正常。
  */
 const REWRITE_SPAN_SQL = `
   SELECT
     trace_id,
-    JSONExtractString(argMax(attributes['codecrush.io.output'], start_time), 'rewrittenQuery')
-      AS rewritten_question
+    argMax(attributes['rag.rewrite.query'], start_time) AS rewritten_question
   FROM codecrush_trace_spans
   WHERE attributes['rag.node.name'] = 'rewrite'
   GROUP BY trace_id
