@@ -283,6 +283,11 @@ describeInfra("B1/F3 立即评测（真 PG + 真 ClickHouse）", () => {
     expect(res.body).toEqual({ status: "scored" });
     expect(publishedJobs).toHaveLength(0);
     expect(judgeSpy).not.toHaveBeenCalled();
+
+    // 【顺序钉】早退路径**不得**占用限频配额：紧接着再打一次仍应是 scored 而非 429。
+    // 不清 lastManualScoreAt——若哪天有人把 `set()` 挪到 findExisting 之前，这里当场变红。
+    const again = await post(targetTraceId).expect(201);
+    expect(again.body).toEqual({ status: "scored" });
   });
 
   it("同一 trace 60s 内第二次 POST → 429", async () => {

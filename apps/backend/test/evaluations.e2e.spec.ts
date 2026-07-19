@@ -59,6 +59,9 @@ describe("EvaluationsService", () => {
         dailyCount: 0,
         lastRunAt: new Date("2026-07-15T01:58:00.000Z"),
       }),
+      // B1/F3：人工评测作业表
+      findManualJob: jest.fn().mockResolvedValue(undefined),
+      claimManualJob: jest.fn().mockResolvedValue(true),
     };
     const clickhouse = {
       getOverview: jest.fn().mockResolvedValue({
@@ -77,10 +80,20 @@ describe("EvaluationsService", () => {
       countScoredInWindow: jest.fn().mockResolvedValue(0),
       getLatestSuccess: jest.fn().mockResolvedValue(undefined),
       getLatestFailure: jest.fn().mockResolvedValue(undefined),
+      findExisting: jest.fn().mockResolvedValue(undefined),
     };
     const models = { get: jest.fn(), list: jest.fn().mockResolvedValue([]) };
-    const service = new EvaluationsService(control as never, clickhouse as never, models as never);
-    return { service, control, clickhouse, models };
+    // B1/F3：人工评测队列。此前这里只传 3 个参数，而 EvaluationsService 早已是 4 参构造——
+    // backend test/ 不做类型检查（tsconfig include 只有 src），于是 manualQueue 一直是
+    // undefined，任何触到人工路径的断言都会 TypeError。
+    const manualQueue = { publish: jest.fn(), subscribe: jest.fn(), schedule: jest.fn() };
+    const service = new EvaluationsService(
+      control as never,
+      clickhouse as never,
+      models as never,
+      manualQueue as never,
+    );
+    return { service, control, clickhouse, models, manualQueue };
   }
 
   it("rejects enabling settings with a disabled or wrong-type model", async () => {
@@ -120,6 +133,89 @@ describe("EvaluationsService", () => {
       currentVersion: false,
     });
     expect(clickhouse.getLatestFailure).not.toHaveBeenCalled();
+  });
+
+  // —— B1/F3：人工评测的读写守卫（peer review 抓出的两处）——
+
+  /**
+   * `getLatestFailure` 既不按判分版本过滤、也不带时间下界：一条失败 span 会被**永远**读回来。
+   * 若让它无条件压过作业行，「重试」就永远走不通——用户点重试、POST 返回 scoring，
+   * 面板每次轮询却仍读到 failed，当场被打回「裁判调用失败」，而作业其实正在跑。
+   * F3 存在的理由就是重试，故按时间取新。
+   */
+  it("重试期间：作业比失败 span 新 → 返回 scoring 而非 failed", async () => {
+    const { service, control, clickhouse } = setup();
+    clickhouse.getLatestFailure.mockResolvedValue({
+      judgeVersion: "online-v1",
+      failedAt: "2026-07-15T02:00:00.000Z",
+      reason: "JudgeUnavailable: down",
+    });
+    control.findManualJob.mockResolvedValue({
+      status: "running",
+      createdAt: new Date("2026-07-15T03:00:00.000Z"),
+      updatedAt: new Date("2026-07-15T03:00:05.000Z"),
+    });
+
+    await expect(service.getTraceQuality("a".repeat(32))).resolves.toMatchObject({
+      status: "scoring",
+      startedAt: "2026-07-15T03:00:00.000Z",
+    });
+  });
+
+  /** 反向：陈旧的作业行不得盖住一条更新的失败 span。 */
+  it("作业比失败 span 旧 → 仍返回 failed", async () => {
+    const { service, control, clickhouse } = setup();
+    clickhouse.getLatestFailure.mockResolvedValue({
+      judgeVersion: "online-v1",
+      failedAt: "2026-07-15T04:00:00.000Z",
+      reason: "JudgeUnavailable: down",
+    });
+    control.findManualJob.mockResolvedValue({
+      status: "running",
+      createdAt: new Date("2026-07-15T03:00:00.000Z"),
+      updatedAt: new Date("2026-07-15T03:00:05.000Z"),
+    });
+
+    await expect(service.getTraceQuality("a".repeat(32))).resolves.toMatchObject({
+      status: "failed",
+      reason: "JudgeUnavailable: down",
+    });
+  });
+
+  /**
+   * 占位失败（已有 queued/running 的同名作业）时**绝不能**再入队。
+   * 进程内限频挡不住多副本，pg-boss 的 singletonKey 在 standard 策略下是惰性的，
+   * 这一跳是「一次点击只调一次裁判」在跨副本下唯一成立的守卫。
+   */
+  it("抢不到作业占位 → 返回 scoring 但不入队（不重复计费）", async () => {
+    const { service, control, models, manualQueue } = setup();
+    control.getSettings.mockResolvedValue({ ...settings, enabled: true, judgeModelId: "m1", embeddingModelId: "m2" });
+    models.get.mockImplementation(async (id: string) => ({
+      id,
+      type: id === "m2" ? "embedding" : "llm",
+      enabled: true,
+    }));
+    control.claimManualJob.mockResolvedValue(false);
+
+    await expect(service.requestManualScore("a".repeat(32), "t@example.com")).resolves.toEqual({
+      status: "scoring",
+    });
+    expect(manualQueue.publish).not.toHaveBeenCalled();
+  });
+
+  it("抢到作业占位 → 入队一次", async () => {
+    const { service, control, models, manualQueue } = setup();
+    control.getSettings.mockResolvedValue({ ...settings, enabled: true, judgeModelId: "m1", embeddingModelId: "m2" });
+    models.get.mockImplementation(async (id: string) => ({
+      id,
+      type: id === "m2" ? "embedding" : "llm",
+      enabled: true,
+    }));
+
+    await expect(service.requestManualScore("b".repeat(32), "t@example.com")).resolves.toEqual({
+      status: "scoring",
+    });
+    expect(manualQueue.publish).toHaveBeenCalledTimes(1);
   });
 
   it("suppresses previous deltas below twenty samples", async () => {

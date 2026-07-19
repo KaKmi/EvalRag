@@ -49,7 +49,22 @@ export class ManualScoreProcessor implements OnModuleInit {
     });
   }
 
+  /**
+   * 整个方法体都在 try 里：作业行一旦置 `running`，**任何**未捕获的抛出都会把它永久
+   * 钉在 running（队列以 `retryLimit: 0` 发布，pg-boss 不会重投；也没有 reaper），
+   * 于是 `getTraceQuality` 对所有人永远返回 `scoring`——一个只能靠用户过 60s 再点一次
+   * 才能解开的死结。取数（findCandidateByTraceId / assemble）打的是 ClickHouse 与 PG，
+   * 恰恰是最容易抖的两跳，此前它们在 try 之外。
+   */
   async process(targetTraceId: string, judgeVersion: string): Promise<void> {
+    try {
+      await this.processInner(targetTraceId, judgeVersion);
+    } catch (error) {
+      await this.fail(targetTraceId, judgeVersion, normalizeEvaluationError(error).message);
+    }
+  }
+
+  private async processInner(targetTraceId: string, judgeVersion: string): Promise<void> {
     const settings = await this.repo.getSettings();
     if (!settings.judgeModelId || !settings.embeddingModelId) {
       await this.fail(targetTraceId, judgeVersion, "裁判或向量模型未配置");

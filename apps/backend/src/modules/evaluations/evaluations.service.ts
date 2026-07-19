@@ -232,7 +232,24 @@ export class EvaluationsService {
         evidence: parseEvidence(success.evidence),
       };
     }
+    // B1/F3：`scored` 优先于一切（已有分数必须立即可见，不能被 job 行盖住），
+    // 但 `failed` **不能**无条件优先——见下。
     const failure = await this.clickhouseRepo.getLatestFailure(targetTraceId);
+    const job = await this.controlRepo.findManualJob(targetTraceId, settings.judgeVersion);
+    const jobActive = job && (job.status === "queued" || job.status === "running");
+
+    /**
+     * 失败 span 是**永久**的：`getLatestFailure` 不带判分版本过滤、也不带时间下界，
+     * 一旦某次尝试落过一条 failed span，它会被永远读回来。若让它无条件压过 job 行，
+     * 「重试」这条路就走不通了——用户点重试 → POST 返回 scoring → 面板每次轮询却仍读到
+     * failed → 立刻被打回「裁判调用失败」，而作业其实正在跑。F3 存在的理由就是重试，
+     * 所以这里按时间取新：作业比那条失败 span 新，就说明它是**这次**重试。
+     */
+    if (jobActive && (!failure || job.updatedAt.getTime() > new Date(failure.failedAt).getTime())) {
+      // startedAt 取作业创建时间：表里没有独立的 started_at 列，
+      // created_at 就是「用户点下立即评测」的时刻，正是面板要显示的起点。
+      return { status: "scoring", startedAt: job.createdAt.toISOString() };
+    }
     if (failure) {
       return {
         status: "failed",
@@ -241,14 +258,6 @@ export class EvaluationsService {
         reason: failure.reason,
         currentVersion: failure.judgeVersion === settings.judgeVersion,
       };
-    }
-    // B1/F3：ClickHouse 三态都没命中时，才看有没有在跑的人工作业。
-    // 顺序不可颠倒——已有分数必须立即可见，不能被一条陈旧的 job 行盖住。
-    const job = await this.controlRepo.findManualJob(targetTraceId, settings.judgeVersion);
-    if (job && (job.status === "queued" || job.status === "running")) {
-      // startedAt 取作业创建时间：表里没有独立的 started_at 列，
-      // created_at 就是「用户点下立即评测」的时刻，正是面板要显示的起点。
-      return { status: "scoring", startedAt: job.createdAt.toISOString() };
     }
     return { status: "unscored" };
   }
@@ -281,12 +290,22 @@ export class EvaluationsService {
 
     // 置位限频只在真正受理之后——上面的早退路径不该占用配额。
     this.lastManualScoreAt.set(targetTraceId, now);
-    await this.controlRepo.upsertManualJob(targetTraceId, settings.judgeVersion, actor);
-    await this.manualQueue.publish(
-      MANUAL_SCORE_JOB,
-      { targetTraceId, judgeVersion: settings.judgeVersion },
-      { singletonKey: `${targetTraceId}:${settings.judgeVersion}` },
+
+    // 原子占位：抢不到说明已有同名作业 queued/running，直接回 scoring 而**不再入队**。
+    // 进程内限频挡不住多副本，`singletonKey` 在 standard 策略下又是惰性的，
+    // 这一跳是「一次点击只调一次裁判」在跨副本下唯一成立的守卫（详见 claimManualJob 注释）。
+    const claimed = await this.controlRepo.claimManualJob(
+      targetTraceId,
+      settings.judgeVersion,
+      actor,
     );
+    if (claimed) {
+      await this.manualQueue.publish(
+        MANUAL_SCORE_JOB,
+        { targetTraceId, judgeVersion: settings.judgeVersion },
+        { singletonKey: `${targetTraceId}:${settings.judgeVersion}` },
+      );
+    }
     return { status: "scoring" };
   }
 
