@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button, Collapse, message, Segmented, Spin, Tooltip } from "antd";
 import type {
@@ -7,7 +7,7 @@ import type {
   TraceQualityDetail,
   TraceStatus,
 } from "@codecrush/contracts";
-import { getEvalCaseRefs, getTrace, getTraceQuality } from "../../api/client";
+import { getEvalCaseRefs, getTrace, getTraceQuality, scoreTraceNow } from "../../api/client";
 import AddToEvalSetModal from "./AddToEvalSetModal";
 import ReplayModal, { type ReplaySource } from "./ReplayModal";
 import {
@@ -31,6 +31,10 @@ const STATUS_TAG: Record<TraceStatus, { label: string; bg: string; c: string; bd
 };
 const fmtMs = (ms: number): string =>
   ms >= 1000 ? (ms / 1000).toFixed(2) + "s" : Math.round(ms) + "ms";
+/** 原型 §18.D：「面板『评分中』；轮询 5s×6」——两个数字都来自原型，不要随手调。 */
+const QUALITY_POLL_INTERVAL_MS = 5000;
+const QUALITY_POLL_LIMIT = 6;
+
 const fmtScore = (v: number | null): string =>
   v == null ? "—" : Number.isInteger(v) ? String(v) : v.toFixed(v >= 1 ? 1 : 3);
 
@@ -48,6 +52,9 @@ export default function TraceDetailPage() {
   // B1/F2：这条 trace 已进过哪些评测集——决定按钮是「+ 加入评测集」还是「已在评测集 · 查看」。
   const [caseRefs, setCaseRefs] = useState<EvalCaseRef[]>([]);
   const [addOpen, setAddOpen] = useState(false);
+  // B1/F3：「立即评测」入队中（防连点）与「轮询到顶仍无结果」。
+  const [scoreBusy, setScoreBusy] = useState(false);
+  const [pollTimedOut, setPollTimedOut] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -84,6 +91,64 @@ export default function TraceDetailPage() {
       live = false;
     };
   }, [traceId]);
+
+  /**
+   * B1/F3：评分中轮询（原型 §18.D「面板『评分中』；轮询 5s×6」）。
+   *
+   * 上限 6 次是原型钉死的：到顶仍是 `scoring` 就**本地**转失败态（原型「轮询超时 → failed」），
+   * 而不是无限轮询——后者会在裁判卡死时把一个前台页面变成永久的定时打点器。
+   * 计数放 ref：`quality` 每次轮询都换新对象，若把它放进 deps，interval 会被反复
+   * 拆装、5s 永远重新计时，轮询实际上永远走不到第 6 次。
+   */
+  const pollCount = useRef(0);
+  const isScoring = quality?.status === "scoring";
+
+  useEffect(() => {
+    if (!isScoring || pollTimedOut) return;
+    pollCount.current = 0;
+    let live = true;
+    const timer = setInterval(() => {
+      void (async () => {
+        pollCount.current += 1;
+        const reached = pollCount.current >= QUALITY_POLL_LIMIT;
+        try {
+          const result = await getTraceQuality(traceId);
+          if (!live) return;
+          setQuality(result);
+          if (result.status === "scoring" && reached) setPollTimedOut(true);
+        } catch {
+          // 单次轮询失败不该把面板打成错误态——下一拍还会再试；到顶仍无结果自会转失败。
+          if (live && reached) setPollTimedOut(true);
+        }
+      })();
+    }, QUALITY_POLL_INTERVAL_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [isScoring, pollTimedOut, traceId]);
+
+  /**
+   * B1/F3：手动触发单条评测（原型 §18.D「unscored --用户[立即评测]--> scoring」）。
+   * 失败态的「重试」走同一条路径——重试就是再入一次队。
+   */
+  const triggerScore = async () => {
+    setScoreBusy(true);
+    try {
+      const result = await scoreTraceNow(traceId);
+      setPollTimedOut(false);
+      if (result.status === "scored") {
+        // 后端说早就评过了：直接重取，不进轮询——否则白等 5s 才显示一个现成的分数。
+        setQuality(await getTraceQuality(traceId));
+      } else {
+        setQuality({ status: "scoring", startedAt: null });
+      }
+    } catch (e: unknown) {
+      message.error(e instanceof Error ? e.message : "发起评测失败");
+    } finally {
+      setScoreBusy(false);
+    }
+  };
 
   /**
    * 入集成功后切按钮态（原型 §17.6「成功 toast + 按钮态切换」）。
@@ -298,10 +363,27 @@ export default function TraceDetailPage() {
         {qualityError && <div style={{ color: "#d48806" }}>质量数据暂不可用</div>}
         {!qualityError && !quality && <Spin size="small" />}
         {quality?.status === "unscored" && (
-          <div style={{ color: "rgba(0,0,0,.45)" }}>未抽样评测</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ color: "rgba(0,0,0,.45)" }}>未抽样评测</span>
+            <Button size="small" loading={scoreBusy} onClick={() => void triggerScore()}>
+              立即评测
+            </Button>
+          </div>
         )}
-        {quality?.status === "failed" && (
-          <div style={{ color: "#cf1322" }}>评测失败 · {quality.reason}</div>
+        {/* 评分中：轮询未到顶。到顶仍无结果按原型转失败态，走下面那个分支。 */}
+        {quality?.status === "scoring" && !pollTimedOut && (
+          <div style={{ color: "#1677ff" }}>● 裁判评分中…（约 30s）</div>
+        )}
+        {(quality?.status === "failed" || (quality?.status === "scoring" && pollTimedOut)) && (
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ color: "#d46b08" }}>裁判调用失败</span>
+            {quality.status === "failed" && (
+              <span style={{ color: "rgba(0,0,0,.45)", fontSize: 12 }}>{quality.reason}</span>
+            )}
+            <Button size="small" loading={scoreBusy} onClick={() => void triggerScore()}>
+              重试
+            </Button>
+          </div>
         )}
         {quality?.status === "scored" && (
           <>

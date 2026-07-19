@@ -140,6 +140,8 @@ import {
   type TraceDetailResponse,
   TraceQualityDetailSchema,
   type TraceQualityDetail,
+  ManualScoreResponseSchema,
+  type ManualScoreResponse,
   OnlineEvalSettingsResponseSchema,
   type OnlineEvalSettingsResponse,
   QualityOverviewResponseSchema,
@@ -415,6 +417,18 @@ export const getTrace = (traceId: string): Promise<TraceDetailResponse> =>
 
 export const getTraceQuality = (traceId: string): Promise<TraceQualityDetail> =>
   getJson(`/api/eval/quality/traces/${encodeURIComponent(traceId)}`, TraceQualityDetailSchema);
+
+/**
+ * B1/F3：手动触发单条评测（原型 §18.D「unscored --用户[立即评测]--> scoring」）。
+ * 返回 `scored` 表示该 trace 已有当前判分版本的分数，前端直接重取详情即可，无需轮询。
+ * 走 applicationActionJson 是为了把后端的 429（限频）/422（未启用）文案透出给 toast。
+ */
+export const scoreTraceNow = (traceId: string): Promise<ManualScoreResponse> =>
+  applicationActionJson(
+    `/api/eval/quality/traces/${encodeURIComponent(traceId)}/score`,
+    { method: "POST" },
+    (d) => ManualScoreResponseSchema.parse(d),
+  );
 
 export const getOnlineEvalSettings = (): Promise<OnlineEvalSettingsResponse> =>
   getJson("/api/eval/quality/settings", OnlineEvalSettingsResponseSchema);
