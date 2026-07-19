@@ -131,7 +131,40 @@ export async function withJudgeRetry<T>(
           : undefined;
     }
   }
-  throw new Error(`${metric} judge output invalid after retry`, { cause: lastError });
+  const detail = describeJudgeFailure(lastError);
+  throw new Error(
+    detail
+      ? `${metric} judge output invalid after retry（${detail}）`
+      : `${metric} judge output invalid after retry`,
+    { cause: lastError },
+  );
+}
+
+/**
+ * 把**末次失败的原因**折进最终错误消息。
+ *
+ * 为什么必须折进 message 而不是留在 `cause`：三个落点——`eval_manual_score_jobs.last_error`、
+ * `rag.eval` span 的 `error.message`、前端质量面板——**都只读 message**，`cause` 在每一层
+ * 都被丢掉。2026-07-19 一次真实故障因此在三处都只显示 `faithfulness judge output invalid
+ * after retry`，无法从任何产物定位，只能另写探针逐层复现，才发现根因是模型配的
+ * `max_tokens=2048` 把判分输出（实测带 json_schema 时达 5731 字符）截断。
+ * 那次排查花掉的时间，本该是「看一眼错误信息」。
+ *
+ * 只带**原因与长度**，不带 `rawOutput` 正文：正文含用户答案与检索内容，会随 span 进
+ * ClickHouse，属不该外扩的内容面。长度足以区分「被截断」与「格式跑偏」两类，够定位了。
+ */
+function describeJudgeFailure(error: unknown): string {
+  if (!(error instanceof RetriableJudgeError)) return "";
+  const parts = [error.message];
+  if (error.rawOutput !== undefined) {
+    parts.push(`返回长度 ${error.rawOutput.length} 字符`);
+    // JSON 都解析不了 + 确实收到了输出 ⇒ 极可能是被 max_tokens 截断，而非模型格式跑偏：
+    // 格式跑偏通常仍是一段**完整**的 JSON，只是字段不对（那会走 schema 校验失败分支）。
+    if (error.message.includes("not valid JSON")) {
+      parts.push("疑似被 max_tokens 截断——请检查该判分模型的 max_tokens 是否够容纳判分输出");
+    }
+  }
+  return parts.join("；");
 }
 
 export function limitedEvidence(values: string[], emptyMessage: string): string[] {
