@@ -65,6 +65,12 @@ export const gapClusters = pgTable(
     ),
     // 屏5 默认排序：待处理在前、频次倒序（原型 `:631`）。
     index("gap_clusters_status_freq_idx").on(t.status, t.freq.desc()),
+    // ⚠️ `centroid` 上还有一个 **HNSW cosine 索引** `gap_clusters_centroid_hnsw_idx`，
+    // 它**只存在于迁移 SQL**（`drizzle/0026_gap_pool.sql`）里，此处无法声明——
+    // drizzle 表达不了 `USING hnsw (... vector_cosine_ops)`（自定义 `vector1024` 类型没有该算子类）。
+    // 同 `chunks_embedding_hnsw_idx` 的既有先例（`drizzle/0006_*.sql:49`，chunks/schema.ts 亦未声明）。
+    // 无运行时后果：`drizzle-kit generate` 已停用，不会据此"补"出一个删索引的迁移。
+    // 别据本文件断言「centroid 没有向量索引」——最近邻查询正依赖它。
   ],
 );
 

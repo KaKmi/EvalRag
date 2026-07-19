@@ -233,8 +233,13 @@ rewrite 节点产出 `rewrittenQuery`（`orchestration.service.ts:663-670`），
 | `gap_clusters` | 缺口簇 | 代表问题、`centroid vector(1024)` + HNSW cosine 索引、`freq` 累计、`status`、`root_cause_auto`/`root_cause_manual`、`entered_eval_set_at`（叠加标志非状态）、软删 |
 | `gap_items` | 簇内真实问题 | `source` 三值、`source_trace_id`（无 FK，跨存储）、原文 `question` + `rewritten_question` + `rewrite_resolved`、`embedding`、分数与信号快照、`follow_up_suspected`；**`source_trace_id` 全局唯一**（见下） |
 
-**幂等键为什么是 `source_trace_id` 单列，而不是 `(cluster_id, source, source_trace_id)`**
-（B2a peer review 抓出的数据完整性洞，实现时已订正）：
+| `gap_watermarks` | 收集器游标 | 照 `eval_watermarks`（`evaluations/schema.ts:53-73`）形状：双键游标 + 租约 + 健康度 + `last_cursor_move_at` |
+
+**收集器绝不写** `eval_watermarks` / `eval_candidate_ledger`——那是 `evaluations` 域资产（B1 波的手动评分作业就是因这条走了独立表）。
+
+### 幂等键为什么是 `source_trace_id` 单列
+
+而不是 `(cluster_id, source, source_trace_id)`——B2a peer review 抓出的数据完整性洞，实现时已订正：
 
 - 含 `cluster_id` 只能保证**同簇内**幂等。真实的崩溃重跑路径是：worker 插入 item 并 `freq++` 后、
   推进 `gap_watermarks` 游标**之前**崩溃；重跑时该簇 centroid 已被其他 item 的增量平均挪动，
@@ -245,9 +250,8 @@ rewrite 节点产出 `rewrittenQuery`（`orchestration.service.ts:663-670`），
   「已在缺口『…』(×N) 中 · 查看」，而不是再插一行。
 
 ⇒ 语义确定为「**一条 trace 全局只入池一次**」。`gaps.db.spec.ts` 用跨簇、跨来源两条用例钉死。
-| `gap_watermarks` | 收集器游标 | 照 `eval_watermarks`（`evaluations/schema.ts:53-73`）形状：双键游标 + 租约 + 健康度 + `last_cursor_move_at` |
 
-**收集器绝不写** `eval_watermarks` / `eval_candidate_ledger`——那是 `evaluations` 域资产（B1 波的手动评分作业就是因这条走了独立表）。
+> 拆分/合并不受影响：它们改的是 `cluster_id`（UPDATE），不是插新行。
 
 **状态机 CHECK 的前向兼容**：`status` 用 `varchar` + CHECK，本波只放行**可达的三态**
 `pending | routed_retrieval | ignored`。按本仓既定约定（`eval-runs/schema.ts:173-175`：「放行一个引擎不遵守的值 = 投机…W2b 实现时 ALTER 此 CHECK」），
