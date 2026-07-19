@@ -1,5 +1,7 @@
 import "reflect-metadata";
 import { GapCollectorProcessor } from "./gap-collector.processor";
+import { GapPromoteController } from "./gap-promote.controller";
+import { GapPromoteService } from "./gap-promote.service";
 import { GapsController } from "./gaps.controller";
 import { GapsService } from "./gaps.service";
 
@@ -25,6 +27,8 @@ const INJECTED_BY_TOKEN = {
   GapCollectorProcessor: [0],
   GapsService: [],
   GapsController: [],
+  GapPromoteService: [],
+  GapPromoteController: [],
 } as const;
 
 describe("gaps 域的 DI 元数据（构造参数不得退化成 Object）", () => {
@@ -32,6 +36,8 @@ describe("gaps 域的 DI 元数据（构造参数不得退化成 Object）", () 
     ["GapCollectorProcessor", GapCollectorProcessor],
     ["GapsService", GapsService],
     ["GapsController", GapsController],
+    ["GapPromoteService", GapPromoteService],
+    ["GapPromoteController", GapPromoteController],
   ] as const)("%s 的每个构造参数都是可解析的具体类", (name, target) => {
     const paramTypes = (Reflect.getMetadata("design:paramtypes", target) ?? []) as Array<{
       name?: string;

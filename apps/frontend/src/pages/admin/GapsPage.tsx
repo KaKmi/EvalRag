@@ -27,6 +27,7 @@ import {
   splitGap,
   updateGapRootCause,
 } from "../../api/client";
+import BadSampleToEvalSetModal from "./BadSampleToEvalSetModal";
 
 const { Text } = Typography;
 
@@ -318,6 +319,8 @@ export default function GapsPage() {
     enteredEvalSet: 0,
   });
   const [loading, setLoading] = useState(true);
+  /** 非空 = 「从坏样本生成」弹窗打开且锁定为这个簇（原型 `:634`「预选本簇问题」）。 */
+  const [promoteClusterId, setPromoteClusterId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -478,13 +481,15 @@ export default function GapsPage() {
         render: (_, row) => (
           <Space size={4} wrap>
             {/*
-              这一格现在只有 [修检索参数] 与 [忽略]。缺席的两个各有归属，都是**有意**的：
-              · [补知识库] 三步向导 → B2b；
-              · [进评测集] → 本波 Task 9（复用 §17.2「从坏样本生成」弹窗并预选本簇问题）。
-              一度渲染过一个只 navigate 到 `/admin/eval/sets?fromGap=` 的版本，但全仓没有任何
-              地方读 `fromGap`，点了既不弹窗也不预选、簇上也不会出现「已进评测集」标志
-              ——那正是本文件开头说的「点了没反应的按钮比没有它更糟」。
+              [补知识库] 三步向导仍缺席（→ B2b）。[进评测集] 本波补回：它复用 §17.2 的
+              「从坏样本生成」弹窗并**预选本簇**（原型 `:634`），成功后后端打「已进评测集」标志。
+              一度渲染过一个只 navigate 到 `/admin/eval/sets?fromGap=` 的版本并因此被移除——
+              全仓没有任何地方读 `fromGap`，点了既不弹窗也不预选、簇上也不会出现标志。
+              现在它有真实去处了。
             */}
+            <Button size="small" onClick={() => setPromoteClusterId(row.id)}>
+              进评测集
+            </Button>
             {row.status === "pending" && (
               <Button
                 size="small"
@@ -601,6 +606,22 @@ export default function GapsPage() {
           expandedRowRender: (row) => (
             <ClusterItems clusterId={row.id} clusters={clusters} onChanged={load} />
           ),
+        }}
+      />
+
+      <BadSampleToEvalSetModal
+        open={promoteClusterId !== null}
+        presetClusterId={promoteClusterId ?? undefined}
+        presetClusterLabel={
+          clusters.find((c) => c.id === promoteClusterId)?.representativeQuestion
+        }
+        onClose={() => setPromoteClusterId(null)}
+        onDone={() => {
+          setPromoteClusterId(null);
+          // 留在屏5 并重拉——簇上会多出「已进评测集」紫标（后端刚打的），重拉才看得见。
+          // 原来这里 `load()` 之后紧接着 `navigate` 走人：请求结果落在已卸载的组件上，
+          // 注释说的「必须重拉才看得见」也就永远看不见。二选一，选留下。
+          void load();
         }}
       />
     </div>

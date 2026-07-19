@@ -21,6 +21,11 @@ const gapsMock = vi.hoisted(() => ({
   updateGapRootCause: vi.fn(),
   splitGap: vi.fn(),
   mergeGap: vi.fn(),
+  // Task 9：[进评测集] 挂的「从坏样本生成」弹窗会用到这几个。
+  getEvalSets: vi.fn(),
+  createEvalSet: vi.fn(),
+  draftGapGold: vi.fn(),
+  promoteGapToEvalSet: vi.fn(),
 }));
 
 vi.mock("../../api/client", () => gapsMock);
@@ -234,13 +239,26 @@ describe("屏5 问题池", () => {
     await waitFor(() => expect(locationText()).toContain(`fromGap=${cluster().id}`));
   });
 
-  it("不渲染尚未接上的按钮：[补知识库]（B2b）与 [进评测集]（Task 9）", async () => {
-    // 「点了没反应的按钮比没有它更糟」——两个都还没有真实去处，就都不渲染。
+  it("不渲染尚未接上的 [补知识库]（B2b）", async () => {
+    // 「点了没反应的按钮比没有它更糟」——它还没有真实去处，就不渲染。
     mockGaps([cluster()]);
     renderPage();
     await screen.findByText("能开专用发票吗/对公转账");
     expect(screen.queryByRole("button", { name: "补知识库" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "进评测集" })).not.toBeInTheDocument();
+  });
+
+  it("[进评测集] 打开「从坏样本生成」弹窗并锁定为本簇（原型 :634）", async () => {
+    mockGaps([cluster()]);
+    gapsMock.getEvalSets.mockResolvedValue([]);
+    gapsMock.getGapItems.mockResolvedValue([]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    fireEvent.click(screen.getByRole("button", { name: "进评测集" }));
+
+    expect(await screen.findByText("从坏样本生成")).toBeInTheDocument();
+    // 锁定 ⇒ 弹窗不去拉整张缺口列表当下拉选项（那会让人以为还能改来源）。
+    expect(await screen.findByText("已锁定为你选中的缺口簇")).toBeInTheDocument();
   });
 
   it("接口失败时提示错误且不白屏", async () => {

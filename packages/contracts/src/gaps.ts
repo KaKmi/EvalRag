@@ -136,3 +136,52 @@ export const MergeGapRequestSchema = z.object({
   itemIds: z.array(z.string().uuid()).min(1),
 });
 export type MergeGapRequest = z.infer<typeof MergeGapRequestSchema>;
+
+/**
+ * LLM 草拟 gold 要点（「从坏样本生成」Modal 第②步，逐条同步调用）。
+ *
+ * 输入**只有**问题与原答案：绝不把检索片段正文喂进判官（021 §9.8）——片段正文属内容面，
+ * 且「资料里说过什么」正是缺口 26 要避免的 gold 来源。
+ */
+export const DraftGoldRequestSchema = z.object({
+  question: z.string().trim().min(1).max(500),
+  answer: z.string().max(5000).optional(),
+});
+export type DraftGoldRequest = z.infer<typeof DraftGoldRequestSchema>;
+
+export const DraftGoldResponseSchema = z.object({
+  goldPoints: z.array(z.string()),
+});
+export type DraftGoldResponse = z.infer<typeof DraftGoldResponseSchema>;
+
+/**
+ * 批量沉淀成 gold 用例（[进评测集] / 「从坏样本生成」）。
+ *
+ * `items[].question` 省略时后端取该 item 的改写后问题；**改写未消解且未传 question 会被 400 拒**
+ * （决策 G：离线评测没有对话上下文，指代原文永远答不对，会成为永久 0 分用例）。
+ */
+export const PromoteGapRequestSchema = z.object({
+  clusterId: z.string().uuid(),
+  targetSetId: z.string().uuid(),
+  items: z
+    .array(
+      z.object({
+        itemId: z.string().uuid(),
+        question: z.string().trim().min(1).max(500).optional(),
+        // §19.1：每条要点 ≤200 字。空数组合法 —— 草拟失败的行仍可入集（原型 `:596`），
+        // 进集后是 draft，gold 由人补齐。
+        goldPoints: z.array(z.string().max(200)).max(10),
+      }),
+    )
+    // 上限 50：一次 promote 是 N 次串行 INSERT，无上限等于把一个 HTTP 请求变成不定长事务。
+    .min(1)
+    .max(50),
+});
+export type PromoteGapRequest = z.infer<typeof PromoteGapRequestSchema>;
+
+export const PromoteGapResponseSchema = z.object({
+  /** 实际落库条数。可能小于 `items.length`——本批内部按归一化问题去重会跳过重复行。 */
+  created: z.number().int(),
+  caseIds: z.array(z.string()),
+});
+export type PromoteGapResponse = z.infer<typeof PromoteGapResponseSchema>;

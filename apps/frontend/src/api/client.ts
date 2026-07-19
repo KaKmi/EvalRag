@@ -3,6 +3,14 @@ import {
   type CreateGapItemRequest,
   CreateGapItemResponseSchema,
   type CreateGapItemResponse,
+  DraftGoldRequestSchema,
+  type DraftGoldRequest,
+  DraftGoldResponseSchema,
+  type DraftGoldResponse,
+  PromoteGapRequestSchema,
+  type PromoteGapRequest,
+  PromoteGapResponseSchema,
+  type PromoteGapResponse,
   GapClusterSchema,
   type GapCluster,
   type GapClusterStatus,
@@ -1138,3 +1146,14 @@ export const mergeGap = (
   req: MergeGapRequest,
 ): Promise<{ targetClusterId: string; sourceSoftDeleted: boolean }> =>
   postJson(`${gapPath(id)}/merge`, req, MergeGapRequestSchema, mergeResultSchema);
+
+/**
+ * 「从坏样本生成」第②步的行内草拟：**同步单条**，一次请求一次 LLM 调用。
+ * 调用方须自行限流（Modal 里是最多 3 条并发），别让 N 行同时打爆判官模型。
+ */
+export const draftGapGold = (req: DraftGoldRequest): Promise<DraftGoldResponse> =>
+  postJson("/api/gaps/draft-gold", req, DraftGoldRequestSchema, DraftGoldResponseSchema);
+
+/** 批量沉淀成 gold 用例（状态恒「待审核」），成功后后端给簇打「已进评测集」标志。 */
+export const promoteGapToEvalSet = (req: PromoteGapRequest): Promise<PromoteGapResponse> =>
+  postJson("/api/gaps/promote", req, PromoteGapRequestSchema, PromoteGapResponseSchema);
