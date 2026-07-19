@@ -11,23 +11,15 @@ import {
   type PoolCandidate,
 } from "./clickhouse-gaps.repository";
 import {
-  CLUSTER_SIMILARITY_MIN,
   GAP_COLLECT_CANDIDATE_LIMIT,
   GAP_COLLECT_CRON,
   GAP_COLLECT_LAG_BUFFER_MS,
   GAP_COLLECT_LEASE_MS,
   GAP_COLLECT_WORKER_NAME,
 } from "./gap.constants";
-import { cosineSimilarity, updateCentroid } from "./gap-clustering";
-import {
-  clusterKeyOf,
-  detectFollowUp,
-  isRewriteResolved,
-  shouldEnterPool,
-  triageCluster,
-  triageItem,
-} from "./gap-triage";
-import { GapsRepository, type GapClusterTarget, type GapCursorState } from "./gaps.repository";
+import { assignToCluster, recomputeRootCause } from "./gap-ingest";
+import { clusterKeyOf, detectFollowUp, isRewriteResolved, shouldEnterPool } from "./gap-triage";
+import { GapsRepository, type GapCursorState } from "./gaps.repository";
 
 const WorkerPayloadSchema = z.strictObject({ workerName: z.string().min(1).max(100) });
 
@@ -55,11 +47,11 @@ export interface GapCollectCycleResult {
  * 归簇/分诊的判定全部走 `gap-clustering.ts` / `gap-triage.ts` 的纯函数——本文件只负责编排
  * 与 IO 顺序，不重复实现任何阈值比较。
  *
- * ⚠️ **本类尚未注册进任何 Nest module**（B2a Task 6 才交付 `gaps.module.ts` + `app.module.ts`
- * 接线）。在那之前 `onModuleInit` 不会执行 ⇒ cron 从不触发 ⇒ `gap_watermarks` 恒 0 行、
- * 问题池恒空。两个 spec 都手工 `new` 了本类，所以测试全绿**证明不了**它在跑。
- * 这行写在代码里而不是只写在 `.ship/` 的 ledger 里：`.ship/` 被 gitignore，
- * 「代码已合并」会被下一个会话读成「功能已上线」（002 记的 M8 同款事故）。
+ * ⚠️ 本类只有被 `GapsModule` 注册**且进程角色是 worker/all** 时才真正运行：`onModuleInit`
+ * 挂 cron，而 `RoleGatedQueueAdapter` 在角色不匹配时让 `subscribe`/`schedule` 静默 no-op。
+ * 只起 api 的部署里问题池永远是空的，**这不是 bug 而是部署形态**——排查「池子没数据」时
+ * 先看 `PROCESS_ROLE`，再看 `gap_watermarks.last_run_at` 有没有在动。
+ * 两个 spec 都手工 `new` 本类，所以单测全绿**证明不了**它在生产里被调度到。
  */
 @Injectable()
 export class GapCollectorProcessor implements OnModuleInit {
@@ -237,20 +229,10 @@ export class GapCollectorProcessor implements OnModuleInit {
     now: Date,
   ): Promise<boolean> {
     const { candidate } = entry;
-    const nearest = await this.store.findNearestCluster(embedding);
-    // pgvector 只用来**找**候选，相似度用纯函数重算——判定只有一处实现（见 repository 注释）。
-    const similarity = nearest ? cosineSimilarity(nearest.centroid, embedding) : 0;
-    const target: GapClusterTarget =
-      nearest && similarity >= CLUSTER_SIMILARITY_MIN
-        ? {
-            kind: "existing",
-            clusterId: nearest.id,
-            nextCentroid: updateCentroid(nearest.centroid, nearest.freq, embedding),
-          }
-        : { kind: "new", representativeQuestion: entry.clusterKey, centroid: embedding };
-
-    const { clusterId, inserted } = await this.store.attachItem(
-      target,
+    // 归簇与重算根因走共享实现（`gap-ingest.ts`），与手动入池口径逐字一致。
+    const { clusterId, inserted } = await assignToCluster(
+      this.store,
+      entry.clusterKey,
       {
         source: "online",
         sourceTraceId: candidate.traceId,
@@ -273,26 +255,8 @@ export class GapCollectorProcessor implements OnModuleInit {
     // 没插进去（同一条 trace 已在池中）⇒ 簇的成员集没变，重算根因是纯粹的空转。
     if (!inserted) return false;
 
-    await this.retriage(clusterId, now);
+    await recomputeRootCause(this.store, clusterId, now);
     return true;
-  }
-
-  /**
-   * 按簇现有全部成员重算 `root_cause_auto`。
-   * **只写 auto 列**——人工判定（`root_cause_manual`）永不被 worker 覆盖（Global Constraint 8）。
-   */
-  private async retriage(clusterId: string, now: Date): Promise<void> {
-    const inputs = await this.store.listClusterTriageInputs(clusterId);
-    if (inputs.length === 0) return;
-    const causes = inputs.map((i) =>
-      triageItem({
-        confidence: i.confidence,
-        contextPrecision: i.contextPrecision,
-        faithfulness: i.faithfulness,
-      }),
-    );
-    const followUpRatio = inputs.filter((i) => i.followUpSuspected).length / inputs.length;
-    await this.store.setClusterRootCauseAuto(clusterId, triageCluster(causes, followUpRatio), now);
   }
 }
 

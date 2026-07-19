@@ -124,6 +124,7 @@ class FakeGapStore implements GapCollectorStore {
         contextPrecision: i.contextPrecision,
         faithfulness: i.faithfulness,
         followUpSuspected: i.followUpSuspected,
+        source: i.source,
       }));
   }
 

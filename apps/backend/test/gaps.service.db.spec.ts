@@ -1,0 +1,453 @@
+/**
+ * `GapsService` 的状态机、拆分/合并与频次口径（021 决策 A / §9.6），跑在**真 Postgres** 上。
+ *
+ * 为什么不是纯内存单测：本 story 的正确性几乎全在 SQL 里——`freq_30d` 的
+ * `source <> 'offline_run'` 谓词、`avg(LEAST(...))` 对 NULL 的处理、拆分后两簇 freq 重算的
+ * 守恒、软删而非物理删。这些用 fake 仓库测等于测 fake 自己重写的一份 SQL 语义
+ * （Task 5 的 review 已经踩过这个：fake 覆盖了分支，真事务路径零覆盖）。
+ *
+ * ⛔ 只连 MIGRATION_TEST_DATABASE_URL（codecrush_mig_test）——本文件会 DROP SCHEMA。
+ * 开发库 codecrush 里是用户手工搭建、无备份的数据，打到那上面就是永久丢失。
+ */
+import { readFileSync } from "fs";
+import { join } from "path";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import { GapsRepository } from "../src/modules/gaps/gaps.repository";
+import { GapsService } from "../src/modules/gaps/gaps.service";
+import { dbGate } from "./helpers/gated-suite";
+
+const describeDb = dbGate();
+jest.setTimeout(180_000);
+
+const MIGRATIONS_DIR = join(__dirname, "..", "drizzle");
+const EMBED_MODEL_ID = "22222222-2222-4222-8222-222222222222";
+
+function vec(fill: (i: number) => number): string {
+  return `[${Array.from({ length: 1024 }, (_, i) => fill(i)).join(",")}]`;
+}
+const VEC_E0 = vec((i) => (i === 0 ? 1 : 0));
+const VEC_E1 = vec((i) => (i === 1 ? 1 : 0));
+
+function daysAgo(n: number): Date {
+  return new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+}
+
+describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS=1）", () => {
+  let pool: Pool;
+  let service: GapsService;
+  let repo: GapsRepository;
+  let embedVector: number[];
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: process.env.MIGRATION_TEST_DATABASE_URL });
+    await pool.query("DROP SCHEMA public CASCADE");
+    await pool.query("CREATE SCHEMA public");
+    await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+    const journal = JSON.parse(
+      readFileSync(join(MIGRATIONS_DIR, "meta", "_journal.json"), "utf8"),
+    ) as { entries: { tag: string }[] };
+    for (const { tag } of journal.entries) {
+      const text = readFileSync(join(MIGRATIONS_DIR, `${tag}.sql`), "utf8");
+      for (const raw of text.split("--> statement-breakpoint")) {
+        if (raw.trim()) await pool.query(raw.trim());
+      }
+    }
+
+    const db = drizzle(pool) as never;
+    repo = new GapsRepository(db);
+    // 只桩掉外部模型调用；settings 走真仓库（手动入池要读 embeddingModelId）。
+    const evaluations = {
+      getSettings: async () => ({ embeddingModelId: EMBED_MODEL_ID, judgeVersion: "online-v1" }),
+    };
+    const models = { embedTexts: async (_id: string, texts: string[]) => texts.map(() => embedVector) };
+    service = new GapsService(repo, evaluations as never, models as never);
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  /** 建一个簇 + 若干成员。返回 id，用完由各用例按 id 精确清理（禁止裸 delete 整表）。 */
+  async function seedCluster(opts: {
+    question?: string;
+    centroid?: string;
+    status?: string;
+    rootCauseAuto?: string | null;
+    items?: Array<{
+      source?: string;
+      traceStartTime?: Date | null;
+      followUpSuspected?: boolean;
+      faithfulness?: number | null;
+      answerRelevancy?: number | null;
+      contextPrecision?: number | null;
+      embedding?: string;
+    }>;
+  }): Promise<{ clusterId: string; itemIds: string[] }> {
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO gap_clusters (representative_question, centroid, status, root_cause_auto, freq)
+       VALUES ($1, $2::vector, $3, $4, 0) RETURNING id`,
+      [opts.question ?? "能开专用发票吗", opts.centroid ?? VEC_E0, opts.status ?? "pending", opts.rootCauseAuto ?? null],
+    );
+    const clusterId = rows[0].id;
+    const itemIds: string[] = [];
+    const items = opts.items ?? [];
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i];
+      const inserted = await pool.query<{ id: string }>(
+        `INSERT INTO gap_items
+           (cluster_id, source, source_trace_id, question, embedding, trace_start_time,
+            follow_up_suspected, faithfulness, answer_relevancy, context_precision)
+         VALUES ($1,$2,$3,$4,$5::vector,$6,$7,$8,$9,$10) RETURNING id`,
+        [
+          clusterId,
+          it.source ?? "online",
+          `${clusterId.replaceAll("-", "").slice(0, 24)}${String(i).padStart(8, "0")}`,
+          `问题 ${i}`,
+          it.embedding ?? VEC_E0,
+          it.traceStartTime === undefined ? daysAgo(3) : it.traceStartTime,
+          it.followUpSuspected ?? false,
+          it.faithfulness ?? null,
+          it.answerRelevancy ?? null,
+          it.contextPrecision ?? null,
+        ],
+      );
+      itemIds.push(inserted.rows[0].id);
+    }
+    if (items.length > 0) {
+      await pool.query(`UPDATE gap_clusters SET freq = $2 WHERE id = $1`, [clusterId, items.length]);
+    }
+    return { clusterId, itemIds };
+  }
+
+  async function cleanup(clusterIds: string[]): Promise<void> {
+    await pool.query(`DELETE FROM gap_items WHERE cluster_id = ANY($1::uuid[])`, [clusterIds]);
+    await pool.query(`DELETE FROM gap_clusters WHERE id = ANY($1::uuid[])`, [clusterIds]);
+  }
+
+  async function statusOf(id: string): Promise<string> {
+    const { rows } = await pool.query<{ status: string }>(
+      `SELECT status FROM gap_clusters WHERE id = $1`,
+      [id],
+    );
+    return rows[0].status;
+  }
+
+  async function itemCount(id: string): Promise<number> {
+    const { rows } = await pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM gap_items WHERE cluster_id = $1`,
+      [id],
+    );
+    return Number(rows[0].n);
+  }
+
+  async function freqOf(id: string): Promise<number> {
+    const { rows } = await pool.query<{ freq: number }>(
+      `SELECT freq FROM gap_clusters WHERE id = $1`,
+      [id],
+    );
+    return Number(rows[0].freq);
+  }
+
+  // ───────────────────────────── 状态机 ─────────────────────────────
+
+  describe("状态机（021 决策 A）", () => {
+    it.each([
+      ["pending", "ignore", "ignored"],
+      ["pending", "routeRetrieval", "routed_retrieval"],
+      ["ignored", "reopen", "pending"],
+      // V15：合法——没有出口的状态是死态，判错了必须还能忽略掉。
+      ["routed_retrieval", "ignore", "ignored"],
+    ] as const)("%s --%s--> %s", async (from, event, to) => {
+      const { clusterId } = await seedCluster({ status: from, items: [{}] });
+      await service.transition(clusterId, event);
+      expect(await statusOf(clusterId)).toBe(to);
+      await cleanup([clusterId]);
+    });
+
+    it("非法迁移抛 400 且状态一动不动", async () => {
+      const { clusterId } = await seedCluster({ status: "pending", items: [{}] });
+      await expect(service.transition(clusterId, "reopen")).rejects.toThrow(/illegal transition/i);
+      expect(await statusOf(clusterId)).toBe("pending");
+      await cleanup([clusterId]);
+    });
+
+    it("「已进评测集」是叠加标志：只写时间戳，status 保持不变", async () => {
+      const { clusterId } = await seedCluster({ status: "pending", items: [{}] });
+      const updated = await service.markEnteredEvalSet(clusterId);
+      expect(await statusOf(clusterId)).toBe("pending");
+      expect(updated.enteredEvalSetAt).not.toBeNull();
+      await cleanup([clusterId]);
+    });
+
+    it("人工改判根因后，生效根因是 manual，且 auto 仍留着（worker 永不被覆盖）", async () => {
+      const { clusterId } = await seedCluster({ rootCauseAuto: "missing", items: [{}] });
+      const updated = await service.setRootCauseManual(clusterId, "generation");
+      expect(updated.rootCause).toBe("generation");
+      expect(updated.rootCauseIsManual).toBe(true);
+      const { rows } = await pool.query<{ auto: string }>(
+        `SELECT root_cause_auto AS auto FROM gap_clusters WHERE id = $1`,
+        [clusterId],
+      );
+      expect(rows[0].auto).toBe("missing"); // 「worker 现在会怎么判」依然可回答
+      await cleanup([clusterId]);
+    });
+  });
+
+  // ───────────────────────── 拆分 / 合并 ─────────────────────────
+
+  describe("拆分 / 合并", () => {
+    it("拆分守恒：item 总数不变，两簇 freq 各自按实际成员重算（AC8）", async () => {
+      const { clusterId, itemIds } = await seedCluster({
+        items: [{}, {}, {}, { embedding: VEC_E1 }, { embedding: VEC_E1 }],
+      });
+      const moved = itemIds.slice(3);
+
+      const { newClusterId } = await service.split(clusterId, moved);
+
+      expect(await itemCount(clusterId)).toBe(3);
+      expect(await itemCount(newClusterId)).toBe(2);
+      expect((await freqOf(clusterId)) + (await freqOf(newClusterId))).toBe(5);
+      await cleanup([clusterId, newClusterId]);
+    });
+
+    it("新簇质心 = 被移走向量的均值（不是随便挑一条）", async () => {
+      const { clusterId, itemIds } = await seedCluster({
+        items: [{}, { embedding: VEC_E1 }, { embedding: VEC_E1 }],
+      });
+      const { newClusterId } = await service.split(clusterId, itemIds.slice(1));
+      const { rows } = await pool.query<{ sim: string }>(
+        `SELECT 1 - (centroid <=> $1::vector) AS sim FROM gap_clusters WHERE id = $2`,
+        [VEC_E1, newClusterId],
+      );
+      expect(Number(rows[0].sim)).toBeCloseTo(1, 5); // 两条都是 e1 ⇒ 均值仍是 e1
+      await cleanup([clusterId, newClusterId]);
+    });
+
+    it("拒绝拆走全部成员——那只是身份洗牌，还会丢掉源簇上的人工判定", async () => {
+      const { clusterId, itemIds } = await seedCluster({ items: [{}, {}] });
+      await expect(service.split(clusterId, itemIds)).rejects.toThrow(/不能拆走全部成员/);
+      expect(await itemCount(clusterId)).toBe(2);
+      await cleanup([clusterId]);
+    });
+
+    it("合并清空源簇后**软删**：行还在、deleted_at 非空、列表里不再出现", async () => {
+      const a = await seedCluster({ items: [{}, {}] });
+      const b = await seedCluster({ question: "另一个簇", centroid: VEC_E1, items: [{}] });
+
+      const result = await service.merge(a.clusterId, b.clusterId, a.itemIds);
+
+      expect(result.sourceSoftDeleted).toBe(true);
+      const { rows } = await pool.query<{ deleted_at: Date | null }>(
+        `SELECT deleted_at FROM gap_clusters WHERE id = $1`,
+        [a.clusterId],
+      );
+      expect(rows).toHaveLength(1); // 没有物理删——「已进评测集」的关联要留痕
+      expect(rows[0].deleted_at).not.toBeNull();
+      expect(await freqOf(b.clusterId)).toBe(3);
+      const listed = await service.list({ limit: 200, offset: 0 });
+      expect(listed.items.map((i) => i.id)).not.toContain(a.clusterId);
+      await cleanup([a.clusterId, b.clusterId]);
+    });
+
+    it("拒绝搬运不属于本簇的 item（否则能悄悄改写别人的 freq）", async () => {
+      const a = await seedCluster({ items: [{}, {}] });
+      const b = await seedCluster({ question: "别人", centroid: VEC_E1, items: [{}] });
+      await expect(service.split(a.clusterId, [b.itemIds[0]])).rejects.toThrow(/不属于本缺口/);
+      expect(await itemCount(b.clusterId)).toBe(1);
+      await cleanup([a.clusterId, b.clusterId]);
+    });
+
+    it("拒绝把簇合并到它自己", async () => {
+      const { clusterId, itemIds } = await seedCluster({ items: [{}] });
+      await expect(service.merge(clusterId, clusterId, itemIds)).rejects.toThrow(/自己/);
+      await cleanup([clusterId]);
+    });
+  });
+
+  // ───────────────────── 频次口径（§9.6 两个计数器） ─────────────────────
+
+  describe("freq / freq30d 两个计数器", () => {
+    async function freq30dOf(clusterId: string): Promise<number> {
+      const { items } = await service.list({ limit: 200, offset: 0 });
+      return items.find((c) => c.id === clusterId)!.freq30d;
+    }
+
+    it("offline_run 计入 freq，但**不**计入 freq30d（021 决策 D）", async () => {
+      const { clusterId } = await seedCluster({ items: [{ source: "offline_run" }] });
+      expect(await freqOf(clusterId)).toBe(1);
+      expect(await freq30dOf(clusterId)).toBe(0);
+      await cleanup([clusterId]);
+    });
+
+    it("online 两个都算", async () => {
+      const { clusterId } = await seedCluster({ items: [{ source: "online" }] });
+      expect(await freq30dOf(clusterId)).toBe(1);
+      await cleanup([clusterId]);
+    });
+
+    it("manual_trace 也算进 freq30d —— 它是人工发现的**真实线上流量**", async () => {
+      // 谓词必须是 `<> 'offline_run'` 而不是 `= 'online'`（drill 二轮裁定）。
+      // 写成 `= 'online'` 这条会红。
+      const { clusterId } = await seedCluster({ items: [{ source: "manual_trace" }] });
+      expect(await freq30dOf(clusterId)).toBe(1);
+      await cleanup([clusterId]);
+    });
+
+    it("超过 30 天的 online 掉出 freq30d，但 freq 不减（原型 `:377`）", async () => {
+      const { clusterId } = await seedCluster({
+        items: [{ source: "online", traceStartTime: daysAgo(40) }],
+      });
+      expect(await freqOf(clusterId)).toBe(1);
+      expect(await freq30dOf(clusterId)).toBe(0);
+      await cleanup([clusterId]);
+    });
+  });
+
+  // ───────────────────────── 读模型的两个易错口径 ─────────────────────────
+
+  describe("读模型", () => {
+    it("一个分数都没有的簇，avgQuality 是 null 而不是 0", async () => {
+      const { clusterId } = await seedCluster({ items: [{}, {}] });
+      const { items } = await service.list({ limit: 200, offset: 0 });
+      expect(items.find((c) => c.id === clusterId)!.avgQuality).toBeNull();
+      await cleanup([clusterId]);
+    });
+
+    it("avgQuality = 各成员「非空三分里的最小值」的均值（LEAST 忽略 NULL）", async () => {
+      const { clusterId } = await seedCluster({
+        items: [
+          { faithfulness: 80, answerRelevancy: 60, contextPrecision: null }, // min = 60
+          { faithfulness: null, answerRelevancy: null, contextPrecision: 40 }, // min = 40
+          {}, // 全 NULL ⇒ 不参与均值，而不是当 0
+        ],
+      });
+      const { items } = await service.list({ limit: 200, offset: 0 });
+      expect(items.find((c) => c.id === clusterId)!.avgQuality).toBeCloseTo(50, 5);
+      await cleanup([clusterId]);
+    });
+
+    /**
+     * 分母**只算 online**，`offline_run` 与 `manual_trace` 都不进（与 `freq30d` 的谓词故意不同）。
+     *
+     * 手动入池的行 `follow_up_suspected` 恒为 false（拿不到 contextPrecision，也没有改写数据），
+     * 放进分母只会稀释：本例若把两条非 online 都算进去就是 1/3 = 0.33 ≤ 0.5，
+     * `triageCluster` 的强制 `retrieval` 覆写失效、根因翻回 `missing`
+     * ⇒ 021 §6.4 要防的「把人力引去补一篇根本不缺的文档」正好发生。
+     * 这条同时守住 `gap-ingest.ts:recomputeRootCause` 与本读模型两处口径一致。
+     */
+    it("followUpRatio 的分母只算 online（manual_trace / offline_run 都不稀释它）", async () => {
+      const { clusterId } = await seedCluster({
+        items: [
+          { source: "online", followUpSuspected: true },
+          { source: "offline_run", followUpSuspected: false },
+          { source: "manual_trace", followUpSuspected: false },
+        ],
+      });
+      const { items } = await service.list({ limit: 200, offset: 0 });
+      expect(items.find((c) => c.id === clusterId)!.followUpRatio).toBeCloseTo(1, 5);
+      await cleanup([clusterId]);
+    });
+
+    it("默认排序：待处理在前，然后 freq 倒序（原型 `:631`）", async () => {
+      const low = await seedCluster({ status: "pending", items: [{}] });
+      const high = await seedCluster({ status: "pending", centroid: VEC_E1, items: [{}, {}, {}] });
+      const done = await seedCluster({ status: "ignored", centroid: VEC_E1, items: Array(9).fill({}) });
+
+      const { items } = await service.list({ limit: 200, offset: 0 });
+      const order = items.map((i) => i.id);
+      expect(order.indexOf(high.clusterId)).toBeLessThan(order.indexOf(low.clusterId));
+      // freq=9 的 ignored 仍排在 freq=1 的 pending 之后。
+      expect(order.indexOf(low.clusterId)).toBeLessThan(order.indexOf(done.clusterId));
+      await cleanup([low.clusterId, high.clusterId, done.clusterId]);
+    });
+  });
+
+  // ───────────────────────── 手动入池 ─────────────────────────
+
+  describe("手动入池（原型 `:648`）", () => {
+    it("同一条 trace 再入池一次：不插新行，返回 joinedExisting 与既有簇的频次", async () => {
+      embedVector = Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0));
+      const first = await service.addItem({
+        question: "能开专用发票吗",
+        source: "manual_trace",
+        sourceTraceId: "f".repeat(32),
+      });
+      expect(first.joinedExisting).toBe(false);
+      expect(first.freq).toBe(1);
+
+      const second = await service.addItem({
+        question: "能开专用发票吗",
+        source: "manual_trace",
+        sourceTraceId: "f".repeat(32),
+      });
+      expect(second.joinedExisting).toBe(true);
+      expect(second.clusterId).toBe(first.clusterId);
+      expect(second.freq).toBe(1); // 没有重复计频
+      expect(await itemCount(first.clusterId)).toBe(1);
+      await cleanup([first.clusterId]);
+    });
+
+    it("入口页透传 traceStartTime ⇒ 该样本计入 freq30d（不传则只计累计 freq）", async () => {
+      embedVector = Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0));
+      const withTime = await service.addItem({
+        question: "能开专用发票吗",
+        source: "manual_trace",
+        sourceTraceId: "a".repeat(32),
+        traceStartTime: daysAgo(3).toISOString(),
+      });
+      const { items } = await service.list({ limit: 200, offset: 0 });
+      expect(items.find((c) => c.id === withTime.clusterId)!.freq30d).toBe(1);
+      await cleanup([withTime.clusterId]);
+
+      const without = await service.addItem({
+        question: "能开专用发票吗",
+        source: "manual_trace",
+        sourceTraceId: "b".repeat(32),
+      });
+      const after = await service.list({ limit: 200, offset: 0 });
+      expect(after.items.find((c) => c.id === without.clusterId)!.freq30d).toBe(0);
+      expect(after.items.find((c) => c.id === without.clusterId)!.freq).toBe(1);
+      await cleanup([without.clusterId]);
+    });
+
+    it("拒绝未来时间的 traceStartTime（否则该行永远留在 30 天窗口里）", async () => {
+      embedVector = Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0));
+      await expect(
+        service.addItem({
+          question: "未来的问题",
+          source: "manual_trace",
+          sourceTraceId: "d".repeat(32),
+          traceStartTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+      ).rejects.toThrow(/不能是未来时间/);
+    });
+
+    it("embedding 维度不是 1024 ⇒ 400，而不是让 pgvector 的原始错误冒成 500", async () => {
+      embedVector = Array.from({ length: 1536 }, () => 0.1);
+      await expect(
+        service.addItem({
+          question: "维度不对",
+          source: "manual_trace",
+          sourceTraceId: "c".repeat(32),
+        }),
+      ).rejects.toThrow(/维度不是 1024/);
+      embedVector = Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0));
+    });
+
+    it("手动入池标 rewriteResolved=false —— 保守默认，入集前要人工改写", async () => {
+      embedVector = Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0));
+      const created = await service.addItem({
+        question: "那个能开吗",
+        source: "manual_trace",
+        sourceTraceId: "e".repeat(32),
+      });
+      const items = await service.listItems(created.clusterId);
+      expect(items[0].rewriteResolved).toBe(false);
+      expect(items[0].rewrittenQuestion).toBeNull();
+      // 取不到 trace 开始时间 ⇒ 不当作已过期（置灰会误导人以为链接失效）。
+      expect(items[0].traceExpired).toBe(false);
+      await cleanup([created.clusterId]);
+    });
+  });
+});

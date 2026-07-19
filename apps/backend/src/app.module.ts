@@ -24,6 +24,7 @@ import { ConversationsModule } from "./modules/conversations/conversations.modul
 import { ApplicationsModule } from "./modules/applications/applications.module";
 import { EvaluationsModule } from "./modules/evaluations/evaluations.module";
 import { EvalRunsModule } from "./modules/eval-runs/eval-runs.module";
+import { GapsModule } from "./modules/gaps/gaps.module";
 
 @Module({
   imports: [
@@ -52,6 +53,8 @@ import { EvalRunsModule } from "./modules/eval-runs/eval-runs.module";
     EvaluationsModule,
     // E-W2a：离线评测 run 与评测集（018 决策 A：依赖顶点，不被其他域 import）
     EvalRunsModule,
+    // B2a：知识缺口/问题池（021 决策 A：同为依赖顶点）。注册它同时让收集器 worker 的 cron 生效。
+    GapsModule,
   ],
   providers: [
     // 全局 Zod 管道：@Body/@Query/@Param 用 createZodDto 时自动校验，失败抛 ZodValidationException(400)

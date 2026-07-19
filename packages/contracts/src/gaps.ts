@@ -81,7 +81,9 @@ export const GapListQuerySchema = z.object({
   status: GapClusterStatusSchema.optional(),
   rootCause: GapRootCauseSchema.optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  offset: z.coerce.number().int().min(0).default(0),
+  // 上限不能省：`?offset=1e30` 能过 `int()`，序列化成 "1e+30" 后 PG 抛
+  // `invalid input syntax for type bigint` ⇒ 本该 400 的输入变成 500。
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
 });
 export type GapListQuery = z.infer<typeof GapListQuerySchema>;
 
@@ -93,9 +95,17 @@ export type GapListResponse = z.infer<typeof GapListResponseSchema>;
 
 /** 手动入池（Trace 详情 / 屏3 逐用例表；021 决策 B：前端组合，不产生后端反向边）。 */
 export const CreateGapItemRequestSchema = z.object({
-  question: z.string().min(1).max(500),
+  // `.trim()` 不可省：问题原文会**原样**成为簇的代表问题并被拿去 embedding
+  // （聚类键刻意不做归一化，与收集器逐字一致），`"   "` 或首尾空白会直接变成簇的显示身份。
+  question: z.string().trim().min(1).max(500),
   source: z.enum(["manual_trace", "offline_run"]),
   sourceTraceId: z.string().min(1).max(32),
+  /**
+   * 源 trace 的开始时间，**由入口页透传**（Trace 详情那一屏手里就有）。
+   * 后端不去读 trace——`gaps → traces` 是禁止的边（021 决策 B 走前端组合）。
+   * 省略则该样本不计入 `freq30d` 的 30 天窗口，只计入累计 `freq`。
+   */
+  traceStartTime: z.string().datetime().optional(),
 });
 export type CreateGapItemRequest = z.infer<typeof CreateGapItemRequestSchema>;
 
