@@ -37,9 +37,13 @@ last_modified: "2026-07-11"
 4. **`chat` 与 `traces` 无直接代码依赖**:chat 写(OTLP→Collector→ClickHouse)、traces 读(ClickHouse),经存储解耦。
 5. **域内 `schema.ts` 是纯表定义**,零 service 引用(防循环 import)。
 6. **迁移是显式命令**,不在应用启动时静默执行。
-7. 上述第 2–3 条(包级边界)由 ESLint **核心规则 `no-restricted-imports`** 在 lint 期强制,违规即 CI 红;
-   第 1 条(模块级 DAG)**无 lint 兜底**,靠本文的精确依赖边表 + review——唯一例外是 Boundary ⑤(「无人 import `gaps`」)。
-   详见下方「依赖规则的真实强制力」。**`eslint-plugin-boundaries` 并未安装**,勿据其存在做判断。
+7. **哪几条真被 lint 拦住**(2026-07-19 逐条实测,勿凭印象):
+   - **第 3 条**(前端只能 import contracts)与**第 8 条**(共享包纯净)—— ESLint **核心规则 `no-restricted-imports`** 强制,违规即 CI 红。
+   - **第 1 条**(模块级 DAG)与**第 2 条**(只走 barrel、禁止直接 import `adapters/`)—— **没有任何 lint 兜底**,
+     靠本文的精确依赖边表 + review。唯一例外是 Boundary ⑤,它只强制第 1 条里的**一个点**:「无人 import `gaps`」。
+   - **`eslint-plugin-boundaries` / `eslint-plugin-import` 均未安装**,勿据其存在做判断。
+
+   ⇒ **不能以「`pnpm lint` 通过」推断第 1、2 条合规**——那两条 lint 根本不看。详见下方「依赖规则的真实强制力」。
 8. **共享包保持纯净**：`@codecrush/contracts`、`@codecrush/otel-conventions` 只可依赖 `zod`（或零依赖），严禁引入 Node-only（`pg`/`fs`/`@opentelemetry/*`）或浏览器-only 依赖——否则前端打包会拉入 Node 依赖而炸。（见 §「通用 Telemetry SDK 与包边界」）
 
 ## Context
@@ -189,17 +193,23 @@ rag-service/
 > ⚠️ **本节此前失实**，原文称 `eslint-plugin-boundaries` / `import/no-restricted-paths` 把 002 的 DAG「lint 期焊死」。
 > B2a 波实测：**这两个插件根本没有安装**（见根 `package.json` 的 devDependencies），仓库内也无架构测试。
 
-实际强制力分两层：
+逐条对照「依赖不变量」清单，实际强制力如下：
 
-- **包级边界 —— ESLint 真强制**。`eslint.config.mjs` 用 **ESLint 核心规则 `no-restricted-imports`** 实现了四块：
-  ① 前端只能 import `@codecrush/contracts` / `@codecrush/otel-conventions`，不得碰 backend 或 Node-only 的 `@codecrush/otel`；
-  ②③④ `packages/contracts`、`otel-conventions`、`otel` 三个包的纯净性。
-- **模块级 DAG —— 靠设计文档 + review**。后端模块之间的依赖方向（Boundaries 第 1、5 条）**没有** lint 规则兜底。
-  唯一的例外是 **Boundary ⑤**（B2a 新增，12 行核心规则、零新依赖）：机械强制**「无人 import `gaps`」**这一条不变式。
-  它守的是本波最容易被后人破坏的那条边（`eval-runs → gaps` 会成环），**不是**通用 DAG 强制器。
+| 不变量 | lint 拦得住吗 | 靠什么守 |
+|---|---|---|
+| 1. 模块级 DAG（方向朝下、无环） | ❌ **不拦** | 本文的精确依赖边表 + review；**唯一例外**：Boundary ⑤ 强制其中一个点「无人 import `gaps`」 |
+| 2. 只走 barrel、禁止直接 import `adapters/` | ❌ **不拦** | 纯靠 review。`eslint.config.mjs` 无任何 barrel/adapters 规则 |
+| 3. 前端只能 import contracts / otel-conventions | ✅ 拦 | Boundary ①（核心 `no-restricted-imports`） |
+| 8. 共享包纯净（contracts / otel-conventions / otel） | ✅ 拦 | Boundary ②③④ |
 
-⇒ 判断某处实现是否合规，**不能**以「`pnpm lint` 通过」为据（那只覆盖包级边界 + Boundary ⑤），须对照本文的精确依赖边表。
-若将来要把模块级 DAG 也焊死，需引入 `eslint-plugin-boundaries` 并为每个域声明 element type——那是一次独立的工程决策。
+**Boundary ⑤ 的写法有个坑，记在这里免得重犯**：`no-restricted-imports` 的 `group` 走 gitignore 式匹配，
+`"../gaps/*"` 这种写法**只匹配深度恰为 1 的相对路径**，`../../gaps/x` 会漏；
+而 `"**/modules/gaps/*"` 对相对 import **根本不匹配**（import 字符串里没有 `modules/` 这一段）。
+必须写成任意深度的 `["**/gaps", "**/gaps/**"]`。
+本规则第一版正是踩了这个坑，且首次验证只植入了深度 1 的反例而误判通过——**验证反向规则时务必覆盖多个目录深度**。
+
+⇒ 判断某处实现是否合规，**不能**以「`pnpm lint` 通过」为据（它只看不变量 3 与 8，外加 Boundary ⑤ 那一个点），须对照本文的精确依赖边表。
+若将来要把模块级 DAG 与 barrel 规则也焊死，需引入 `eslint-plugin-boundaries` 并为每个域声明 element type——那是一次独立的工程决策。
 
 ### 契约
 

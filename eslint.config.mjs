@@ -148,7 +148,13 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ["**/modules/gaps", "**/modules/gaps/*", "../gaps", "../gaps/*"],
+              // 必须用 `**/gaps` + `**/gaps/**` 这种任意深度的写法。
+              // 反例（本规则第一版就踩了）：`["../gaps", "../gaps/*", "**/modules/gaps/*"]`
+              // 只拦得住深度恰为 1 的相对路径——`eval-runs/foo/bar.ts` 里写
+              // `../../gaps/gaps.service` 会畅通无阻，而 `**/modules/gaps/*` 对相对路径
+              // 根本不匹配（import 字符串里没有 "modules/" 这一段）。
+              // 后端模块下有 16 个子目录，等于门禁对绝大多数文件失效。
+              group: ["**/gaps", "**/gaps/**"],
               message:
                 "gaps 是依赖顶点（docs/design/021 决策 A）：它 import 别人，别人不得 import 它——反向依赖会成环",
             },

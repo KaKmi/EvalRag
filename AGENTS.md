@@ -39,8 +39,14 @@ infra/                   docker-compose（postgres+pgvector / clickhouse / otel-
 ## 依赖边界（不可违反；**包级由 ESLint 强制，模块级靠文档+review**）
 
 > ⚠️ 2026-07-19 订正：此前标题写「ESLint 强制」，实测 **`eslint-plugin-boundaries` / `eslint-plugin-import` 并未安装**。
-> `eslint.config.mjs` 只用 ESLint 核心 `no-restricted-imports` 守**包级**边界（第 2–4 条）＋ **Boundary ⑤**（「无人 import `gaps`」）。
-> **第 1 条（后端模块间的 DAG）没有 lint 兜底**——判断合规须对照 `docs/design/003` 的精确依赖边表，不能以「lint 过了」为据。
+> 逐条实测的强制力：
+> - ✅ **第 2、3、4 条**（前端只能碰 contracts；contracts/otel-conventions 只依赖 zod；`@codecrush/otel` 仅后端）
+>   —— ESLint 核心 `no-restricted-imports` 真拦。
+> - ❌ **第 1 条**（后端模块间的 DAG）与 **第 5 条**（跨域只走 barrel、**不得直接 import `adapters/`**）
+>   —— **没有任何 lint 兜底**，纯靠 `docs/design/003` 的精确依赖边表 + review。
+>   唯一例外是 **Boundary ⑤**，它只强制第 1 条里的一个点：「无人 import `gaps`」。
+>
+> ⇒ **不能以「`pnpm lint` 过了」推断第 1、5 条合规**——那两条 lint 根本不看。
 
 1. **依赖方向朝下、无环**：`gaps`(顶点，E-W4 B2a) → `eval-runs`(E-W2a) → `chat`(问答顶点) → … → `platform` → `contracts` / `otel-conventions`(基座)。详见 `docs/design/021` 与 `018`。
    **任何模块不得 import `gaps`**（Boundary ⑤ 机械强制；`eval-runs → gaps` 会成环）。
