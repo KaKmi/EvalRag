@@ -130,5 +130,32 @@ export default tseslint.config(
       ],
     },
   },
+  // Boundary ⑤：gaps 是依赖顶点（docs/design/021 决策 A）——它 import 别人，别人不 import 它。
+  //
+  // 为什么单独给这一条上机械门禁：`gaps → eval-runs`（进评测集要服务端批量建 gold 用例）已是既定边，
+  // 于是任何 `eval-runs → gaps` 都直接成环。而最自然的写法恰恰会踩：屏3「加入问题池」按钮长在
+  // eval-runs 的页面上，后端顺手调一下 gaps 就闭环了——所以 021 决策 B 规定它走前端组合。
+  // 这条规则就是那个决策的执行者。
+  //
+  // 注意它**不是**通用模块 DAG 强制器：本仓没装 eslint-plugin-boundaries，其余依赖边靠
+  // docs/design/003 的边表 + review 守（见 003「依赖规则的真实强制力」）。
+  {
+    files: ["apps/backend/src/modules/**/*.ts"],
+    ignores: ["apps/backend/src/modules/gaps/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/modules/gaps", "**/modules/gaps/*", "../gaps", "../gaps/*"],
+              message:
+                "gaps 是依赖顶点（docs/design/021 决策 A）：它 import 别人，别人不得 import 它——反向依赖会成环",
+            },
+          ],
+        },
+      ],
+    },
+  },
   prettier,
 );

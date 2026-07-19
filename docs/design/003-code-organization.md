@@ -31,13 +31,15 @@ last_modified: "2026-07-11"
 **Out-of-scope(M0)**:任何业务逻辑;CI/CD 与生产 Dockerfile/k8s(上云延后);微服务拆分。
 
 **依赖不变量(不可违反)**
-1. **依赖方向朝下、无环(DAG)**:`chat`(顶点) → … → `platform` → `contracts`(基座)。
+1. **依赖方向朝下、无环(DAG)**:`gaps`(顶点，E-W4 B2a) → `eval-runs`(E-W2a) → `chat` → … → `platform` → `contracts`(基座)。
 2. **跨模块只走对方 barrel 导出的 service/端口**,禁止深 import 内部文件;**任何地方不得直接 import `adapters/`**(只能 DI)。
 3. **`apps/frontend` 只能 import `packages/contracts`**,碰不到 `apps/backend` 内部。
 4. **`chat` 与 `traces` 无直接代码依赖**:chat 写(OTLP→Collector→ClickHouse)、traces 读(ClickHouse),经存储解耦。
 5. **域内 `schema.ts` 是纯表定义**,零 service 引用(防循环 import)。
 6. **迁移是显式命令**,不在应用启动时静默执行。
-7. 上述 1–3 由 ESLint(`eslint-plugin-boundaries` / `import/no-restricted-paths`)在 lint 期强制,违规即 CI 红。
+7. 上述第 2–3 条(包级边界)由 ESLint **核心规则 `no-restricted-imports`** 在 lint 期强制,违规即 CI 红;
+   第 1 条(模块级 DAG)**无 lint 兜底**,靠本文的精确依赖边表 + review——唯一例外是 Boundary ⑤(「无人 import `gaps`」)。
+   详见下方「依赖规则的真实强制力」。**`eslint-plugin-boundaries` 并未安装**,勿据其存在做判断。
 8. **共享包保持纯净**：`@codecrush/contracts`、`@codecrush/otel-conventions` 只可依赖 `zod`（或零依赖），严禁引入 Node-only（`pg`/`fs`/`@opentelemetry/*`）或浏览器-only 依赖——否则前端打包会拉入 Node 依赖而炸。（见 §「通用 Telemetry SDK 与包边界」）
 
 ## Context
@@ -142,25 +144,28 @@ rag-service/
 > 注意:这与 002 的 DAG 不同——002 是**建造顺序**,这里是**代码 import 依赖**。两者一致但视角不同。
 
 ```
-⓪ 评测编排    eval-runs 离线评测 run(E-W2a 新顶点，见 018)
+⓪ 知识缺口    gaps 问题池 / 坏样本聚类(E-W4 B2a 新顶点，见 021)
+                  │  依赖 ↓（eval-runs 进评测集 + evaluations 阈值 + models embedding）
+① 评测编排    eval-runs 离线评测 run(E-W2a，见 018)
                   │  依赖 ↓（chat 编排 + evaluations 判分 + applications 版本解析）
                   ├────────────────────────────► evaluations 在线评测/判分(E-W1，见 017)
                   │                                  │ 依赖 ↓ conversations · chunks · models
-① 编排        chat 问答编排 ─────────── (虚线: 经 OTLP/CH, 无代码依赖) ┄┄► traces 追踪(只读 CH)
+② 编排        chat 问答编排 ─────────── (虚线: 经 OTLP/CH, 无代码依赖) ┄┄► traces 追踪(只读 CH)
                   │  依赖 ↓
-② 配置·会话   applications 配置/发布 · conversations 会话
+③ 配置·会话   applications 配置/发布 · conversations 会话
                   │
-③ 能力域      retrieval 检索 · ingestion 入库 · documents 文档 · node-runtime 节点执行
+④ 能力域      retrieval 检索 · ingestion 入库 · documents 文档 · node-runtime 节点执行
                   │
-④ 域叶子      models 模型 · prompts · kb 知识库 · chunks 切片 · auth 认证(横切)
+⑤ 域叶子      models 模型 · prompts · kb 知识库 · chunks 切片 · auth 认证(横切)
                   │
-⑤ 基座        platform: config · persistence · queue · storage · observability
+⑥ 基座        platform: config · persistence · queue · storage · observability
                   │
-⑥ 契约        contracts: Zod DTO；otel-conventions: trace 语义常量(前后端共用)
+⑦ 契约        contracts: Zod DTO；otel-conventions: trace 语义常量(前后端共用)
 ```
 
 精确依赖边:
-- `eval-runs` → `chat`(编排 `OrchestrationService`)、`evaluations`(判分 `EvaluationJudgeService`)、`applications`(`resolveForTest` 版本解析)——E-W2a 新顶点，见 018 决策 A；反向依赖一律禁止（`chat`/`evaluations` 不感知 `eval-runs`）
+- `gaps` → `eval-runs`(进评测集：批量建 draft 用例)、`evaluations`(阈值/judge 版本/embeddingModelId)、`models`(`ModelProviderPort`：聚类 embedding 与 gold 草拟)、`platform/{clickhouse,persistence,queue}`——E-W4 B2a 新顶点，见 021 决策 A；**任何模块不得 import `gaps`**（`eslint.config.mjs` 的 Boundary ⑤ 机械强制）。**无** `gaps → traces`（自持 CH 只读 repository，同 evaluations 先例）、**无** `gaps → chunks/retrieval/applications`
+- `eval-runs` → `chat`(编排 `OrchestrationService`)、`evaluations`(判分 `EvaluationJudgeService`)、`applications`(`resolveForTest` 版本解析)——E-W2a，见 018 决策 A；反向依赖一律禁止（`chat`/`evaluations` 不感知 `eval-runs`）
 - `chat` → `applications`、`retrieval`、`prompts`、`node-runtime`、`conversations`、`observability`（配置只经 `ApplicationConfigResolver`，LLM 调用经 node-runtime）
 - `evaluations` → `conversations`、`chunks`、`models` + ClickHouse 读客户端（E-W1，见下方「E-W1 evaluations 域边界」；与 `traces` 互不 import，写侧经 OTLP `rag.eval` 解耦）
 - `conversations` → `applications`
@@ -179,9 +184,22 @@ rag-service/
 
 四条要点:①无环、方向朝下;②破环靠端口 + DI(如 `ingestion` 依赖 `ModelProviderPort` 而非 models 内部);③关键解耦 chat 写/traces 读经 ClickHouse → M9 可在 M8 后独立开发,且埋点挂了不影响问答;④`platform`/`contracts` 是地基,人人依赖、不依赖任何域。
 
-### 依赖规则 = lint 规则
+### 依赖规则的真实强制力（2026-07-19 订正）
 
-`eslint-plugin-boundaries` / `import/no-restricted-paths` 强制 Boundaries 的第 1–3 条:FE 只能碰 contracts;跨域只走 barrel 的 service/端口;禁止直接 import `adapters/`。→ 002 的 DAG 被 lint 期焊死,不靠 code review 口头把关。
+> ⚠️ **本节此前失实**，原文称 `eslint-plugin-boundaries` / `import/no-restricted-paths` 把 002 的 DAG「lint 期焊死」。
+> B2a 波实测：**这两个插件根本没有安装**（见根 `package.json` 的 devDependencies），仓库内也无架构测试。
+
+实际强制力分两层：
+
+- **包级边界 —— ESLint 真强制**。`eslint.config.mjs` 用 **ESLint 核心规则 `no-restricted-imports`** 实现了四块：
+  ① 前端只能 import `@codecrush/contracts` / `@codecrush/otel-conventions`，不得碰 backend 或 Node-only 的 `@codecrush/otel`；
+  ②③④ `packages/contracts`、`otel-conventions`、`otel` 三个包的纯净性。
+- **模块级 DAG —— 靠设计文档 + review**。后端模块之间的依赖方向（Boundaries 第 1、5 条）**没有** lint 规则兜底。
+  唯一的例外是 **Boundary ⑤**（B2a 新增，12 行核心规则、零新依赖）：机械强制**「无人 import `gaps`」**这一条不变式。
+  它守的是本波最容易被后人破坏的那条边（`eval-runs → gaps` 会成环），**不是**通用 DAG 强制器。
+
+⇒ 判断某处实现是否合规，**不能**以「`pnpm lint` 通过」为据（那只覆盖包级边界 + Boundary ⑤），须对照本文的精确依赖边表。
+若将来要把模块级 DAG 也焊死，需引入 `eslint-plugin-boundaries` 并为每个域声明 element type——那是一次独立的工程决策。
 
 ### 契约
 
@@ -237,7 +255,7 @@ Trace 相关能力分两层，不合成一个大包：
 |---|---|---|---|
 | monorepo | pnpm + Turborepo | Nx / 裸 pnpm / npm-yarn | Nx 的强边界与生成器(过重) |
 | 前后端契约 | Zod in contracts(→校验+类型+OpenAPI) | 手写双份类型 / OpenAPI-first / tRPC | tRPC 的端到端类型(001 定了 REST + 要 OpenAPI + chat 走 SSE) |
-| 边界强制 | eslint-plugin-boundaries(FE/BE + barrel-only) | 仅靠约定 / Nx | 完整六边形强制(留到耦合变复杂再上) |
+| 边界强制 | ESLint 核心 `no-restricted-imports`(包级 FE/BE 纯净 + Boundary ⑤) | `eslint-plugin-boundaries` / 仅靠约定 / Nx | 插件版未落地(**当前未安装**);模块级 DAG 靠文档+review,见「依赖规则的真实强制力」 |
 | 后端形态 | 模块化单体 | 微服务 | 独立伸缩(≤10qps 不需要) |
 | 测试 runner | Jest(后端,Nest 原生)+ Vitest(前端,Vite 原生) | 全 Vitest / 全 Jest | 单一 runner(全 Vitest 会跟 Nest 装饰器较劲) |
 | dev 拓扑 | infra 进 compose + 应用跑主机 | 全进 compose / 全主机 | 贴近生产(换热更速度) |
