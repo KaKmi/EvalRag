@@ -1,14 +1,18 @@
 import { ClickHouseGapsRepository } from "./clickhouse-gaps.repository";
 import type { CodeCrushClickHouseClient } from "../../platform/clickhouse/clickhouse.types";
 
-type Captured = { query: string; query_params: Record<string, unknown> };
+type Captured = {
+  query: string;
+  query_params: Record<string, unknown>;
+  clickhouse_settings?: Record<string, unknown>;
+};
 
 /**
  * 不连真 CH——这些断言钉的是**生成出来的 SQL 文本**。
  * 理由：入池谓词漏掉任意一条（`preview = 0`、游标严格元组、`confidence IS NOT NULL` 前置）
  * 都不会报错，只会静默污染问题池；只有对 SQL 本身下断言才拦得住。
  */
-function makeRepo(): { repo: ClickHouseGapsRepository; captured: () => Captured } {
+function makeRepo(rows: unknown[] = []): { repo: ClickHouseGapsRepository; captured: () => Captured } {
   let last: Captured | undefined;
   const fake = {
     query: async (args: Captured & { format?: string }) => {
@@ -16,8 +20,12 @@ function makeRepo(): { repo: ClickHouseGapsRepository; captured: () => Captured 
       if (args.query.trim().startsWith("EXISTS TABLE")) {
         return { json: async () => [{ result: 1 }] };
       }
-      last = { query: args.query, query_params: args.query_params ?? {} };
-      return { json: async () => [] };
+      last = {
+        query: args.query,
+        query_params: args.query_params ?? {},
+        clickhouse_settings: args.clickhouse_settings,
+      };
+      return { json: async () => rows };
     },
     command: async () => undefined,
   } as unknown as CodeCrushClickHouseClient;
@@ -38,7 +46,7 @@ describe("ClickHouseGapsRepository.listPoolCandidates", () => {
   beforeAll(async () => {
     const { repo, captured: get } = makeRepo();
     await repo.listPoolCandidates(
-      { lastTs: new Date("2026-07-01T00:00:00.000Z"), lastTraceId: "trace-a" },
+      { lastTs: "2026-07-01 00:00:00.000000000", lastTraceId: "trace-a" },
       new Date("2026-07-19T00:00:00.000Z"),
       "online-v2",
       100,
@@ -112,5 +120,109 @@ describe("ClickHouseGapsRepository.listPoolCandidates", () => {
   it("bounds the page size with a bound limit param", () => {
     expect(captured.query).toContain("LIMIT {limit:UInt32}");
     expect(captured.query_params.limit).toBe(100);
+  });
+});
+
+/** peer review 抓出的三条：入池洪水、未评分被读成 0、游标精度丢失。 */
+describe("LEFT JOIN 落空不得被读成 0 分（否则整条流量灌进池子）", () => {
+  let cap: Captured;
+  beforeAll(async () => {
+    const { repo, captured } = makeRepo();
+    await repo.listPoolCandidates(
+      { lastTs: "2026-07-01 00:00:00.000000000", lastTraceId: "t" },
+      new Date("2026-07-19T00:00:00.000Z"),
+      "online-v2",
+      100,
+    );
+    cap = captured();
+  });
+
+  it("显式开 join_use_nulls —— CH 默认 0，落空填的是类型默认值而不是 NULL", () => {
+    expect(cap.clickhouse_settings).toMatchObject({ join_use_nulls: 1 });
+  });
+
+  it("eval 分支带 has-eval 守卫，没评过分的 trace 根本进不了该分支", () => {
+    expect(cap.query.replace(/\s+/g, " ")).toMatch(
+      /latest\.target_trace_id\s*!=\s*''\s*AND\s*least\(/,
+    );
+  });
+
+  it("三个分数各自带 ifNull 哨兵 —— 只护住 faithfulness 一个是不够的", () => {
+    const sql = cap.query.replace(/\s+/g, " ");
+    expect(sql).toContain("ifNull(latest.faithfulness, 101)");
+    expect(sql).toContain("ifNull(latest.answer_relevancy, 101)");
+    expect(sql).toContain("ifNull(latest.context_precision, 101)");
+  });
+
+  it("has_eval=0 的行，三个分数映射为 null 而不是 0", async () => {
+    const { repo } = makeRepo([
+      {
+        trace_id: "t1",
+        question: "q",
+        rewritten_question: null,
+        start_time: "2026-07-19 10:00:00.000000000",
+        session_id: "",
+        is_first_turn: 1,
+        confidence: null,
+        is_fallback: 1,
+        no_citations: 0,
+        has_eval: 0,
+        faithfulness: 0,
+        answer_relevancy: 0,
+        context_precision: 0,
+      },
+    ]);
+    const [c] = await repo.listPoolCandidates(
+      { lastTs: "2026-07-01 00:00:00.000000000", lastTraceId: "t" },
+      new Date("2026-07-19T00:00:00.000Z"),
+      "online-v2",
+      100,
+    );
+    expect(c.faithfulness).toBeNull();
+    expect(c.answerRelevancy).toBeNull();
+    expect(c.contextPrecision).toBeNull();
+  });
+});
+
+describe("游标必须保住纳秒精度（否则末行每页重复、游标永不前进）", () => {
+  it("cursorTs 原样透传 DateTime64(9)，startTime 才是有损的展示值", async () => {
+    const raw = "2026-07-19 10:00:00.123456789";
+    const { repo } = makeRepo([
+      {
+        trace_id: "t1",
+        question: "q",
+        rewritten_question: null,
+        start_time: raw,
+        session_id: "",
+        is_first_turn: 1,
+        confidence: null,
+        is_fallback: 1,
+        no_citations: 0,
+        has_eval: 0,
+        faithfulness: null,
+        answer_relevancy: null,
+        context_precision: null,
+      },
+    ]);
+    const [c] = await repo.listPoolCandidates(
+      { lastTs: "2026-07-01 00:00:00.000000000", lastTraceId: "t" },
+      new Date("2026-07-19T00:00:00.000Z"),
+      "online-v2",
+      100,
+    );
+    expect(c.cursorTs).toBe(raw);
+    expect(c.startTime).not.toBe(raw);
+  });
+
+  it("游标串原样进 query_params，中途不经 Date 转换", async () => {
+    const raw = "2026-07-19 10:00:00.123456789";
+    const { repo, captured } = makeRepo();
+    await repo.listPoolCandidates(
+      { lastTs: raw, lastTraceId: "abc" },
+      new Date("2026-07-19T00:00:00.000Z"),
+      "online-v2",
+      100,
+    );
+    expect(captured().query_params.lastTs).toBe(raw);
   });
 });

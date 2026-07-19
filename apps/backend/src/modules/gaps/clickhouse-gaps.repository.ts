@@ -52,16 +52,36 @@ const REWRITE_SPAN_SQL = `
   GROUP BY trace_id
 `;
 
+/**
+ * 游标。`lastTs` 是**不透明的原始 CH 时间串**，不是 `Date`。
+ *
+ * 因为排序键 `start_time` 是 `DateTime64(9)`（纳秒），而 JS `Date` 只到毫秒：
+ * 一旦把 `...123456789` 截成 `...123`，元组比较 `(123456789, id) > (123000000, id)`
+ * 仍然成立 ⇒ **该行每页都被重新取出，游标永远推不过它**（分页死循环 / 每轮重复收集）。
+ * 所以整条链路只传递原样字符串，中途不经 `Date`。
+ */
 export interface GapPoolCursor {
-  lastTs: Date;
+  lastTs: string;
   lastTraceId: string;
 }
+
+/** 首次运行（还没有水位线）时的游标起点。 */
+export const GAP_POOL_CURSOR_START: GapPoolCursor = {
+  lastTs: "1970-01-01 00:00:00.000000000",
+  lastTraceId: "",
+};
 
 export interface PoolCandidate {
   traceId: string;
   question: string;
   rewrittenQuestion: string | null;
+  /** 展示/落库用的 ISO 串（毫秒精度）。**不要拿它当游标**——见 `cursorTs`。 */
   startTime: string;
+  /**
+   * 原样的 CH `start_time`（纳秒精度），**只用于推进游标**。
+   * 收集器处理完一批后应把最后一行的 `{cursorTs, traceId}` 写回水位线。
+   */
+  cursorTs: string;
   sessionId: string;
   isFirstTurnInSession: boolean;
   confidence: number | null;
@@ -84,6 +104,8 @@ type CandidateRow = {
   // 免得后来的人以为可以直接 `SELECT fallback_used`。
   is_fallback: number | boolean | string;
   no_citations: number | boolean | string;
+  /** LEFT JOIN 是否命中评分。见 join_use_nulls 注释：不能靠分数列是否为 0 反推。 */
+  has_eval: number | boolean | string;
   faithfulness: number | string | null;
   answer_relevancy: number | string | null;
   context_precision: number | string | null;
@@ -120,20 +142,26 @@ function toTelemetryConfidenceScale(percentThreshold: number): number {
 
 function toCandidate(row: CandidateRow): PoolCandidate {
   const rewritten = (row.rewritten_question ?? "").trim();
+  const hasEval = truthy(row.has_eval);
   return {
     traceId: row.trace_id,
     question: row.question ?? "",
     // 空串与解析失败一律 null——「改写没取到」和「改写成了空」在下游是同一件事：未消解。
     rewrittenQuestion: rewritten === "" ? null : rewritten,
     startTime: toIsoUtc(row.start_time),
+    // 原样保留，不经 Date/toIsoUtc —— 那两者都会把纳秒截到毫秒，游标就再也推不过该行。
+    cursorTs: row.start_time,
     sessionId: row.session_id ?? "",
     isFirstTurnInSession: truthy(row.is_first_turn),
     confidence: nullableNumber(row.confidence),
     fallbackUsed: truthy(row.is_fallback),
     noCitations: truthy(row.no_citations),
-    faithfulness: nullableNumber(row.faithfulness),
-    answerRelevancy: nullableNumber(row.answer_relevancy),
-    contextPrecision: nullableNumber(row.context_precision),
+    // 没评过分就一律 null，绝不把 0 当成「0 分」往下游传（Global Constraint 6 的读侧同源要求）。
+    // join_use_nulls 已保证落空为 NULL，这里再按 has_eval 兜一道：那个设置若被谁改回默认，
+    // SQL 文本断言是发现不了的，而这一行能让错误停在 repository 边界而不是流进聚类。
+    faithfulness: hasEval ? nullableNumber(row.faithfulness) : null,
+    answerRelevancy: hasEval ? nullableNumber(row.answer_relevancy) : null,
+    contextPrecision: hasEval ? nullableNumber(row.context_precision) : null,
   };
 }
 
@@ -193,6 +221,7 @@ export class ClickHouseGapsRepository {
           t.confidence AS confidence,
           t.status = 'fallback' AS is_fallback,
           t.no_citations AS no_citations,
+          latest.target_trace_id != '' AS has_eval,
           latest.faithfulness AS faithfulness,
           latest.answer_relevancy AS answer_relevancy,
           latest.context_precision AS context_precision
@@ -214,17 +243,23 @@ export class ClickHouseGapsRepository {
             (t.confidence IS NOT NULL AND t.confidence < {confidenceMax:Float64})
             OR t.status = 'fallback'
             OR t.no_citations = 1
-            OR least(
-                 ifNull(latest.faithfulness, 101),
-                 latest.answer_relevancy,
-                 latest.context_precision
-               ) < {evalMax:Float64}
+            OR (
+              -- 必须先确认这条 trace 真被判过分再比阈值。见下方 join_use_nulls 注释：
+              -- 没有这个守卫时，未评分 trace 的分数列会是 0 而不是 NULL，
+              -- least(101, 0, 0) < 70 恒真 ⇒ 前三个分支全成死代码、整条流量灌进池子。
+              latest.target_trace_id != ''
+              AND least(
+                    ifNull(latest.faithfulness, 101),
+                    ifNull(latest.answer_relevancy, 101),
+                    ifNull(latest.context_precision, 101)
+                  ) < {evalMax:Float64}
+            )
           )
         ORDER BY t.start_time ASC, t.trace_id ASC
         LIMIT {limit:UInt32}
       `,
       query_params: {
-        lastTs: toClickHouseDateTime(cursor.lastTs),
+        lastTs: cursor.lastTs,
         lastTraceId: cursor.lastTraceId,
         upperBound: toClickHouseDateTime(upperBound),
         judgeVersion,
@@ -232,6 +267,20 @@ export class ClickHouseGapsRepository {
         evalMax: POOL_EVAL_SCORE_MAX,
         limit,
       },
+      /**
+       * **必须显式开** —— ClickHouse 的 `join_use_nulls` 默认是 `0`，LEFT JOIN 落空时
+       * 右表列填的是**类型默认值**而不是 NULL。`LATEST_EVAL_SQL` 里 `faithfulness` 有
+       * `nullIf(...)` 包着（`Nullable(Float64)`，落空得 NULL，`ifNull(...,101)` 哨兵有效），
+       * 但 `answer_relevancy` / `context_precision` 是裸的 `argMaxMerge`（非 Nullable Float64）
+       * ⇒ 落空得 **0**。于是 `least(101, 0, 0) < 70` 对**每一条没评过分的 trace** 恒真，
+       * 入池阈值的前三个分支变成死代码，整条非 preview 流量被灌进问题池。
+       *
+       * 开了它，落空一律 NULL：WHERE 里 `NULL < 70` 求值为 NULL（不成立），
+       * 投影侧也不会把「没评过」读成 0 分（Global Constraint 6 的读侧同源要求）。
+       * 上面的 `latest.target_trace_id != ''` 守卫是第二道——两道都留着，
+       * 因为这个设置一旦被谁在别处改回默认，靠 SQL 文本断言是发现不了的。
+       */
+      clickhouse_settings: { join_use_nulls: 1 },
       format: "JSONEachRow",
     });
     const rows = await result.json<CandidateRow>();
