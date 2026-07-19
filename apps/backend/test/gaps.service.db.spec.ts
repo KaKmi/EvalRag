@@ -352,14 +352,37 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
     it("默认排序：待处理在前，然后 freq 倒序（原型 `:631`）", async () => {
       const low = await seedCluster({ status: "pending", items: [{}] });
       const high = await seedCluster({ status: "pending", centroid: VEC_E1, items: [{}, {}, {}] });
-      const done = await seedCluster({ status: "ignored", centroid: VEC_E1, items: Array(9).fill({}) });
+      const routed = await seedCluster({
+        status: "routed_retrieval",
+        centroid: VEC_E1,
+        items: Array(9).fill({}),
+      });
 
       const { items } = await service.list({ limit: 200, offset: 0 });
       const order = items.map((i) => i.id);
       expect(order.indexOf(high.clusterId)).toBeLessThan(order.indexOf(low.clusterId));
-      // freq=9 的 ignored 仍排在 freq=1 的 pending 之后。
-      expect(order.indexOf(low.clusterId)).toBeLessThan(order.indexOf(done.clusterId));
-      await cleanup([low.clusterId, high.clusterId, done.clusterId]);
+      // freq=9 的非 pending 簇仍排在 freq=1 的 pending 之后。
+      expect(order.indexOf(low.clusterId)).toBeLessThan(order.indexOf(routed.clusterId));
+      await cleanup([low.clusterId, high.clusterId, routed.clusterId]);
+    });
+
+    /**
+     * 原型 §18.C `:707`：「忽略 → 默认列表隐藏(筛选可见)」。
+     *
+     * 不隐藏的话，屏5 的忽略确认框就在撒谎——它承诺「忽略后默认列表不再显示」，
+     * 而那行其实原地不动、只有状态文字变了 ⇒ 用户以为没生效、重复点 ⇒ 撞非法迁移 400。
+     */
+    it("默认列表隐藏已忽略，显式筛选「已忽略」仍看得到", async () => {
+      const open = await seedCluster({ status: "pending", items: [{}] });
+      const ignored = await seedCluster({ status: "ignored", centroid: VEC_E1, items: [{}] });
+
+      const def = await service.list({ limit: 200, offset: 0 });
+      expect(def.items.map((i) => i.id)).toEqual([open.clusterId]);
+      expect(def.total).toBe(1); // total 与列表同口径，不能只筛了行却报总数 2
+
+      const filtered = await service.list({ status: "ignored", limit: 200, offset: 0 });
+      expect(filtered.items.map((i) => i.id)).toEqual([ignored.clusterId]);
+      await cleanup([open.clusterId, ignored.clusterId]);
     });
   });
 

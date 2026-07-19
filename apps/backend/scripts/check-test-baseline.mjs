@@ -45,7 +45,7 @@ const BASELINES = {
   // ——本波初版正是估成 87（实测 88），被 peer review 抓出，随后又因补两条跨簇/跨来源用例变 90。
   // Task 5 又加 1 条（last_ts 纳秒往返，钉死迁移 0027）⇒ 12/91。
   // Task 6 加 test/gaps.service.db.spec.ts（peer review 后补到 25 条）⇒ 13/116。
-  db: { suites: 13, tests: 117, script: "test:db" },
+  db: { suites: 13, tests: 118, script: "test:db" },
   // infra：B2a Task 5 加 test/gap-pool-isolation.spec.ts（5 条）后 8 suites / 96 tests；
   // Task 6 再加 test/gaps.e2e.spec.ts（10 条 HTTP 全链路）⇒ 9 suites / 106 tests。
   infra: { suites: 9, tests: 106, script: "test:infra" },

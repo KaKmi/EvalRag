@@ -444,7 +444,18 @@ export class GapsRepository implements GapCollectorStore {
     windowStart: Date,
   ): Promise<{ items: GapClusterListRow[]; total: number }> {
     const filters = [isNull(gapClusters.deletedAt)];
-    if (query.status) filters.push(eq(gapClusters.status, query.status));
+    if (query.status) {
+      filters.push(eq(gapClusters.status, query.status));
+    } else {
+      /**
+       * 不传 status 时**排除已忽略**（原型 §18.C `:707`：「忽略 → 默认列表隐藏(筛选可见)」）。
+       *
+       * 不做这条的后果不只是"少一个便利"：屏5 的忽略确认框承诺「忽略后默认列表不再显示」，
+       * 而列表刷新后那行**原地不动**、只有状态文字变了 ⇒ 用户以为没生效、重复点，
+       * 第二次直接撞非法迁移 400。选「已忽略」筛选或点概览卡仍然看得到它们。
+       */
+      filters.push(sql`${gapClusters.status} <> 'ignored'`);
+    }
     if (query.rootCause) {
       // 按**生效**根因过滤（COALESCE），不是按 auto——人工改判过的簇要能被新根因筛到。
       filters.push(
