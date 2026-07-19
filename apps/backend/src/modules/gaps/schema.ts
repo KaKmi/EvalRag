@@ -114,12 +114,19 @@ export const gapItems = pgTable(
         AND (${t.contextPrecision} IS NULL OR ${t.contextPrecision} BETWEEN 0 AND 100)
         AND (${t.confidence} IS NULL OR ${t.confidence} BETWEEN 0 AND 100)`,
     ),
-    // worker 崩溃重跑的幂等凭据：同一条 trace 在同簇同来源下只入池一次。
-    uniqueIndex("gap_items_cluster_source_trace_unique").on(
-      t.clusterId,
-      t.source,
-      t.sourceTraceId,
-    ),
+    /**
+     * worker 崩溃重跑的幂等凭据：**一条 trace 全局只入池一次**。
+     *
+     * 键里**故意不含 `cluster_id`**（peer review 抓出的数据完整性洞）：若含簇 id，
+     * 「插入成功但游标未推进就崩溃」的重跑里，簇 centroid 可能已被其他 item 的增量平均挪动，
+     * 同一条 trace 会归到另一个簇 ⇒ 唯一索引不冲突 ⇒ 两簇各留一行、各 freq+1。
+     * 而 `freq` 按设计「只增不减」，这种重复计数**无自愈路径**。
+     *
+     * 也**不含 `source`**：同一条 trace 被 worker 自动收过、人又从 Trace 详情手动加一次，
+     * 同样会双计。全局唯一正好实现原型 `:648` 要的行为——手动入池时命中冲突即返回
+     * 「已在缺口『…』(×N) 中 · 查看」，而不是再插一行。
+     */
+    uniqueIndex("gap_items_source_trace_unique").on(t.sourceTraceId),
     index("gap_items_cluster_time_idx").on(t.clusterId, t.traceStartTime.desc()),
   ],
 );

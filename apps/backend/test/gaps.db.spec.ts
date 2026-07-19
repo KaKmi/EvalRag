@@ -119,7 +119,7 @@ describeDb("0026 gap pool（RUN_DB_TESTS=1）", () => {
     await dropClusters(pool, [id]);
   });
 
-  it("同一条 trace 在同一簇同一来源下只能入池一次（worker 重跑幂等的地基）", async () => {
+  it("一条 trace 全局只能入池一次（worker 重跑幂等的地基）", async () => {
     const id = await newCluster(pool, "能开专票吗", VEC_E0);
     const insert = () =>
       pool.query(
@@ -128,7 +128,45 @@ describeDb("0026 gap pool（RUN_DB_TESTS=1）", () => {
         [id, VEC_E0],
       );
     await insert();
-    await expect(insert()).rejects.toThrow(/gap_items_cluster_source_trace_unique/);
+    await expect(insert()).rejects.toThrow(/gap_items_source_trace_unique/);
+    await dropClusters(pool, [id]);
+  });
+
+  it("**跨簇**也拦得住——这正是含 cluster_id 的键拦不住的那条路径", async () => {
+    // 复现 peer review 指出的场景：worker 插入后、推进游标前崩溃；重跑时 centroid 已被
+    // 其他 item 的增量平均挪动，同一条 trace 归到了**另一个**簇。
+    // 若唯一键含 cluster_id，这里会插入成功 ⇒ 两簇各留一行、各 freq+1，且 freq 只增不减、无自愈。
+    const a = await newCluster(pool, "簇A", VEC_E0);
+    const b = await newCluster(pool, "簇B", VEC_E1);
+    await pool.query(
+      `INSERT INTO gap_items (cluster_id, source, source_trace_id, question, embedding)
+       VALUES ($1, 'online', 'trace-dup', 'q', $2::vector)`,
+      [a, VEC_E0],
+    );
+    await expect(
+      pool.query(
+        `INSERT INTO gap_items (cluster_id, source, source_trace_id, question, embedding)
+         VALUES ($1, 'online', 'trace-dup', 'q', $2::vector)`,
+        [b, VEC_E1],
+      ),
+    ).rejects.toThrow(/gap_items_source_trace_unique/);
+    await dropClusters(pool, [a, b]);
+  });
+
+  it("**跨来源**也拦得住——手动入池命中冲突即「已在缺口中」，不再插一行（原型 :648）", async () => {
+    const id = await newCluster(pool, "q", VEC_E0);
+    await pool.query(
+      `INSERT INTO gap_items (cluster_id, source, source_trace_id, question, embedding)
+       VALUES ($1, 'online', 'trace-both', 'q', $2::vector)`,
+      [id, VEC_E0],
+    );
+    await expect(
+      pool.query(
+        `INSERT INTO gap_items (cluster_id, source, source_trace_id, question, embedding)
+         VALUES ($1, 'manual_trace', 'trace-both', 'q', $2::vector)`,
+        [id, VEC_E0],
+      ),
+    ).rejects.toThrow(/gap_items_source_trace_unique/);
     await dropClusters(pool, [id]);
   });
 

@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS "gap_items" (
 	)
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "gap_items_cluster_source_trace_unique" ON "gap_items" ("cluster_id","source","source_trace_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "gap_items_source_trace_unique" ON "gap_items" ("source_trace_id");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "gap_items_cluster_time_idx" ON "gap_items" ("cluster_id","trace_start_time" DESC);
 --> statement-breakpoint
