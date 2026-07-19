@@ -48,7 +48,10 @@ SELECT
   root.SpanAttributes['rag.quality.refusal'] = 'true' AS refusal,
   root.SpanAttributes['rag.quality.timeout'] = 'true' AS timeout,
   root.SpanAttributes['rag.prompt.version_id'] AS prompt_version_id,
-  root.SpanAttributes['rag.preview'] = 'true' AS preview
+  root.SpanAttributes['rag.preview'] = 'true' AS preview,
+  -- B2a：问题池入池阈值要读「可信度 <60」。必须 OrNull 而非 OrZero——属性缺失时若落 0，
+  -- 每一条没埋可信度的 trace 都会被判成低可信度，把全部未埋点流量灌进问题池。
+  toFloat64OrNull(root.SpanAttributes['rag.quality.confidence']) AS confidence
 FROM otel_traces AS root
 LEFT JOIN (
   SELECT TraceId,
