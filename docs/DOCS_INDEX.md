@@ -23,5 +23,5 @@
 | design | 018 | draft | 离线评测 run 与评测集（E-W2a） | gold 题库 + 对指定配置版本发起离线 run（真实走编排产出 preview trace）+ 屏3 报告；结果存 Postgres 与在线 rag.eval 读模型物理隔离。 | 2026-07-19 | [018](docs/design/018-offline-eval-runs.md) |
 | design | 019 | draft | 评测 worker 独立部署物（PROCESS_ROLE 分流） | 把 eval-run + online-eval 两个 pg-boss 消费者拆到独立 worker 进程：同一代码按 PROCESS_ROLE 分流，租约代码零改动。 | 2026-07-18 | [019](docs/design/019-eval-worker-split.md) |
 | design | 020 | current | Judge scoring integrity v2 | 让 faithfulness 未评分在在线/离线、OTLP、ClickHouse、API 与 UI 全链路保持为 null，并以 v2 解析契约修复长答案确定性拒绝。 | 2026-07-18 | [020](docs/design/020-judge-scoring-integrity.md) |
-| design | 021 | draft | 知识缺口 / 问题池域（E-W4 B2a） | 坏样本自动入池、增量 embedding 聚类、根因分诊与缺口状态机；新建 gaps 域作为 eval-runs 之上的新依赖顶点，并把坏样本批量沉淀为 gold 用例。 | 2026-07-19 | [021](docs/design/021-problem-pool-gap-domain.md) |
+| design | 021 | draft | 知识缺口 / 问题池域（E-W4 B2a） | 坏样本自动入池、增量 embedding 聚类、根因分诊与缺口状态机；新建 gaps 域作为 eval-runs 之上的新依赖顶点，并把坏样本批量沉淀为 gold 用例。 | 2026-07-20 | [021](docs/design/021-problem-pool-gap-domain.md) |
 
