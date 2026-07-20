@@ -74,6 +74,11 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
     centroid?: string;
     status?: string;
     rootCauseAuto?: string | null;
+    // B2b 向导/回验列（缺省全 NULL，既有用例一个字都不用改）。
+    fillDraftQuestion?: string | null;
+    fillDraftAnswer?: string | null;
+    fillPreScore?: number | null;
+    recurredAt?: Date | null;
     items?: Array<{
       source?: string;
       traceStartTime?: Date | null;
@@ -85,9 +90,20 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
     }>;
   }): Promise<{ clusterId: string; itemIds: string[] }> {
     const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO gap_clusters (representative_question, centroid, status, root_cause_auto, freq)
-       VALUES ($1, $2::vector, $3, $4, 0) RETURNING id`,
-      [opts.question ?? "能开专用发票吗", opts.centroid ?? VEC_E0, opts.status ?? "pending", opts.rootCauseAuto ?? null],
+      `INSERT INTO gap_clusters
+         (representative_question, centroid, status, root_cause_auto, freq,
+          fill_draft_question, fill_draft_answer, fill_pre_score, recurred_at)
+       VALUES ($1, $2::vector, $3, $4, 0, $5, $6, $7, $8) RETURNING id`,
+      [
+        opts.question ?? "能开专用发票吗",
+        opts.centroid ?? VEC_E0,
+        opts.status ?? "pending",
+        opts.rootCauseAuto ?? null,
+        opts.fillDraftQuestion ?? null,
+        opts.fillDraftAnswer ?? null,
+        opts.fillPreScore ?? null,
+        opts.recurredAt ?? null,
+      ],
     );
     const clusterId = rows[0].id;
     const itemIds: string[] = [];
@@ -149,6 +165,42 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
     return Number(rows[0].freq);
   }
 
+  /** B2b：读向导/回验列（这些不在契约 `GapCluster` 上，只能直接查库断言）。 */
+  async function fillFieldsOf(id: string): Promise<{
+    fillDraftQuestion: string | null;
+    fillDraftAnswer: string | null;
+    fillTargetDocumentId: string | null;
+    fillVerifyApplicationId: string | null;
+    fillPreScore: number | null;
+    verifiedScore: number | null;
+    recurredAt: Date | null;
+  }> {
+    const { rows } = await pool.query<{
+      fill_draft_question: string | null;
+      fill_draft_answer: string | null;
+      fill_target_document_id: string | null;
+      fill_verify_application_id: string | null;
+      fill_pre_score: number | null;
+      verified_score: number | null;
+      recurred_at: Date | null;
+    }>(
+      `SELECT fill_draft_question, fill_draft_answer, fill_target_document_id,
+              fill_verify_application_id, fill_pre_score, verified_score, recurred_at
+       FROM gap_clusters WHERE id = $1`,
+      [id],
+    );
+    const r = rows[0];
+    return {
+      fillDraftQuestion: r.fill_draft_question,
+      fillDraftAnswer: r.fill_draft_answer,
+      fillTargetDocumentId: r.fill_target_document_id,
+      fillVerifyApplicationId: r.fill_verify_application_id,
+      fillPreScore: r.fill_pre_score,
+      verifiedScore: r.verified_score,
+      recurredAt: r.recurred_at,
+    };
+  }
+
   // ───────────────────────────── 状态机 ─────────────────────────────
 
   describe("状态机（021 决策 A）", () => {
@@ -191,6 +243,228 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
       );
       expect(rows[0].auto).toBe("missing"); // 「worker 现在会怎么判」依然可回答
       await cleanup([clusterId]);
+    });
+  });
+
+  // ───────────────── B2b：向导与回验的四态迁移（021 决策 J） ─────────────────
+
+  describe("状态机 B2b 四态（021 决策 J / 原型 §18.C）", () => {
+    it.each([
+      ["pending", "startDraft", "drafting"],
+      ["drafting", "cancelDraft", "pending"],
+      ["drafting", "draftReady", "reviewing"],
+      ["reviewing", "cancelReview", "pending"],
+      ["filled", "verifyPass", "verified"],
+      ["filled", "verifyFail", "pending"],
+      ["filled", "verifyIngestFailed", "pending"],
+    ] as const)("%s --%s--> %s", async (from, event, to) => {
+      const { clusterId } = await seedCluster({ status: from, items: [{}] });
+      try {
+        await service.transition(clusterId, event);
+        expect(await statusOf(clusterId)).toBe(to);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("ignore 在全部六个非 ignored 态都合法（原型 §18.C「任意非终」）", async () => {
+      const ids: string[] = [];
+      try {
+        for (const from of [
+          "pending",
+          "routed_retrieval",
+          "drafting",
+          "reviewing",
+          "filled",
+          "verified",
+        ] as const) {
+          const { clusterId } = await seedCluster({ status: from, items: [{}] });
+          ids.push(clusterId);
+          await service.transition(clusterId, "ignore");
+          expect(await statusOf(clusterId)).toBe("ignored");
+        }
+      } finally {
+        await cleanup(ids);
+      }
+    });
+
+    it("从 ignored 再 ignore 仍是非法——重复点击要被明确拒绝，不是静默 no-op", async () => {
+      const { clusterId } = await seedCluster({ status: "ignored", items: [{}] });
+      try {
+        await expect(service.transition(clusterId, "ignore")).rejects.toThrow(
+          /illegal transition/i,
+        );
+        expect(await statusOf(clusterId)).toBe("ignored");
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it.each([
+      ["routed_retrieval", "startDraft"],
+      ["pending", "draftReady"],
+      ["pending", "submitFill"],
+      ["reviewing", "verifyPass"],
+      ["drafting", "verifyFail"],
+    ] as const)("非法迁移 %s --%s--> 被拒且状态一动不动", async (from, event) => {
+      const { clusterId } = await seedCluster({ status: from, items: [{}] });
+      try {
+        await expect(service.transition(clusterId, event)).rejects.toThrow(/illegal transition/i);
+        expect(await statusOf(clusterId)).toBe(from);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("startDraft 把当下的 avgQuality 快照成 fill_pre_score（「41→89」的左端）", async () => {
+      // avgQuality = 簇内各 item 的 min(三个非空指标) 的均值 ⇒ min(41,79,86)=41、min(45,90,90)=45 ⇒ 43。
+      const { clusterId } = await seedCluster({
+        status: "pending",
+        items: [
+          { faithfulness: 41, answerRelevancy: 79, contextPrecision: 86 },
+          { faithfulness: 45, answerRelevancy: 90, contextPrecision: 90 },
+        ],
+      });
+      try {
+        await service.startDraft(clusterId);
+        expect(await statusOf(clusterId)).toBe("drafting");
+        expect((await fillFieldsOf(clusterId)).fillPreScore).toBe(43);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("一个分数都没有的簇 startDraft：fill_pre_score 记 NULL，不是 0", async () => {
+      const { clusterId } = await seedCluster({ status: "pending", items: [{}] });
+      try {
+        await service.startDraft(clusterId);
+        expect((await fillFieldsOf(clusterId)).fillPreScore).toBeNull();
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("取消草拟/驳回人审都保留草稿，供下次直接从第②步继续（原型 `:704`）", async () => {
+      const drafting = await seedCluster({
+        status: "drafting",
+        fillDraftQuestion: "能否开具专用发票",
+        fillDraftAnswer: "可以。",
+        items: [{}],
+      });
+      const reviewing = await seedCluster({
+        status: "reviewing",
+        fillDraftQuestion: "能否开具专用发票",
+        fillDraftAnswer: "可以。",
+        items: [{}],
+      });
+      try {
+        await service.cancelDraft(drafting.clusterId);
+        expect((await fillFieldsOf(drafting.clusterId)).fillDraftQuestion).toBe("能否开具专用发票");
+
+        await service.cancelReview(reviewing.clusterId);
+        expect((await fillFieldsOf(reviewing.clusterId)).fillDraftAnswer).toBe("可以。");
+      } finally {
+        await cleanup([drafting.clusterId, reviewing.clusterId]);
+      }
+    });
+
+    it("recordDraftReady 写草稿 Q/A 并进入待人审", async () => {
+      const { clusterId } = await seedCluster({ status: "drafting", items: [{}] });
+      try {
+        await service.recordDraftReady(clusterId, "能否开具专用发票", "可以，下单时选专票。");
+        expect(await statusOf(clusterId)).toBe("reviewing");
+        const fields = await fillFieldsOf(clusterId);
+        expect(fields.fillDraftQuestion).toBe("能否开具专用发票");
+        expect(fields.fillDraftAnswer).toBe("可以，下单时选专票。");
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("submitFill 记下入库目标与回验参数（监听器按 documentId 反查本簇）", async () => {
+      const { clusterId } = await seedCluster({ status: "reviewing", items: [{}] });
+      const target = {
+        targetKbId: "44444444-4444-4444-8444-444444444444",
+        applicationId: "55555555-5555-4555-8555-555555555555",
+        configVersionId: "66666666-6666-4666-8666-666666666666",
+        documentId: "77777777-7777-4777-8777-777777777777",
+      };
+      try {
+        await service.submitFill(clusterId, target);
+        expect(await statusOf(clusterId)).toBe("filled");
+        const fields = await fillFieldsOf(clusterId);
+        expect(fields.fillTargetDocumentId).toBe(target.documentId);
+        expect(fields.fillVerifyApplicationId).toBe(target.applicationId);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("回验通过：转 verified、记新分数、**不**打复发标", async () => {
+      const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
+      try {
+        const updated = await service.recordVerifyPass(clusterId, 89);
+        expect(updated.status).toBe("verified");
+        expect(updated.fillPreScore).toBe(41);
+        expect(updated.verifiedScore).toBe(89);
+        expect(updated.recurred).toBe(false);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("回验未通过：回 pending、记分数、打复发标（原型 `:706`）", async () => {
+      const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
+      try {
+        const updated = await service.recordVerifyFail(clusterId, 62);
+        expect(updated.status).toBe("pending");
+        expect(updated.verifiedScore).toBe(62);
+        expect(updated.recurred).toBe(true);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("入库失败：回 pending、清掉废文档引用、**不**打复发标（与「补库后仍低分」要能分辨）", async () => {
+      const { clusterId } = await seedCluster({ status: "reviewing", items: [{}] });
+      try {
+        await service.submitFill(clusterId, {
+          targetKbId: "44444444-4444-4444-8444-444444444444",
+          applicationId: "55555555-5555-4555-8555-555555555555",
+          configVersionId: "66666666-6666-4666-8666-666666666666",
+          documentId: "77777777-7777-4777-8777-777777777777",
+        });
+        const updated = await service.recordVerifyIngestFailed(clusterId);
+        expect(updated.status).toBe("pending");
+        expect(updated.recurred).toBe(false); // 工程故障 ≠ 缺口复发
+        expect((await fillFieldsOf(clusterId)).fillTargetDocumentId).toBeNull();
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("复发标在人主动推进时清除，但 reopen 不清（那是另一条独立迁移）", async () => {
+      const ignoredCluster = await seedCluster({
+        status: "pending",
+        recurredAt: new Date(),
+        items: [{}],
+      });
+      const reopened = await seedCluster({
+        status: "ignored",
+        recurredAt: new Date(),
+        items: [{}],
+      });
+      try {
+        // ignore 是「人看到复发并做了处置」⇒ 清。
+        const afterIgnore = await service.transition(ignoredCluster.clusterId, "ignore");
+        expect(afterIgnore.recurred).toBe(false);
+
+        // reopen 与复发判定无关 ⇒ 信号保留。
+        const afterReopen = await service.transition(reopened.clusterId, "reopen");
+        expect(afterReopen.recurred).toBe(true);
+      } finally {
+        await cleanup([ignoredCluster.clusterId, reopened.clusterId]);
+      }
     });
   });
 

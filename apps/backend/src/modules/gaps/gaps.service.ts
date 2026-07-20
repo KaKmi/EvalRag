@@ -26,22 +26,57 @@ import {
 import type { GapItemRow } from "./schema";
 
 /**
- * 缺口簇的状态机与簇操作（021 决策 A）。
+ * 缺口簇的状态机与簇操作（021 决策 A / 决策 J）。
  *
  * 合法迁移**穷举成常量表**，非法迁移一律 400。写成表而不是散在各方法里的 if：
- * B2b 要加四个态（drafting/reviewing/filled/verified），届时改这一张表 + DB 的 CHECK 即可，
- * 不必翻遍所有分支去找漏网的迁移。
+ * B2b 加四个态时只改这一张表 + DB 的 CHECK（迁移 0028），不必翻遍所有分支找漏网的迁移。
  *
- * ⚠️ `routed_retrieval --ignore--> ignored` 是**有意放行**的（V15）：一个没有出口的状态是死态，
- * 「已转检索优化」之后发现判错了，必须还能忽略掉，否则那行永远堵在列表里。
+ * ⚠️ `ignore` 的 `from` 覆盖**全部六个非 `ignored` 态**——原型 §18.C 那一行写的是
+ * 「任意非终 --忽略(用户)--> ignored」。一度只放行 `pending`/`routed_retrieval`，
+ * 那会让「草拟到一半发现这个缺口根本不值得补」的人无路可走：他得先取消草拟回到 pending
+ * 才能忽略，多一步且没有任何道理。同理「已入库但回验前就发现补错了」也要能直接忽略。
+ * 从 `ignored` 再 `ignore` 仍是非法（幂等重复点击应当被明确拒绝，而不是静默 no-op）。
+ *
+ * 事件分两类：
+ *  · **用户触发**（有 HTTP 端点）：ignore / reopen / routeRetrieval / startDraft / cancelDraft / cancelReview
+ *  · **系统触发**（由 GapFillService / GapVerificationService 在编排里调用，无独立端点）：
+ *    draftReady / submitFill / verifyPass / verifyFail / verifyIngestFailed
+ * 后者同样走这张表——「回验完成」也是一次要被校验的迁移，不该因为调用方是自己人就跳过守卫。
  */
 const TRANSITIONS = {
-  ignore: { from: ["pending", "routed_retrieval"], to: "ignored" },
+  ignore: {
+    from: ["pending", "routed_retrieval", "drafting", "reviewing", "filled", "verified"],
+    to: "ignored",
+  },
   reopen: { from: ["ignored"], to: "pending" },
   routeRetrieval: { from: ["pending"], to: "routed_retrieval" },
+  startDraft: { from: ["pending"], to: "drafting" },
+  /** 草拟失败 / 用户取消。草稿字段**保留**——原型 `:704`「草稿保留可再编辑」。 */
+  cancelDraft: { from: ["drafting"], to: "pending" },
+  draftReady: { from: ["drafting"], to: "reviewing" },
+  /** 人审驳回。同样保留草稿，下次进向导可直接从第②步继续。 */
+  cancelReview: { from: ["reviewing"], to: "pending" },
+  submitFill: { from: ["reviewing"], to: "filled" },
+  verifyPass: { from: ["filled"], to: "verified" },
+  /** 回验分数 <80（或判分失败）。副作用置 `recurred_at`——原型 `:706`「open + 复发标」。 */
+  verifyFail: { from: ["filled"], to: "pending" },
+  /**
+   * 提交入库的文档自身处理失败（解析/切片/embedding 炸了），**不是**分数不达标。
+   * 与 `verifyFail` 同样回到 `pending`，但**不置复发标**：那是本次补库操作的工程故障，
+   * 不是「这个知识缺口又出现新证据了」。混进同一个红点，运营就分不清该重投文档还是该重查缺口。
+   */
+  verifyIngestFailed: { from: ["filled"], to: "pending" },
 } as const satisfies Record<string, { from: readonly GapClusterStatus[]; to: GapClusterStatus }>;
 
 export type GapTransition = keyof typeof TRANSITIONS;
+
+/**
+ * 用户**主动推进**该簇时清除「复发」提醒——语义是「人已经看到这次复发并采取了行动」。
+ *
+ * `reopen`（ignored → pending）**刻意不在其中**：那是一条独立的手动迁移，与复发判定无关；
+ * 若 `recurred_at` 当时因为别的原因非空，手动重开不该顺手抹掉这个信号。
+ */
+const CLEARS_RECURRED = new Set<GapTransition>(["ignore", "routeRetrieval", "startDraft"]);
 
 function toIso(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
@@ -82,6 +117,25 @@ export class GapsService {
 
   /** 状态迁移。非法迁移抛 400 并说清「从哪到哪不允许」，不静默 no-op。 */
   async transition(id: string, event: GapTransition, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, event, now);
+  }
+
+  /**
+   * 迁移执行的**唯一**实现：校验 → 写副作用列 → 写状态 → 按需清复发标 → 读回。
+   *
+   * 所有对外方法（含 B2b 新增的 6 个）都经由它，这样「非法迁移一律 400」这条不变量
+   * 只有一处实现——B2b 加了 8 个事件，若每个方法各写一遍守卫，漏掉任何一个都是静默放行。
+   *
+   * `sideEffect` 在写状态**之前**跑：它写的是本次迁移要带的载荷列（草稿内容 / 入库目标 /
+   * 回验分数）。顺序反过来的话，副作用失败会留下「状态已推进但载荷为空」的行——
+   * 例如 `filled` 却没有 `fill_target_document_id`，回验监听器永远找不到它。
+   */
+  private async applyTransition(
+    id: string,
+    event: GapTransition,
+    now: Date,
+    sideEffect?: () => Promise<void>,
+  ): Promise<GapCluster> {
     const cluster = await this.mustFind(id);
     const rule = TRANSITIONS[event];
     if (!(rule.from as readonly string[]).includes(cluster.status)) {
@@ -89,8 +143,95 @@ export class GapsService {
         `illegal transition: ${cluster.status} --${event}--> ${rule.to}（允许的来源：${rule.from.join(" / ")}）`,
       );
     }
+    if (sideEffect) await sideEffect();
     await this.repo.updateStatus(id, rule.to, now);
+    if (CLEARS_RECURRED.has(event)) await this.repo.clearRecurred(id, now);
     return this.mustReadBack(id, now);
+  }
+
+  // ───────────────── B2b [补知识库] 向导与回验的状态迁移（021 决策 J） ─────────────────
+
+  /**
+   * 点 [补知识库]：`pending → drafting`，并**快照当下的 avgQuality** 作为「41→89」的左端。
+   *
+   * 为什么必须此刻快照而不是展示时现读：`avgQuality` 是对 `gap_items` 的查询期聚合
+   * （`selectClusterRows`），而向导从点击到入库完成回验可能跨越数分钟到下一个收集器周期。
+   * 现读会让「之前」这个数随新坏样本涌入而静默漂移，展示出来的就不再是用户当时看到的那个分。
+   */
+  async startDraft(id: string, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "startDraft", now, async () => {
+      const windowStart = new Date(now.getTime() - FREQ_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+      const row = await this.repo.findClusterListRow(id, windowStart);
+      const preScore = row ? toNumberOrNull(row.avgQuality) : null;
+      await this.repo.setFillPreScore(id, preScore === null ? null : Math.round(preScore), now);
+    });
+  }
+
+  /** 草拟失败 / 用户取消：回 `pending`，草稿字段保留（原型 `:704`）。 */
+  async cancelDraft(id: string, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "cancelDraft", now);
+  }
+
+  /** LLM 草拟成功：写草稿 Q/A 并进入待人审。 */
+  async recordDraftReady(
+    id: string,
+    question: string,
+    answer: string,
+    now = new Date(),
+  ): Promise<GapCluster> {
+    return this.applyTransition(id, "draftReady", now, () =>
+      this.repo.updateFillDraft(id, { question, answer }, now),
+    );
+  }
+
+  /** 人审驳回：回 `pending`，草稿保留供再次编辑。 */
+  async cancelReview(id: string, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "cancelReview", now);
+  }
+
+  /** 人审通过并已真的调用过入库管线：记下目标 KB / 文档 / 回验用的应用与版本。 */
+  async submitFill(
+    id: string,
+    target: {
+      targetKbId: string;
+      applicationId: string;
+      configVersionId: string;
+      documentId: string;
+    },
+    now = new Date(),
+  ): Promise<GapCluster> {
+    return this.applyTransition(id, "submitFill", now, () =>
+      this.repo.updateFillTarget(id, target, now),
+    );
+  }
+
+  /** 回验通过（≥ `VERIFY_PASS_THRESHOLD`）：记新分数，屏5 显示「✓ 41→89」。 */
+  async recordVerifyPass(id: string, score: number, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "verifyPass", now, () =>
+      this.repo.updateVerification(id, { verifiedScore: score }, now),
+    );
+  }
+
+  /** 回验未通过（分数 <80，或判分整体失败）：回 `pending` + 复发标（原型 `:706`）。 */
+  async recordVerifyFail(id: string, score: number | null, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "verifyFail", now, () =>
+      this.repo.updateVerification(id, { verifiedScore: score, recurredAt: now }, now),
+    );
+  }
+
+  /**
+   * 提交入库的文档处理失败：回 `pending`，清掉指向那份废文档的引用，**不置复发标**。
+   * 复发是业务信号（缺口又出现了），入库失败是工程故障（文档没解析成），UI 文案也不同。
+   */
+  async recordVerifyIngestFailed(id: string, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "verifyIngestFailed", now, () =>
+      this.repo.updateVerification(id, { fillTargetDocumentId: null }, now),
+    );
+  }
+
+  /** 向导/回验编排要读的原始行（草稿内容、入库目标等不在契约 `GapCluster` 上的列）。 */
+  async mustFindForFill(id: string) {
+    return this.mustFind(id);
   }
 
   /**

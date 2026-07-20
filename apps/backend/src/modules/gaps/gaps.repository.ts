@@ -610,6 +610,85 @@ export class GapsRepository implements GapCollectorStore {
       .where(eq(gapClusters.id, id));
   }
 
+  // ─────────── B2b [补知识库] 向导与回验的载荷列（021 决策 J/K） ───────────
+  // 这几个方法**只写列、不判合法性**：迁移是否允许由 `GapsService` 的 TRANSITIONS 表裁定，
+  // 与既有 `updateStatus` 的分工一致（仓库层不重复实现状态机）。
+
+  /** 点 [补知识库] 时快照当下质量分，作为「41→89」的左端。 */
+  async setFillPreScore(id: string, preScore: number | null, now: Date): Promise<void> {
+    await this.db
+      .update(gapClusters)
+      .set({ fillPreScore: preScore, updatedAt: now })
+      .where(eq(gapClusters.id, id));
+  }
+
+  /** LLM 草拟结果落库。Q 截到 200 字与列宽一致（超长由上游 schema 先拦，这里是兜底）。 */
+  async updateFillDraft(
+    id: string,
+    draft: { question: string; answer: string },
+    now: Date,
+  ): Promise<void> {
+    await this.db
+      .update(gapClusters)
+      .set({
+        fillDraftQuestion: draft.question.slice(0, 200),
+        fillDraftAnswer: draft.answer,
+        updatedAt: now,
+      })
+      .where(eq(gapClusters.id, id));
+  }
+
+  /** 人审通过、文档已提交入库：记下目标与回验参数（回验监听器按 documentId 反查本簇）。 */
+  async updateFillTarget(
+    id: string,
+    target: {
+      targetKbId: string;
+      applicationId: string;
+      configVersionId: string;
+      documentId: string;
+    },
+    now: Date,
+  ): Promise<void> {
+    await this.db
+      .update(gapClusters)
+      .set({
+        fillTargetKbId: target.targetKbId,
+        fillVerifyApplicationId: target.applicationId,
+        fillVerifyConfigVersionId: target.configVersionId,
+        fillTargetDocumentId: target.documentId,
+        updatedAt: now,
+      })
+      .where(eq(gapClusters.id, id));
+  }
+
+  /**
+   * 回验结果落库。三个字段都是**可选**的，按迁移分支各写各的：
+   * 通过写 `verifiedScore`；未通过写 `verifiedScore` + `recurredAt`；
+   * 入库失败清 `fillTargetDocumentId`（那份文档废了，别让监听器再撞上它）。
+   */
+  async updateVerification(
+    id: string,
+    patch: {
+      verifiedScore?: number | null;
+      recurredAt?: Date;
+      fillTargetDocumentId?: string | null;
+    },
+    now: Date,
+  ): Promise<void> {
+    await this.db
+      .update(gapClusters)
+      .set({ ...patch, updatedAt: now })
+      .where(eq(gapClusters.id, id));
+  }
+
+  /** 清「复发」提醒（人主动推进该簇时）。 */
+  async clearRecurred(id: string, now: Date): Promise<void> {
+    await this.db
+      .update(gapClusters)
+      .set({ recurredAt: null, updatedAt: now })
+      .where(eq(gapClusters.id, id));
+  }
+
   /**
    * 「已进评测集」是**叠加标志不是状态**（原型 `:634` 明令非排他）——只写时间戳，**不碰 status**。
    * 幂等：已标记过就保留首次时间，不刷新（它回答的是「什么时候进的」）。
