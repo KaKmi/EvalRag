@@ -158,6 +158,16 @@ describe("GapVerificationService.verifyCluster", () => {
     expect(h.replayCalls).toEqual([]);
   });
 
+  it("文档已被删除 → verifyIngestFailed（**不能**静默返回：不会再有下一次事件了）", async () => {
+    // `fill_target_document_id` 是裸 uuid 列，无 FK 无级联——用户在知识库里删掉这份文档，
+    // 数据库不会拦。若这里跟「还在处理中」一样静默返回，簇就永久停在 `filled`，
+    // 而 `filled` 只剩「忽略」可走：删一份文档 = 悄悄埋掉一个缺口。
+    const h = harness({ documentStatus: null });
+    await h.service.verifyCluster(CLUSTER);
+    expect(h.transitions).toEqual(["verifyIngestFailed"]);
+    expect(h.replayCalls).toEqual([]);
+  });
+
   it("文档还没 ready → 什么都不做，等下一次事件（不把时序意外变成错误结论）", async () => {
     const h = harness({ documentStatus: "processing" });
     await h.service.verifyCluster(CLUSTER);

@@ -277,6 +277,15 @@ export class DocumentsService {
     await this.repo.delete(id);
     // B1/F4：文档没了，引用它的 gold 一定要人工复核（绝不自动改 gold —— 原型 §7）。
     await this.notifyGoldStale(id);
+    /**
+     * B2b：删除也是一种「处理结束」，按 `failed` 广播终态。
+     *
+     * 少了这一条，被删掉的补库文档不会通知任何人，等它的缺口簇永久停在 `filled`——
+     * 那个态只剩「忽略」可走，等于用户删一份文档就悄悄埋掉一个缺口。
+     * `fill_target_document_id` 是裸 uuid 列、无 FK 无级联，所以没有任何数据库层兜底。
+     */
+    // 异常由 `notifyTerminal` 自己逐个订阅方吞掉，这里不用再包一层。
+    await this.changes.notifyTerminal(id, "failed");
   }
 
   private async mustFind(id: string): Promise<DocumentRow> {

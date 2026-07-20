@@ -77,7 +77,15 @@ export default function GapFillWizard({
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [apps, setApps] = useState<Application[]>([]);
   /** 应用 → 其当前 production 配置版本。没上线过的应用不能做回验目标，见下方 Select。 */
-  const [productionVersions, setProductionVersions] = useState<Record<string, string | null>>({});
+  /**
+   * 应用 → 其 production 版本号。三态刻意区分：
+   *  · `string`    → 已上线，可选作回验目标
+   *  · `null`      → 确实没上线过 ⇒ 标「未上线」并禁用
+   *  · `undefined` → 详情没取到（网络抖动） ⇒ 标「状态未知」并禁用，但文案不撒谎
+   */
+  const [productionVersions, setProductionVersions] = useState<
+    Record<string, string | null | undefined>
+  >({});
 
   const load = useCallback(async () => {
     if (!clusterId) return;
@@ -101,6 +109,10 @@ export default function GapFillWizard({
     if (!open) return;
     setConfirmed(false);
     setErr(null);
+    // `appId` 也要清：`load()` 只重置来自草稿的字段（question/answer/kbId），
+    // 而回验应用是纯本地选择。`destroyOnHidden` 销毁的是 Drawer 的子树、不是本组件的
+    // state，所以不清的话，换一个簇打开会带着上一个簇选的应用，且毫无提示。
+    setAppId(undefined);
     void load();
   }, [open, load]);
 
@@ -119,7 +131,12 @@ export default function GapFillWizard({
               const detail = await getApplicationDetail(app.id);
               return [app.id, detail.productionConfigVersionId] as const;
             } catch {
-              return [app.id, null] as const;
+              /**
+               * 请求失败 ≠ 未上线。混为一谈的话，一次抖动就会让用户看到自己明明在跑的
+               * 应用被标成「尚未上线」且不可选，还没有任何重试入口。用 `undefined`
+               * 与「确实没有 production 指针」的 `null` 区分开，下面据此分别渲染。
+               */
+              return [app.id, undefined] as const;
             }
           }),
         );
@@ -191,8 +208,21 @@ export default function GapFillWizard({
       onChanged();
       onClose();
     } catch (error) {
-      // 失败必须出声：静默会让人以为已经提交了，转头再点一次就是第二份重复文档。
-      setErr(error instanceof Error ? error.message : "提交入库失败");
+      const msg = error instanceof Error ? error.message : "提交入库失败";
+      /**
+       * 重新拉一次状态（与 `runDraft` 的 catch 对齐）。失败原因可能正是「这个簇已经
+       * 不在 reviewing 了」——别人并发取消/推进过。不刷新的话界面会继续显示人审表单、
+       * 确认入库按钮仍然可点，用户重试多少次都是同一个错。
+       */
+      await load();
+      onChanged();
+      /**
+       * ⚠️ `setErr` 必须在 `load()` **之后**：`load()` 成功时会 `setErr(null)`，
+       * 顺序反过来就把刚写的报错抹掉了，用户看到的是一个什么都没说的界面——
+       * 而「失败必须出声」正是这段代码存在的理由（静默会让人以为提交成功了，
+       * 转头再点一次就是第二份重复文档）。这条被测试抓了个正着。
+       */
+      setErr(msg);
     } finally {
       setSubmitting(false);
     }
@@ -336,10 +366,16 @@ export default function GapFillWizard({
                   disabled: !productionVersions[app.id],
                   label: productionVersions[app.id] ? (
                     app.name
-                  ) : (
+                  ) : productionVersions[app.id] === null ? (
                     <Tooltip title="该应用尚未上线，无法用于回验">
                       <span>
                         {app.name} <Tag>未上线</Tag>
+                      </span>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip title="没取到该应用的上线状态，重开向导可重试">
+                      <span>
+                        {app.name} <Tag>状态未知</Tag>
                       </span>
                     </Tooltip>
                   ),

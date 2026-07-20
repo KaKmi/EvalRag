@@ -42,6 +42,7 @@ function draft(patch: Partial<GapFillDraft> = {}): GapFillDraft {
     draftQuestion: "能开增值税专用发票吗？",
     draftAnswer: "可以。请提供开票抬头与税号，3 个工作日内寄出。",
     targetKbId: null,
+    targetDocumentId: null,
     ...patch,
   };
 }
@@ -159,11 +160,46 @@ describe("补知识库向导", () => {
     expect(label.closest(".ant-select-item")).toHaveClass("ant-select-item-option-disabled");
   });
 
+  it("提交失败后**重新拉状态**（并发取消时不让用户对着同一个错反复重试）", async () => {
+    api.getGapFillDraft.mockResolvedValue(draft());
+    api.submitGapFill.mockRejectedValue(new Error("缺口当前状态是「pending」"));
+    renderWizard();
+    await fillForm();
+    fireEvent.click(screen.getByRole("checkbox"));
+
+    expect(api.getGapFillDraft).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "确认入库" }));
+
+    // 第二次 load：失败原因可能正是「这个簇已经不在 reviewing 了」，
+    // 不刷新的话界面继续显示人审表单，重试多少次都是同一个错。
+    await waitFor(() => expect(api.getGapFillDraft).toHaveBeenCalledTimes(2));
+  });
+
+  it("详情请求失败的应用标「状态未知」而不是谎称「未上线」", async () => {
+    setup();
+    api.getApplicationDetail.mockRejectedValue(new Error("网络抖动"));
+    api.getGapFillDraft.mockResolvedValue(draft());
+    renderWizard();
+    await screen.findByDisplayValue("能开增值税专用发票吗？");
+
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "回验应用" }));
+
+    // 两者都禁用，但文案不能撒谎——用户明明在跑的应用被说成「尚未上线」会让人去查一个
+    // 根本不存在的问题。
+    expect(await screen.findByText("状态未知")).toBeInTheDocument();
+    expect(screen.queryByText("未上线")).not.toBeInTheDocument();
+  });
+
   it("状态 filled → 第③步「入库中」，表单不再可编辑", async () => {
     api.getGapFillDraft.mockResolvedValue(draft({ status: "filled" }));
     renderWizard();
 
-    await screen.findByText(/入库中|处理中|自动回验/);
+    // ⚠️ 不能断言 /入库中/：那是 Steps 的第③步标题，**每个状态都渲染**，
+    // 拿它当判据的话连 `verified`（走的是「补库向导不适用」兜底 Alert）都能通过——
+    // 复审用一个探针测试实测证明了这一点。要断言只属于 filled 面板的文本。
+    await screen.findByText("已提交入库");
+    // 人审表单必须已经收起：还留着就意味着能对一份已入库的内容再改一遍。
+    expect(screen.queryByLabelText("补库答案")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认入库" })).not.toBeInTheDocument();
   });
 

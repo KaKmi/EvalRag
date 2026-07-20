@@ -279,6 +279,42 @@ describe("屏5 问题池", () => {
     }
   });
 
+  /**
+   * 以下三条补的是复审指出的**空白验收项**：`cluster()` 工厂把 recurred/fillPreScore/
+   * verifiedScore 写死成 false/null 且没有任何用例覆盖过它们，于是「复发红标」和
+   * 「41→89」这两条明文验收标准一条断言都没有——改坏了套件照样全绿。
+   */
+  it("复发的簇显示红色「复发」标（原型 §17.5 `:631`）", async () => {
+    mockGaps([cluster({ recurred: true })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    expect(await screen.findByText("复发")).toBeInTheDocument();
+  });
+
+  it("已回验的簇在平均质量列显示改善 41→89（原型 §9 `:370`）", async () => {
+    mockGaps([cluster({ status: "verified", fillPreScore: 41, verifiedScore: 89 })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    // 断言的是**两端都在**的那个形态；只显示 89 等于丢掉了「补库确实起作用了」这个信息。
+    expect(await screen.findByText("41→89")).toBeInTheDocument();
+    expect(await screen.findByText("已回验")).toBeInTheDocument();
+  });
+
+  it("根因不是「缺内容」时，[补知识库] 先二次确认而不是直接开向导（原型 `:700`）", async () => {
+    mockGaps([cluster({ rootCause: "retrieval" })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    fireEvent.click(screen.getByRole("button", { name: "补知识库" }));
+
+    // 守卫栏要的是「二次确认」而不是「禁用」——分诊是启发式的，人有权推翻它。
+    // 所以断言：确认框出现了，且向导**还没**开。
+    expect(await screen.findByText("当前分诊不是「缺内容」")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("[进评测集] 打开「从坏样本生成」弹窗并锁定为本簇（原型 :634）", async () => {
     mockGaps([cluster()]);
     gapsMock.getEvalSets.mockResolvedValue([]);

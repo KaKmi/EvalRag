@@ -48,17 +48,28 @@ export class GapVerificationService {
     }
 
     const document = await this.documents.findById(documentId);
-    if (document?.status === "failed") {
+    if (!document) {
+      /**
+       * 文档行没了——用户把它从知识库里删掉了（`fill_target_document_id` 是裸 uuid，
+       * 无 FK 无级联，所以数据库不会拦）。这跟「还没处理完」是两回事：**再也不会**有
+       * 后续事件了，静默返回就是把簇永久留在 `filled`。当入库失败处理，放它回 `pending`，
+       * 用户可以重走向导。
+       */
+      this.logger.warn(`补库文档已被删除，回验取消：cluster=${clusterId} doc=${documentId}`);
+      await this.gaps.recordVerifyIngestFailed(clusterId, now);
+      return;
+    }
+    if (document.status === "failed") {
       // 文档自己没解析成——**不是**「补库后仍低分」。两者都回 `pending`，但只有后者打复发标，
       // UI 文案也不同（「文档处理失败，可重新提交」vs「补库后仍低分(62)，建议检查检索配置」）。
       this.logger.warn(`补库文档处理失败，回验取消：cluster=${clusterId} doc=${documentId}`);
       await this.gaps.recordVerifyIngestFailed(clusterId, now);
       return;
     }
-    if (document?.status !== "ready") {
-      // 还在处理中（或文档已被删）。终态通道只在 ready/failed 发，走到这里多半是
-      // 文档记录当场又变了。静默返回等下一次事件——**不**推进状态，
-      // 免得把一次时序意外变成一个错误结论。
+    if (document.status !== "ready") {
+      // 还在处理中。终态通道只在 ready/failed/删除 时发，走到这里多半是文档记录当场又变了。
+      // 静默返回等下一次事件——**不**推进状态，免得把一次时序意外变成一个错误结论。
+      // （「文档已被删」不再落到这一支，上面单独处理：那种情况**不会**再有下一次事件。）
       return;
     }
 
