@@ -3,7 +3,7 @@ import { and, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-o
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB } from "../../platform/persistence/persistence.module";
 import type { GapClusterStatus, GapItemSource, GapRootCause } from "./gap.constants";
-import { meanVector } from "./gap-clustering";
+import { GapCentroidStaleError, meanVector } from "./gap-clustering";
 import { gapClusters, gapItems, gapWatermarks, type GapClusterRow, type GapItemRow } from "./schema";
 
 /**
@@ -31,7 +31,18 @@ export interface NearestCluster {
  * 单测就只能测到 fake 自己重写的一份判定逻辑。
  */
 export type GapClusterTarget =
-  | { kind: "existing"; clusterId: string; nextCentroid: number[] }
+  | {
+      kind: "existing";
+      clusterId: string;
+      nextCentroid: number[];
+      /**
+       * processor 读最近邻时**观察到的** `freq`，用作质心 UPDATE 的乐观并发校验条件
+       * （B2b：021 §12② 的收口）。`nextCentroid` 正是用这个 freq 算的增量平均，
+       * 落库时若 freq 已经变了，说明这个 centroid 已过期，必须整条重算——
+       * 见 `GapCentroidStaleError`。
+       */
+      expectedFreq: number;
+    }
   | { kind: "new"; representativeQuestion: string; centroid: number[] };
 
 export interface GapItemDraft {
@@ -270,6 +281,9 @@ export class GapsRepository implements GapCollectorStore {
     try {
       return await this.runAttachItem(target, item, now);
     } catch (error) {
+      // 质心 CAS 失败**原样上抛**，不走下面「已在池中」那条路：并发改的是簇的质心，
+      // 与这条 trace 是否已入池毫无关系。调用方要做的是重新找最近邻、重算增量平均后再来一次。
+      if (error instanceof GapCentroidStaleError) throw error;
       if (!(error instanceof GapItemConflictError)) throw error;
       // 并发插入赢了：事务已回滚（没留下空簇），按「已在池中」返回赢家所属的簇。
       const [row] = await this.db
@@ -343,7 +357,21 @@ export class GapsRepository implements GapCollectorStore {
       // 抛错回滚整个事务 ⇒ 簇消失、item 保持原样，调用方按「没插进去」处理。
       if (inserted.length === 0) throw new GapItemConflictError(item.sourceTraceId);
 
-      await tx
+      /**
+       * ③ 质心写入带**乐观并发校验**（B2b：021 §12② 的收口）。
+       *
+       * `freq + 1` 自增本身是原子的，从来不会丢计数；丢的是 `centroid`——它是 processor
+       * 在**事务外**用「读到的 centroid + 读到的 freq」算好的一个完整向量，无条件写下去
+       * 就会覆盖掉期间别的实例并入的那一次贡献。触发窗口：单轮跑超租约（10min）被接管，
+       * 两个实例同时处理同一个簇。危害是聚类质量退化（质心偏向某个成员），不是丢数/错数。
+       *
+       * `AND freq = expectedFreq` 让这种情况影响 0 行 ⇒ 抛哨兵 ⇒ **整个事务回滚**
+       * （连同刚插入的 item 与可能新建的簇），调用方重新走一遍归簇判定。
+       * 不能只是重写一次：`nextCentroid` 已经基于过期的 freq 算出来了。
+       *
+       * `new` 分支不需要这个条件——簇是本事务刚建的，不存在并发方。
+       */
+      const updated = await tx
         .update(gapClusters)
         .set({
           freq: sql`${gapClusters.freq} + 1`,
@@ -351,7 +379,13 @@ export class GapsRepository implements GapCollectorStore {
           lastSeenAt: now,
           updatedAt: now,
         })
-        .where(eq(gapClusters.id, clusterId));
+        .where(
+          target.kind === "existing"
+            ? and(eq(gapClusters.id, clusterId), eq(gapClusters.freq, target.expectedFreq))
+            : eq(gapClusters.id, clusterId),
+        )
+        .returning({ id: gapClusters.id });
+      if (updated.length === 0) throw new GapCentroidStaleError(clusterId);
       return { clusterId, inserted: true };
     });
   }

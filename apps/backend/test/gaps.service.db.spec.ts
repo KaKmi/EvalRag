@@ -13,6 +13,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import { GapCentroidStaleError } from "../src/modules/gaps/gap-clustering";
 import { GapsRepository } from "../src/modules/gaps/gaps.repository";
 import { GapsService } from "../src/modules/gaps/gaps.service";
 import { dbGate } from "./helpers/gated-suite";
@@ -745,6 +746,93 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
       // 取不到 trace 开始时间 ⇒ 不当作已过期（置灰会误导人以为链接失效）。
       expect(items[0].traceExpired).toBe(false);
       await cleanup([created.clusterId]);
+    });
+  });
+
+  // ───────────────── B2b：质心 CAS 在真 SQL 上成立（021 §12②） ─────────────────
+
+  describe("质心乐观并发校验（真 UPDATE ... WHERE freq = ?）", () => {
+    it("expectedFreq 与库里不符时抛哨兵，且**整个事务回滚**——item 不留、freq 不涨", async () => {
+      const { clusterId } = await seedCluster({ status: "pending", items: [{}, {}] });
+      try {
+        const freqBefore = await freqOf(clusterId);
+        const itemsBefore = await itemCount(clusterId);
+
+        // 传一个**过期**的 expectedFreq，等价于「读到 freq 之后、写之前被别人并入过」。
+        await expect(
+          repo.attachItem(
+            {
+              kind: "existing",
+              clusterId,
+              nextCentroid: Array.from({ length: 1024 }, () => 0.5),
+              expectedFreq: freqBefore + 99,
+            },
+            {
+              source: "manual_trace",
+              sourceTraceId: "f".repeat(32),
+              question: "并发写入的样本",
+              rewrittenQuestion: null,
+              rewriteResolved: false,
+              embedding: Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0)),
+              traceStartTime: null,
+              faithfulness: null,
+              answerRelevancy: null,
+              contextPrecision: null,
+              confidence: null,
+              fallbackUsed: false,
+              noCitations: false,
+              followUpSuspected: false,
+            },
+            new Date(),
+          ),
+        ).rejects.toBeInstanceOf(GapCentroidStaleError);
+
+        // 这条断言才是重点：抛错必须连带回滚，否则会留下「item 插了但 freq 没涨」的错账。
+        expect(await freqOf(clusterId)).toBe(freqBefore);
+        expect(await itemCount(clusterId)).toBe(itemsBefore);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("expectedFreq 正确时照常写入，质心确实被换成新值", async () => {
+      const { clusterId } = await seedCluster({ status: "pending", items: [{}] });
+      try {
+        const freqBefore = await freqOf(clusterId);
+        const nextCentroid = Array.from({ length: 1024 }, (_, i) => (i === 1 ? 1 : 0));
+
+        const result = await repo.attachItem(
+          { kind: "existing", clusterId, nextCentroid, expectedFreq: freqBefore },
+          {
+            source: "manual_trace",
+            sourceTraceId: "0".repeat(32),
+            question: "正常并入的样本",
+            rewrittenQuestion: null,
+            rewriteResolved: false,
+            embedding: Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0)),
+            traceStartTime: null,
+            faithfulness: null,
+            answerRelevancy: null,
+            contextPrecision: null,
+            confidence: null,
+            fallbackUsed: false,
+            noCitations: false,
+            followUpSuspected: false,
+          },
+          new Date(),
+        );
+
+        expect(result).toEqual({ clusterId, inserted: true });
+        expect(await freqOf(clusterId)).toBe(freqBefore + 1);
+        const { rows } = await pool.query<{ centroid: string }>(
+          `SELECT centroid::text AS centroid FROM gap_clusters WHERE id = $1`,
+          [clusterId],
+        );
+        // 第 2 维为 1 即新质心已落库（旧的是 e0）。
+        expect(rows[0].centroid.startsWith("[0,1,")).toBe(true);
+      } finally {
+        await cleanup([clusterId]);
+      }
     });
   });
 });

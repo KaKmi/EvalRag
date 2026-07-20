@@ -109,6 +109,14 @@ export const gapClusters = pgTable(
     ),
     // 屏5 默认排序：待处理在前、频次倒序（原型 `:631`）。
     index("gap_clusters_status_freq_idx").on(t.status, t.freq.desc()),
+    /**
+     * B2b 回验监听器按文档 id 反查「哪个 filled 簇在等这份文档」。文档 ready 是 fan-out
+     * 广播（每份文档处理完都会走一次），这条查询要走索引。
+     * partial：只有真正提交过入库的簇才有值，绝大多数行是 NULL、不必入索引。
+     */
+    index("gap_clusters_fill_document_idx")
+      .on(t.fillTargetDocumentId)
+      .where(sql`${t.fillTargetDocumentId} IS NOT NULL`),
     // ⚠️ `centroid` 上还有一个 **HNSW cosine 索引** `gap_clusters_centroid_hnsw_idx`，
     // 它**只存在于迁移 SQL**（`drizzle/0026_gap_pool.sql`）里，此处无法声明——
     // drizzle 表达不了 `USING hnsw (... vector_cosine_ops)`（自定义 `vector1024` 类型没有该算子类）。

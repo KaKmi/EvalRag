@@ -390,9 +390,9 @@ export default function EvalRunDetailPage() {
             </Button>
             {/*
               原型 §7 行尾「…」快捷操作（`:322`：重放该条 / 加入问题池 / 标记忽略）。
-              「标记忽略」**本波不渲染**：`EvalRunResult` 上没有任何可落这个标记的字段，
-              而 B2a 明令不改 eval-runs 的 schema。若把它做成「入池后顺手忽略整个缺口簇」，
-              一条用例的判断就会连坐簇里其他所有成员——那不是忽略，是误伤。留给有字段之后再做。
+              「标记忽略」的承载字段 `eval_run_results.ignored_at` 已随 B2b 迁移 0028 落地，
+              菜单项本身随 Task 9 接上。它必须是**逐 case** 粒度：做成「顺手忽略整个缺口簇」
+              会让一条用例的判断连坐簇里其他所有成员——那不是忽略，是误伤。
             */}
             <Dropdown
               trigger={["click"]}

@@ -10,7 +10,7 @@ import type {
   GapItemDraft,
   NearestCluster,
 } from "./gaps.repository";
-import { cosineSimilarity } from "./gap-clustering";
+import { GapCentroidStaleError, cosineSimilarity } from "./gap-clustering";
 
 /**
  * 收集器 worker 的行为测试。全部断言落在**产出的簇/成员/游标**上，不断言「某方法被调用过」
@@ -84,6 +84,13 @@ class FakeGapStore implements GapCollectorStore {
     return { id: best.id, centroid: [...best.centroid], freq: best.freq };
   }
 
+  /**
+   * 注入质心 CAS 冲突：置成 N 就让接下来 N 次 `existing` 分支的写入抛
+   * `GapCentroidStaleError`（模拟「另一个实例抢先并入过，freq 已经变了」）。
+   * 每触发一次自减，用来测 `assignToCluster` 的有限重试。
+   */
+  forceCentroidStale = 0;
+
   async attachItem(
     target: GapClusterTarget,
     item: GapItemDraft,
@@ -97,6 +104,16 @@ class FakeGapStore implements GapCollectorStore {
     let cluster: FakeCluster;
     if (target.kind === "existing") {
       cluster = this.clusters.find((c) => c.id === target.clusterId)!;
+      /**
+       * 真实现的 `WHERE freq = expectedFreq`（B2b 质心 CAS）。fake 必须一起守这条，
+       * 否则「重试逻辑」在测试里根本走不到——fake 无条件放行的话，CAS 永远不失败。
+       * 注入的强制冲突与真实的 freq 不符，走同一条抛出路径。
+       */
+      if (this.forceCentroidStale > 0) {
+        this.forceCentroidStale -= 1;
+        throw new GapCentroidStaleError(cluster.id);
+      }
+      if (cluster.freq !== target.expectedFreq) throw new GapCentroidStaleError(cluster.id);
     } else {
       cluster = {
         id: `cluster-${(this.seq += 1)}`,
@@ -423,6 +440,56 @@ describe("GapCollectorProcessor（B2a 收集器：游标 + 租约 + 增量聚类
     expect(store.clusters).toHaveLength(1); // 没有多出空簇
     expect(store.clusters[0].freq).toBe(1);
     expect(store.items).toHaveLength(1);
+  });
+
+  // ───────────────── B2b：质心 CAS（021 §12② 的收口） ─────────────────
+
+  it("质心 CAS 冲突后自动重试并成功——冲突对调用方透明，两条样本都并进同一个簇", async () => {
+    // 一轮内两条同向量候选：第一条建簇，第二条归入它（`existing` 分支）。
+    // 给第二条注入一次 CAS 冲突，模拟「租约超时被接管，另一个实例抢先并入过」。
+    // `assignToCluster` 应当重新找最近邻、按**新的** freq 重算增量平均后再写一次。
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
+      [VEC_A, VEC_A],
+    );
+    store.forceCentroidStale = 1;
+
+    const result = await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(result.status).toBe("healthy");
+    expect(store.clusters).toHaveLength(1);
+    expect(store.clusters[0].freq).toBe(2); // 重试后**确实**并入了，不多不少
+    expect(store.items).toHaveLength(2);
+    expect(result.collected).toBe(2);
+  });
+
+  it("CAS 连续冲突超过重试上限就上抛，不原地打转", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
+      [VEC_A, VEC_A],
+    );
+    store.forceCentroidStale = 99; // 每次都冲突
+
+    await expect(processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW)).rejects.toBeInstanceOf(
+      GapCentroidStaleError,
+    );
+  });
+
+  it("CAS 失败不会留下半条数据：第二条 item 没插进去，freq 也没涨", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
+      [VEC_A, VEC_A],
+    );
+    store.forceCentroidStale = 99;
+
+    await expect(processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW)).rejects.toBeInstanceOf(
+      GapCentroidStaleError,
+    );
+
+    // 第一条正常入池；第二条一路撞 CAS ⇒ 一行不写、freq 不涨。
+    // 真实现靠事务回滚保证这点；fake 的 CAS 检查发生在任何写入之前，等价。
+    expect(store.items).toHaveLength(1);
+    expect(store.clusters[0].freq).toBe(1);
   });
 
   it("租约被接管时如实报 lease_lost，不假装 healthy", async () => {

@@ -79,8 +79,8 @@ export function aggregateCaseRows(rows: EvalRunResultWithCase[]): EvalRunResult 
     repeats,
     /**
      * B2b「标记忽略」是**逐 case** 粒度：写侧一次 UPDATE 覆盖该 case 的全部 repeat 行，
-     * 故这里取第一行即可代表整组。用 `?? null` 而不是 `first.ignoredAt` 直传：
-     * 老 run 的行在迁移 0028 之前建，该列为 NULL，语义就是「未忽略」。
+     * 故取第一行即可代表整组。三元而非 `?.toISOString()`：列是 `Date | null`，
+     * 契约要 `string | null`，null 必须原样穿过去（0028 之前的老 run 行就是 NULL = 未忽略）。
      */
     ignoredAt: first.ignoredAt ? first.ignoredAt.toISOString() : null,
   };

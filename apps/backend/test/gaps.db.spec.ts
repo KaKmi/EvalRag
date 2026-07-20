@@ -1,12 +1,13 @@
 /**
- * 迁移 0026（知识缺口/问题池三表）的 Postgres 集成测试（RUN_DB_TESTS=1 门控）。
+ * 迁移 0026 + 0028（知识缺口/问题池三表与 B2b 向导列）的 Postgres 集成测试（RUN_DB_TESTS=1 门控）。
  *
- * 钉住的四件事（021 决策 H / §10）：
+ * 钉住的五件事（021 决策 H / §10 / 决策 J·K）：
  *  1. 三张表都建出来了；
- *  2. `status` CHECK 只放行 B2a 可达的三态——B2b 加四态时**必须 ALTER**，
- *     这条断言就是那个提醒（放行一个引擎不遵守的值 = 投机，同 eval_runs.scope 的既定约定）；
- *  3. `(cluster_id, source, source_trace_id)` 唯一——worker 崩溃重跑靠它幂等；
- *  4. pgvector 最近邻能按 cosine 取回预期簇（聚类归簇的地基）。
+ *  2. `status` CHECK 放行全七态（0028 ALTER 后），值域外的第八个值仍被拦下——
+ *     CHECK 是白名单不是摆设，扩了值域不等于放弃约束；
+ *  3. B2b 的 `fill_*` 列纯附加、全可空，两个分数列受 0-100 CHECK；
+ *  4. `(cluster_id, source, source_trace_id)` 唯一——worker 崩溃重跑靠它幂等；
+ *  5. pgvector 最近邻能按 cosine 取回预期簇（聚类归簇的地基）。
  *
  * ⛔ 只连 MIGRATION_TEST_DATABASE_URL（codecrush_mig_test）。开发库 codecrush 里是用户手工
  * 搭建、无备份的数据，本文件的 DROP SCHEMA 打到那上面就是永久丢失。
@@ -67,7 +68,7 @@ async function dropClusters(pool: Pool, ids: string[]): Promise<void> {
   await pool.query(`DELETE FROM gap_clusters WHERE id = ANY($1::uuid[])`, [ids]);
 }
 
-describeDb("0026 gap pool（RUN_DB_TESTS=1）", () => {
+describeDb("0026+0028 gap pool（RUN_DB_TESTS=1）", () => {
   let pool: Pool;
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.MIGRATION_TEST_DATABASE_URL });

@@ -1,4 +1,9 @@
-import { cosineSimilarity, updateCentroid, meanVector } from "./gap-clustering";
+import {
+  GapCentroidStaleError,
+  cosineSimilarity,
+  updateCentroid,
+  meanVector,
+} from "./gap-clustering";
 
 describe("cosineSimilarity", () => {
   it("returns 1 for identical vectors", () => {
@@ -86,5 +91,22 @@ describe("维度不一致必须抛错，不得静默产出 NaN/截断向量", ()
     // 这里会返回 NaN ⇒ `sim >= 阈值` 恒 false ⇒ 每条样本都建新簇、簇数无界增长且不报错。
     expect(cosineSimilarity([2, Number.NaN], [1, 2])).toBe(0);
     expect(cosineSimilarity([Number.POSITIVE_INFINITY, 1], [1, 2])).toBe(0);
+  });
+});
+
+describe("GapCentroidStaleError（B2b 质心 CAS 的哨兵）", () => {
+  it("带上冲突的簇 id——重试要重新找最近邻，日志也要能定位到是哪个簇", () => {
+    const err = new GapCentroidStaleError("cluster-123");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("GapCentroidStaleError");
+    expect(err.clusterId).toBe("cluster-123");
+    expect(err.message).toContain("cluster-123");
+  });
+
+  it("是具名类而非裸 Error——调用方靠 instanceof 区分它与真正的失败", () => {
+    // `attachItem` 的 catch 要把它与 GapItemConflictError／未知错误分开处理：
+    // 前者重算重试，后者上抛。用 message 匹配来区分是脆的，故必须是类型可辨的。
+    const err: unknown = new GapCentroidStaleError("c-1");
+    expect(err instanceof GapCentroidStaleError).toBe(true);
   });
 });

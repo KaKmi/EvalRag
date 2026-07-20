@@ -489,11 +489,11 @@ describe("加载失败：404 与「没读回来」必须可区分", () => {
   });
 
   /**
-   * 「标记忽略」本波**不渲染**：`EvalRunResult` 上没有可落这个标记的字段，而 B2a 明令不改
-   * eval-runs 的 schema。做成「入池后顺手忽略整个缺口簇」的话，一条用例的判断会连坐簇里
-   * 其他全部成员——那不是忽略，是误伤。
+   * 承载字段 `eval_run_results.ignored_at` 已随 B2b 迁移 0028 落地，但菜单项要等 Task 9
+   * 接上读写与端点后才渲染——**在那之前这条断言守住「不渲染一个点了没反应的菜单项」**。
+   * Task 9 落地时把它反转成「渲染且可切换」。
    */
-  it("暂不渲染「标记忽略」（没有可落标记的字段）", async () => {
+  it("菜单项随 Task 9 接上前不渲染「标记忽略」", async () => {
     renderReport({ results: [result({ previewTraceId: TRACE })] });
     await screen.findAllByTestId("cell-faithfulness");
 
