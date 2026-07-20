@@ -33,6 +33,19 @@ export const FOLLOWUP_RATIO_MIN = 0.5;
 /** 入集重复检测：与目标集既有用例相似度 > 此值时标「疑似重复」（原型 `:269`），用户仍可强制加入。 */
 export const DUPLICATE_SIMILARITY_MIN = 0.95;
 
+/**
+ * 入集重复检测的**跨集比对上限**：目标集用例数超过此值时，只与**前 N 条**比对。
+ *
+ * 021 §12② 当初把语义近似这一半降级掉，理由正是「跨集比对要把目标集全部用例 embed 一遍，
+ * 成本随集大小线性增长」——一次 promote 顶多 50 条候选，却可能拖着一个上千条的目标集去 embed。
+ * 封顶把单次成本钉死在 `50 + N` 个文本，与目标集规模脱钩。
+ *
+ * 代价是**漏检**（第 N+1 条之后的近似用例查不到），所以截断这件事**必须回给调用方**
+ * （`PromoteGapResponse.duplicateCheckTruncated`）——静默截断会让「没有 warning」
+ * 被当成「集里确实没有重复」。与 `GAP_COLLECT_CANDIDATE_LIMIT` 同列于此：都是成本旋钮。
+ */
+export const DUPLICATE_COMPARE_CASE_LIMIT = 200;
+
 /** 滚动频次窗口天数（原型 `:377`，与 trace TTL 30 天对齐）。 */
 export const FREQ_WINDOW_DAYS = 30;
 

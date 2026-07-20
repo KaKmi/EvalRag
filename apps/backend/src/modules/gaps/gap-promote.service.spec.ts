@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import type { EvalCase } from "@codecrush/contracts";
 import { GapPromoteService } from "./gap-promote.service";
+import { DUPLICATE_COMPARE_CASE_LIMIT } from "./gap.constants";
 import type { GapItemRow } from "./schema";
 import type { GapsRepository } from "./gaps.repository";
 import type { EvaluationsRepository } from "../evaluations/evaluations.repository";
@@ -50,6 +51,8 @@ interface Harness {
   chatCalls: { modelId: string; messages: { role: string; content: string }[] }[];
   chatReply: { value: string };
   chatError: { value: Error | null };
+  /** 每次 `embedTexts` 的入参文本。断言「目标集为空时一次都不发」靠它。 */
+  embedCalls: string[][];
 }
 
 /**
@@ -62,8 +65,15 @@ function harness(
   options: {
     items?: GapItemRow[];
     judgeModelId?: string | null;
+    embeddingModelId?: string | null;
     /** 目标集里**已经有**的用例（用于跨集去重的用例）。 */
-    existingCases?: { question: string }[];
+    existingCases?: { id?: string; question: string }[];
+    /**
+     * 按**文本**指定 embedding 向量。语义近似用例靠它造「相似 / 不相似」两种情形：
+     * 相似度是真算出来的（走 `cosineSimilarity`），不是桩死的判定结果。
+     * 未列出的文本落到 `[1, 0]`。
+     */
+    vectors?: Record<string, number[]>;
     /** 批量插入跑到这条问题时抛错——用来验证整批回滚。 */
     failOnQuestion?: string;
   } = {},
@@ -72,6 +82,7 @@ function harness(
   const created: EvalCase[] = [];
   const markedEnteredEvalSet: string[] = [];
   const chatCalls: Harness["chatCalls"] = [];
+  const embedCalls: string[][] = [];
   const chatReply = { value: JSON.stringify({ goldPoints: ["要点一", "要点二", "要点三"] }) };
   const chatError: { value: Error | null } = { value: null };
 
@@ -107,6 +118,8 @@ function harness(
   const evaluations = {
     getSettings: async () => ({
       judgeModelId: options.judgeModelId === undefined ? "judge-1" : options.judgeModelId,
+      embeddingModelId:
+        options.embeddingModelId === undefined ? "embed-1" : options.embeddingModelId,
     }),
   } as unknown as EvaluationsRepository;
 
@@ -116,11 +129,19 @@ function harness(
       if (chatError.value) throw chatError.value;
       return { content: chatReply.value };
     },
+    embedTexts: async (_modelId: string, texts: string[]) => {
+      embedCalls.push(texts);
+      return texts.map((text) => options.vectors?.[text] ?? [1, 0]);
+    },
   } as unknown as ModelsService;
 
   const evalSets = {
-    /** 目标集**既有**用例——promote 会与它做归一化精确比对（防重试造整批重复）。 */
-    listCases: async () => options.existingCases ?? [],
+    /** 目标集**既有**用例——promote 先做归一化精确比对，再做 embedding 语义近似比对。 */
+    listCases: async () =>
+      (options.existingCases ?? []).map((c, i) => ({
+        id: c.id ?? `case-existing-${i + 1}`,
+        question: c.question,
+      })),
     createCasesBatchTx: async (
       tx: unknown,
       setId: string,
@@ -158,10 +179,13 @@ function harness(
     chatCalls,
     chatReply,
     chatError,
+    embedCalls,
   };
 }
 
-const promoteReq = (items: { itemId: string; question?: string; goldPoints: string[] }[]) => ({
+const promoteReq = (
+  items: { itemId: string; question?: string; goldPoints: string[]; force?: boolean }[],
+) => ({
   clusterId: CLUSTER,
   targetSetId: SET,
   items,
@@ -338,6 +362,171 @@ describe("GapPromoteService.promote", () => {
   });
 });
 
+/**
+ * 语义近似重复检测（原型 `:269`，021 §12② 的第三条收口）。
+ *
+ * 向量都由 `vectors` 显式给出，相似度由被测代码真算（`cosineSimilarity`），
+ * 桩不参与「像不像」的判定——否则测的是桩的返回值，不是阈值口径。
+ */
+describe("GapPromoteService.promote —— 语义近似重复", () => {
+  const CASE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  /** 与 [1,0] 夹角 ~11.5°，余弦 ≈0.98 —— 严格大于 0.95。 */
+  const NEAR = [0.98, 0.2];
+  /** 与 [1,0] 正交，余弦 = 0 —— 远低于阈值。 */
+  const FAR = [0, 1];
+
+  const askItem = itemRow({
+    question: "能开专票吗",
+    rewrittenQuestion: null,
+    rewriteResolved: true,
+  });
+
+  it("相似度 >0.95 且未带 force ⇒ 不写入，改进 warnings（带最相似用例与相似度）", async () => {
+    const h = harness({
+      items: [askItem],
+      existingCases: [{ id: CASE_A, question: "可以开增值税专用发票吗" }],
+      vectors: { 能开专票吗: NEAR, 可以开增值税专用发票吗: [1, 0] },
+    });
+
+    const result = await h.service.promote(
+      promoteReq([{ itemId: askItem.id, goldPoints: ["要点"] }]),
+      "a@b.c",
+    );
+
+    expect(result.created).toBe(0);
+    expect(h.created).toHaveLength(0);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings![0].itemId).toBe(askItem.id);
+    expect(result.warnings![0].similarTo).toEqual({
+      caseId: CASE_A,
+      question: "可以开增值税专用发票吗",
+    });
+    expect(result.warnings![0].similarity).toBeGreaterThan(0.95);
+  });
+
+  it("同样条件带 force: true ⇒ 正常写入，且不进 warnings（原型明写「可强制加入」）", async () => {
+    const h = harness({
+      items: [askItem],
+      existingCases: [{ id: CASE_A, question: "可以开增值税专用发票吗" }],
+      vectors: { 能开专票吗: NEAR, 可以开增值税专用发票吗: [1, 0] },
+    });
+
+    const result = await h.service.promote(
+      promoteReq([{ itemId: askItem.id, goldPoints: ["要点"], force: true }]),
+      "a@b.c",
+    );
+
+    expect(result.created).toBe(1);
+    expect(h.created[0].question).toBe("能开专票吗");
+    expect(result.warnings).toBeUndefined();
+    // force 的条目**整个跳过**检查：既然结果注定被忽略，那次 embed 就是白花的钱。
+    expect(h.embedCalls).toEqual([]);
+  });
+
+  it("相似度低于阈值 ⇒ 正常写入，无 warning", async () => {
+    const h = harness({
+      items: [askItem],
+      existingCases: [{ id: CASE_A, question: "课程可以退款吗" }],
+      vectors: { 能开专票吗: FAR, 课程可以退款吗: [1, 0] },
+    });
+
+    const result = await h.service.promote(
+      promoteReq([{ itemId: askItem.id, goldPoints: ["要点"] }]),
+      "a@b.c",
+    );
+
+    expect(result.created).toBe(1);
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("恰好等于 0.95 不触发（阈值是严格大于，不是 >=）", async () => {
+    // 与 [1,0] 的余弦恰为 0.95：cos = 0.95 / sqrt(0.95² + s²)，取 s = sqrt(1-0.95²) 即得 0.95。
+    const exact = [0.95, Math.sqrt(1 - 0.95 * 0.95)];
+    const h = harness({
+      items: [askItem],
+      existingCases: [{ id: CASE_A, question: "可以开增值税专用发票吗" }],
+      vectors: { 能开专票吗: exact, 可以开增值税专用发票吗: [1, 0] },
+    });
+
+    const result = await h.service.promote(
+      promoteReq([{ itemId: askItem.id, goldPoints: ["要点"] }]),
+      "a@b.c",
+    );
+
+    expect(result.created).toBe(1);
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("目标集为空 ⇒ 一次 embed 都不发（省一次网络往返）", async () => {
+    const h = harness({ items: [askItem], existingCases: [] });
+
+    const result = await h.service.promote(
+      promoteReq([{ itemId: askItem.id, goldPoints: ["要点"] }]),
+      "a@b.c",
+    );
+
+    expect(result.created).toBe(1);
+    expect(h.embedCalls).toEqual([]);
+    expect(result.duplicateCheckTruncated).toBeUndefined();
+  });
+
+  it("没配 embedding 模型 ⇒ 跳过语义层，不把 promote 拖垮", async () => {
+    const h = harness({
+      items: [askItem],
+      embeddingModelId: null,
+      existingCases: [{ id: CASE_A, question: "可以开增值税专用发票吗" }],
+      vectors: { 能开专票吗: NEAR, 可以开增值税专用发票吗: [1, 0] },
+    });
+
+    const result = await h.service.promote(
+      promoteReq([{ itemId: askItem.id, goldPoints: ["要点"] }]),
+      "a@b.c",
+    );
+
+    expect(result.created).toBe(1);
+    expect(h.embedCalls).toEqual([]);
+  });
+
+  it("目标集超过上限 ⇒ 只比对前 N 条，且截断对调用方可见", async () => {
+    // 上限之外那条才是与候选近似的——若实现没截断，它会被查到并挡下候选，本用例立刻变红。
+    const existingCases = [
+      ...Array.from({ length: DUPLICATE_COMPARE_CASE_LIMIT }, (_, i) => ({
+        id: `case-far-${i}`,
+        question: `无关问题 ${i}`,
+      })),
+      { id: CASE_A, question: "可以开增值税专用发票吗" },
+    ];
+    const h = harness({
+      items: [askItem],
+      existingCases,
+      vectors: {
+        能开专票吗: NEAR,
+        可以开增值税专用发票吗: [1, 0],
+        ...Object.fromEntries(
+          Array.from({ length: DUPLICATE_COMPARE_CASE_LIMIT }, (_, i) => [`无关问题 ${i}`, FAR]),
+        ),
+      },
+    });
+
+    const result = await h.service.promote(
+      promoteReq([{ itemId: askItem.id, goldPoints: ["要点"] }]),
+      "a@b.c",
+    );
+
+    // ① 上限之外的那条近似用例没被查到 ⇒ 候选照常入集。
+    expect(result.created).toBe(1);
+    expect(result.warnings).toBeUndefined();
+    // ② 截断没有被静默吞掉：调用方拿得到「只比了多少 / 一共多少」。
+    expect(result.duplicateCheckTruncated).toEqual({
+      comparedCases: DUPLICATE_COMPARE_CASE_LIMIT,
+      totalCases: DUPLICATE_COMPARE_CASE_LIMIT + 1,
+    });
+    // ③ 发出去的文本正好是 1 条候选 + 上限条既有用例，没有把整集拖去 embed。
+    expect(h.embedCalls).toHaveLength(1);
+    expect(h.embedCalls[0]).toHaveLength(1 + DUPLICATE_COMPARE_CASE_LIMIT);
+  });
+});
+
 describe("GapPromoteService.draftGold", () => {
   it("constrains the prompt to 3–5 must-have points (缺口 26 / D7)", async () => {
     const h = harness();
@@ -359,7 +548,9 @@ describe("GapPromoteService.draftGold", () => {
 
   it("returns the drafted points", async () => {
     const h = harness();
-    h.chatReply.value = JSON.stringify({ goldPoints: ["7 天内无理由退", "已开课按比例", "赠品课不退"] });
+    h.chatReply.value = JSON.stringify({
+      goldPoints: ["7 天内无理由退", "已开课按比例", "赠品课不退"],
+    });
     expect((await h.service.draftGold({ question: "课程可以退款吗" })).goldPoints).toEqual([
       "7 天内无理由退",
       "已开课按比例",
@@ -382,7 +573,9 @@ describe("GapPromoteService.draftGold", () => {
   it("surfaces a provider failure as a readable error", async () => {
     const h = harness();
     h.chatError.value = new Error("upstream 502");
-    await expect(h.service.draftGold({ question: "课程可以退款吗" })).rejects.toThrow(/upstream 502/);
+    await expect(h.service.draftGold({ question: "课程可以退款吗" })).rejects.toThrow(
+      /upstream 502/,
+    );
   });
 
   it("400s when no judge model is configured", async () => {

@@ -193,6 +193,15 @@ export const PromoteGapRequestSchema = z.object({
         // §19.1：每条要点 ≤200 字。空数组合法 —— 草拟失败的行仍可入集（原型 `:596`），
         // 进集后是 draft，gold 由人补齐。
         goldPoints: z.array(z.string().max(200)).max(10),
+        /**
+         * 「疑似重复也要强制加入」（原型 `:269`）。省略 = false。
+         *
+         * 这个开关是重复检测**能否存在**的前提：没有它，语义近似检测就退化成硬拒绝，
+         * 而近似判定必然有假阳性（同一主题的不同问法余弦可以 >0.95），
+         * 硬拒绝会让用户永远加不进一条他明知不重复的用例 —— 比不做检测更糟。
+         * 带 true 的条目**整个跳过**相似度检查（不是「查了但忽略结果」：省掉的 embed 也是钱）。
+         */
+        force: z.boolean().optional(),
       }),
     )
     // 上限 50：一次 promote 是 N 次串行 INSERT，无上限等于把一个 HTTP 请求变成不定长事务。
@@ -201,10 +210,45 @@ export const PromoteGapRequestSchema = z.object({
 });
 export type PromoteGapRequest = z.infer<typeof PromoteGapRequestSchema>;
 
+/** 一条「疑似重复，与用例 #12 相似」（原型 `:269`）。带它的 item **没有**落库。 */
+export const PromoteGapWarningSchema = z.object({
+  itemId: z.string().uuid(),
+  /** 目标集里与之最相似的那一条既有用例。 */
+  similarTo: z.object({ caseId: z.string().uuid(), question: z.string() }),
+  /** 余弦相似度（0–1），前端按原型显示「相似度 97%」。 */
+  similarity: z.number(),
+});
+export type PromoteGapWarning = z.infer<typeof PromoteGapWarningSchema>;
+
 export const PromoteGapResponseSchema = z.object({
-  /** 实际落库条数。可能小于 `items.length`——本批内部按归一化问题去重会跳过重复行。 */
+  /**
+   * 实际落库条数。可能小于 `items.length`：本批内部/与目标集按归一化问题精确去重会跳过重复行，
+   * 语义近似（>0.95 且未带 `force`）的行也会被挡下并进 `warnings`。
+   */
   created: z.number().int(),
   caseIds: z.array(z.string()),
+  /**
+   * 被「疑似重复」挡下的行。**非空时才出现**——每次响应都拖一个空数组，
+   * 会诱使前端写 `if (warnings)` 而不是 `if (warnings?.length)`，进而恒真弹一次空提示。
+   */
+  warnings: z.array(PromoteGapWarningSchema).optional(),
+  /**
+   * 跨集比对被**截断**时才出现：目标集用例数超过比对上限，本次只与前 `comparedCases` 条比对，
+   * 所以「没有 warning」不等于「集里没有近似用例」。
+   *
+   * 为什么是独立字段而不是塞进 `warnings`：`warnings[]` 每条都以 `itemId` 为主键、
+   * 语义是「这一条被挡下了」；截断是**整批范围**的信息，塞进去只能编一个假 itemId，
+   * 前端还得靠魔法值把它从「被挡下的行」里筛出来。截断也不该被静默吞掉
+   * （本仓既定规矩，同 `BadSampleToEvalSetModal` 对超出批次上限的显式 Alert）。
+   */
+  duplicateCheckTruncated: z
+    .object({
+      /** 实际参与比对的既有用例数（= 比对上限）。 */
+      comparedCases: z.number().int().nonnegative(),
+      /** 目标集既有用例总数。 */
+      totalCases: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 export type PromoteGapResponse = z.infer<typeof PromoteGapResponseSchema>;
 
