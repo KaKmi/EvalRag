@@ -1,5 +1,11 @@
 import type { PoolCandidate } from "./clickhouse-gaps.repository";
-import { GAP_COLLECT_WORKER_NAME, type GapRootCause } from "./gap.constants";
+import {
+  GAP_COLLECT_WORKER_NAME,
+  RECURRENCE_MIN_ITEMS,
+  RECURRENCE_WINDOW_DAYS,
+  type GapClusterStatus,
+  type GapRootCause,
+} from "./gap.constants";
 import { GapCollectorProcessor } from "./gap-collector.processor";
 import type {
   AttachItemResult,
@@ -38,10 +44,14 @@ interface FakeCluster {
   rootCauseAuto: GapRootCause | null;
   rootCauseManual: GapRootCause | null;
   deleted: boolean;
+  /** 非空即屏5 的「复发」红点。由假 `GapsService.reopenRecurred` 置。 */
+  recurredAt: Date | null;
 }
 
 interface FakeItem extends GapItemDraft {
   clusterId: string;
+  /** 复发判定的时间口径是**入池时间**（`gap_items.created_at`），不是 `traceStartTime`。 */
+  createdAt: Date;
 }
 
 /**
@@ -108,7 +118,7 @@ class FakeGapStore implements GapCollectorStore {
   async attachItem(
     target: GapClusterTarget,
     item: GapItemDraft,
-    _now: Date,
+    now: Date,
   ): Promise<AttachItemResult> {
     // `gap_items_source_trace_unique` 的先探分支：命中就**一行不写**地返回。
     // 真实现把它放在事务最前面，正是为了不留下「建了簇却插不进 item」的空簇。
@@ -139,13 +149,24 @@ class FakeGapStore implements GapCollectorStore {
         rootCauseAuto: null,
         rootCauseManual: null,
         deleted: false,
+        recurredAt: null,
       };
       this.clusters.push(cluster);
     }
-    this.items.push({ ...item, clusterId: cluster.id });
+    // 真实现由 `RETURNING` 捎回并入**之前**的状态（那条 UPDATE 从不写 status）。
+    const statusBeforeAttach = cluster.status as GapClusterStatus;
+    this.items.push({ ...item, clusterId: cluster.id, createdAt: now });
     cluster.freq += 1;
     if (target.kind === "existing") cluster.centroid = [...target.nextCentroid];
-    return { clusterId: cluster.id, inserted: true };
+    return { clusterId: cluster.id, inserted: true, statusBeforeAttach };
+  }
+
+  /** 调用次数——「`pending` 簇不该白查一次库」那条用例要断言它没被碰过。 */
+  countRecentItemsCalls = 0;
+
+  async countRecentItems(clusterId: string, windowStart: Date): Promise<number> {
+    this.countRecentItemsCalls += 1;
+    return this.items.filter((i) => i.clusterId === clusterId && i.createdAt >= windowStart).length;
   }
 
   async listClusterTriageInputs(clusterId: string): Promise<ClusterTriageInput[]> {
@@ -188,10 +209,37 @@ class FakeGapStore implements GapCollectorStore {
       rootCauseAuto: null,
       rootCauseManual: null,
       deleted: false,
+      recurredAt: null,
       ...patch,
     };
     this.clusters.push(cluster);
     return cluster;
+  }
+
+  /** 造历史成员：`createdAt` 决定它落不落进复发窗口（`freq` 一并对齐，别造出自相矛盾的簇）。 */
+  seedItems(clusterId: string, count: number, createdAt: Date): void {
+    for (let i = 0; i < count; i += 1) {
+      this.items.push({
+        clusterId,
+        createdAt,
+        source: "online",
+        sourceTraceId: `seeded-${clusterId}-${(this.seq += 1)}`,
+        question: "历史样本",
+        rewrittenQuestion: null,
+        rewriteResolved: true,
+        embedding: [1, 0],
+        traceStartTime: createdAt,
+        faithfulness: null,
+        answerRelevancy: null,
+        contextPrecision: null,
+        confidence: 30,
+        fallbackUsed: false,
+        noCitations: false,
+        followUpSuspected: false,
+      });
+    }
+    const cluster = this.clusters.find((c) => c.id === clusterId);
+    if (cluster) cluster.freq += count;
   }
 }
 
@@ -262,6 +310,22 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     },
   });
   const queue = { publish: jest.fn(), subscribe: jest.fn(), schedule: jest.fn() };
+  /**
+   * 假 `GapsService`：只复刻 `reopenRecurred` 的**可观察效果**（状态回 `pending` + 置复发标）
+   * 与它的 CAS 守卫（`from` 不合法就抛，同真实现的 400/409）。
+   * 断言全部落在簇的最终状态上，不断言「这个方法被调用过」。
+   */
+  const gaps = {
+    reopenRecurred: async (id: string, now: Date) => {
+      const cluster = store.clusters.find((c) => c.id === id)!;
+      if (cluster.status !== "ignored" && cluster.status !== "verified") {
+        throw new Error(`illegal transition: ${cluster.status} --reopenRecurred--> pending`);
+      }
+      cluster.status = "pending";
+      cluster.recurredAt = now;
+      return undefined as never;
+    },
+  };
 
   harness.processor = new GapCollectorProcessor(
     queue as never,
@@ -269,6 +333,7 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     clickhouse as never,
     evaluations as never,
     models as never,
+    gaps as never,
   );
   return harness;
 }
@@ -570,5 +635,102 @@ describe("GapCollectorProcessor（B2a 收集器：游标 + 租约 + 增量聚类
     expect(result.status).toBe("model_unavailable");
     expect(store.cursor.lastTraceId).toBe("");
     expect(store.failures).toHaveLength(1);
+  });
+
+  // ───────────────── B2b：「复发」重开（原型 `:376` / `:708`） ─────────────────
+  //
+  // 规则：已「已入库/已忽略」的簇再收到相似新问题只涨频次、不重开；但若在
+  // `RECURRENCE_WINDOW_DAYS` 天内新增达到 `RECURRENCE_MIN_ITEMS` 条，自动重开为
+  // `pending` 并标「复发」。本轮新入池的这一条**计入**分子（它正是压垮阈值的那根稻草）。
+
+  /** 窗口内的时间点：足够旧到能和「本轮新增」区分开，又没出窗口。 */
+  const IN_WINDOW = new Date(NOW.getTime() - (RECURRENCE_WINDOW_DAYS - 1) * 24 * 60 * 60 * 1000);
+  /** 窗口外：比窗口起点还早一天。 */
+  const OUT_OF_WINDOW = new Date(
+    NOW.getTime() - (RECURRENCE_WINDOW_DAYS + 1) * 24 * 60 * 60 * 1000,
+  );
+
+  it(`已忽略的簇窗口内新增第 ${RECURRENCE_MIN_ITEMS} 条 ⇒ 重开为 pending 并标复发`, async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "ignored" });
+    // 本轮这条落地后正好凑满阈值。
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 1, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("pending");
+    expect(store.clusters[0].recurredAt).toEqual(NOW);
+  });
+
+  it(`窗口内只有 ${RECURRENCE_MIN_ITEMS - 1} 条时不重开（阈值是「达到」不是「接近」）`, async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "ignored" });
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 2, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("ignored");
+    expect(store.clusters[0].recurredAt).toBeNull();
+  });
+
+  it("窗口外的老样本不进分子——否则一个陈年老簇随便来一条就会被顶回待处理", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "ignored" });
+    // 总数够阈值，但全部落在窗口之外 ⇒ 分子只有本轮这一条。
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 1, OUT_OF_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("ignored");
+    expect(store.clusters[0].recurredAt).toBeNull();
+  });
+
+  it("已回验的簇同样会被复发重开（补过库、验过了，结果又坏了）", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "verified" });
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 1, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("pending");
+    expect(store.clusters[0].recurredAt).toEqual(NOW);
+  });
+
+  it("并入 pending 簇时连查都不查——绝大多数样本走这条路，白查一次库就是翻倍开销", async () => {
+    // 这条例外地断言「某方法没被调用」：要证明的恰恰是**没有发生的 IO**，
+    // 从最终状态上观察不到（pending 簇本来就不会被重开，状态断言恒真）。
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "pending" });
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS + 5, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.countRecentItemsCalls).toBe(0);
+    expect(store.clusters[0].status).toBe("pending");
+  });
+
+  it("新建的簇永不触发复发——它此刻就是 pending", async () => {
+    const { processor, store } = makeHarness([candidate({ traceId: "a".repeat(32) })], [VEC_A]);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters).toHaveLength(1);
+    expect(store.clusters[0].status).toBe("pending");
+    expect(store.countRecentItemsCalls).toBe(0);
   });
 });

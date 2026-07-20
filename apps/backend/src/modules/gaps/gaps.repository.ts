@@ -1,10 +1,16 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB, Tx } from "../../platform/persistence/persistence.module";
 import type { GapClusterStatus, GapItemSource, GapRootCause } from "./gap.constants";
 import { GapCentroidStaleError, meanVector } from "./gap-clustering";
-import { gapClusters, gapItems, gapWatermarks, type GapClusterRow, type GapItemRow } from "./schema";
+import {
+  gapClusters,
+  gapItems,
+  gapWatermarks,
+  type GapClusterRow,
+  type GapItemRow,
+} from "./schema";
 
 /**
  * 问题池的 Postgres 读写。**只碰 `gap_*` 三张表**——Global Constraint 9：
@@ -97,6 +103,17 @@ export interface AttachItemResult {
   clusterId: string;
   /** false = 这条 trace 已在池中（唯一索引挡下）⇒ 本次不该计频、不该动 centroid。 */
   inserted: boolean;
+  /**
+   * 本次并入**之前**簇的状态（复发判定的入参，见 `gap-ingest.ts:checkRecurrence`）。
+   *
+   * 由 `attachItem` 顺手返回而不是让调用方事后再 `findCluster` 一次：事务里本来就要
+   * 定位/更新这个簇，`RETURNING` 捎带一列不多花一次往返；更要紧的是**时序**——
+   * 事后再读拿到的是「并入之后」的状态，中间若有别的迁移提交，判定就用错了基准。
+   *
+   * `inserted === false` 时为 `undefined`：没并入就无从谈复发（并且那条路径上
+   * 簇是靠 `source_trace_id` 反查出来的，并没有读过它的状态）。
+   */
+  statusBeforeAttach?: GapClusterStatus;
 }
 
 /**
@@ -112,6 +129,7 @@ export interface GapCollectorStore {
   attachItem(target: GapClusterTarget, item: GapItemDraft, now: Date): Promise<AttachItemResult>;
   listClusterTriageInputs(clusterId: string): Promise<ClusterTriageInput[]>;
   setClusterRootCauseAuto(clusterId: string, cause: GapRootCause, now: Date): Promise<void>;
+  countRecentItems(clusterId: string, windowStart: Date): Promise<number>;
   /** @returns false = 租约已被别人抢走，本轮什么都没落库（见实现处注释）。 */
   finishCycle(
     workerName: string,
@@ -311,6 +329,9 @@ export class GapsRepository implements GapCollectorStore {
       if (existing) return { clusterId: existing.clusterId, inserted: false };
 
       let clusterId: string;
+      // 新建簇的状态取 `RETURNING` 的实际值而不是写死 `"pending"`：默认值住在
+      // `schema.ts`/迁移里，写死等于在这里复制一份会悄悄过期的副本。
+      let createdStatus: string | undefined;
       if (target.kind === "existing") {
         clusterId = target.clusterId;
       } else {
@@ -325,8 +346,9 @@ export class GapsRepository implements GapCollectorStore {
             createdAt: now,
             updatedAt: now,
           })
-          .returning({ id: gapClusters.id });
+          .returning({ id: gapClusters.id, status: gapClusters.status });
         clusterId = created.id;
+        createdStatus = created.status;
       }
 
       const inserted = await tx
@@ -390,10 +412,33 @@ export class GapsRepository implements GapCollectorStore {
               )
             : eq(gapClusters.id, clusterId),
         )
-        .returning({ id: gapClusters.id });
+        .returning({ id: gapClusters.id, status: gapClusters.status });
       if (updated.length === 0) throw new GapCentroidStaleError(clusterId);
-      return { clusterId, inserted: true };
+      /**
+       * `RETURNING` 拿的是**更新后**的行，但这条 UPDATE 从不写 `status`
+       * （见方法头注释「不碰 status」）⇒ 它就是并入前的状态，供复发判定用。
+       */
+      return {
+        clusterId,
+        inserted: true,
+        statusBeforeAttach: (createdStatus ?? updated[0].status) as GapClusterStatus,
+      };
     });
+  }
+
+  /**
+   * 簇在 `windowStart` 之后新增的成员数——「复发」判定的分子（原型 `:376`/`:708`）。
+   *
+   * 口径是 `created_at`（入池时间）而**不是** `trace_start_time`：要判的是「这个缺口最近
+   * 又被踩到了多少次」，即样本**流入**的节奏。`trace_start_time` 手动入池时为 NULL
+   * （整批不计数），补扫历史 trace 时又会拿很旧的时间落进/落出窗口，两头都失真。
+   */
+  async countRecentItems(clusterId: string, windowStart: Date): Promise<number> {
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(gapItems)
+      .where(and(eq(gapItems.clusterId, clusterId), gte(gapItems.createdAt, windowStart)));
+    return Number(row?.n ?? 0);
   }
 
   async listClusterTriageInputs(clusterId: string): Promise<ClusterTriageInput[]> {
@@ -417,11 +462,7 @@ export class GapsRepository implements GapCollectorStore {
   }
 
   /** 只写 `root_cause_auto`。`root_cause_manual` 由人写、worker 永不覆盖（Global Constraint 8）。 */
-  async setClusterRootCauseAuto(
-    clusterId: string,
-    cause: GapRootCause,
-    now: Date,
-  ): Promise<void> {
+  async setClusterRootCauseAuto(clusterId: string, cause: GapRootCause, now: Date): Promise<void> {
     await this.db
       .update(gapClusters)
       .set({ rootCauseAuto: cause, updatedAt: now })
@@ -625,21 +666,20 @@ export class GapsRepository implements GapCollectorStore {
   }
 
   async listItems(clusterId: string): Promise<GapItemRow[]> {
-    return this.db
-      .select()
-      .from(gapItems)
-      .where(eq(gapItems.clusterId, clusterId))
-      // NULLS LAST：手动入池的行没有 trace 开始时间，PG 的 DESC 默认 NULLS FIRST
-      // 会把它们顶到最新真实样本之上，读起来像「最近发生的」。
-      .orderBy(sql`${gapItems.traceStartTime} DESC NULLS LAST`);
+    return (
+      this.db
+        .select()
+        .from(gapItems)
+        .where(eq(gapItems.clusterId, clusterId))
+        // NULLS LAST：手动入池的行没有 trace 开始时间，PG 的 DESC 默认 NULLS FIRST
+        // 会把它们顶到最新真实样本之上，读起来像「最近发生的」。
+        .orderBy(sql`${gapItems.traceStartTime} DESC NULLS LAST`)
+    );
   }
 
   /** 状态迁移。合法性由 service 的迁移表判定，这里只落库。 */
   async updateStatus(id: string, status: GapClusterStatus, now: Date): Promise<void> {
-    await this.db
-      .update(gapClusters)
-      .set({ status, updatedAt: now })
-      .where(eq(gapClusters.id, id));
+    await this.db.update(gapClusters).set({ status, updatedAt: now }).where(eq(gapClusters.id, id));
   }
 
   /** 人工改判根因。**只写 manual 列**，auto 保留——「worker 现在会怎么判」要始终可回答。 */
@@ -736,7 +776,8 @@ export class GapsRepository implements GapCollectorStore {
   async moveItems(
     itemIds: string[],
     fromClusterId: string,
-    target: { kind: "existing"; clusterId: string } | { kind: "new"; representativeQuestion: string },
+    target:
+      { kind: "existing"; clusterId: string } | { kind: "new"; representativeQuestion: string },
     now: Date,
   ): Promise<{ targetClusterId: string; sourceSoftDeleted: boolean }> {
     return this.db.transaction(async (tx) => {

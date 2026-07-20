@@ -1,4 +1,9 @@
-import { CENTROID_CAS_ATTEMPTS, CLUSTER_SIMILARITY_MIN } from "./gap.constants";
+import {
+  CENTROID_CAS_ATTEMPTS,
+  CLUSTER_SIMILARITY_MIN,
+  RECURRENCE_MIN_ITEMS,
+  RECURRENCE_WINDOW_DAYS,
+} from "./gap.constants";
 import { GapCentroidStaleError, cosineSimilarity, updateCentroid } from "./gap-clustering";
 import { triageCluster, triageItem } from "./gap-triage";
 import type {
@@ -93,8 +98,36 @@ export async function recomputeRootCause(
   );
   const counted = inputs.filter((i) => i.source === "online");
   const followUpRatio =
-    counted.length === 0
-      ? 0
-      : counted.filter((i) => i.followUpSuspected).length / counted.length;
+    counted.length === 0 ? 0 : counted.filter((i) => i.followUpSuspected).length / counted.length;
   await store.setClusterRootCauseAuto(clusterId, triageCluster(causes, followUpRatio), now);
+}
+
+/** 已终结、可被「复发」重开的两个状态（原型 `:376`/`:708`）。 */
+const TERMINAL_STATUSES: readonly string[] = ["ignored", "verified"];
+
+/**
+ * 「复发」判定（原型 `:376` 边界表 / `:708` 状态机）：
+ * 已终结的簇在 `RECURRENCE_WINDOW_DAYS` 天内新增 ≥ `RECURRENCE_MIN_ITEMS` 条 ⇒ 该重开。
+ *
+ * **只判不写**——返回布尔，重开这一步由调用方交给 `GapsService.reopenRecurred`
+ * 走 TRANSITIONS 表（「一切迁移都过状态机」这条不变量若在第一个消费者身上就破例，
+ * 它就不再是不变量了）。
+ *
+ * 非终结态**直接返回 false、一次库都不查**：绝大多数样本并入的是 `pending` 簇，
+ * 每条都白跑一次 `count(*)` 会把收集器单轮的查询数直接翻倍，而它永远不可能触发。
+ *
+ * 与 `recomputeRootCause` 同住此文件（「收集器与手动入池共享的判定」之家），
+ * 但**只由收集器调用**：原型那一行明写了 `(worker)`——人从 Trace 详情手动补一条样本
+ * 不该顺带把他自己刚忽略掉的簇顶回待处理。
+ */
+export async function checkRecurrence(
+  store: GapCollectorStore,
+  clusterId: string,
+  statusBeforeAttach: string,
+  now: Date,
+): Promise<boolean> {
+  if (!TERMINAL_STATUSES.includes(statusBeforeAttach)) return false;
+  const windowStart = new Date(now.getTime() - RECURRENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const recent = await store.countRecentItems(clusterId, windowStart);
+  return recent >= RECURRENCE_MIN_ITEMS;
 }

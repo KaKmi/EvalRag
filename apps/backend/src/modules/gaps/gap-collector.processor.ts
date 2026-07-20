@@ -19,9 +19,10 @@ import {
   GAP_COLLECT_WORKER_NAME,
 } from "./gap.constants";
 import { GapCentroidStaleError } from "./gap-clustering";
-import { assignToCluster, recomputeRootCause } from "./gap-ingest";
+import { assignToCluster, checkRecurrence, recomputeRootCause } from "./gap-ingest";
 import { clusterKeyOf, detectFollowUp, isRewriteResolved, shouldEnterPool } from "./gap-triage";
 import { GapsRepository, type GapCursorState } from "./gaps.repository";
+import { GapsService } from "./gaps.service";
 
 const WorkerPayloadSchema = z.strictObject({ workerName: z.string().min(1).max(100) });
 
@@ -71,6 +72,10 @@ export class GapCollectorProcessor implements OnModuleInit {
     private readonly clickhouse: ClickHouseGapsRepository,
     private readonly evaluations: EvaluationsRepository,
     private readonly models: ModelsService,
+    // 「复发重开」必须走状态机（`TRANSITIONS`），故收集器持有 service 而不是自己 UPDATE status。
+    // 不构成循环依赖：`GapsService` 只依赖 GapsRepository / EvaluationsRepository / ModelsService，
+    // 三者都不认识本类（`gaps.di-metadata.spec.ts` 守构造参数可解析，`pnpm test` 全量验行为）。
+    private readonly gaps: GapsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -245,7 +250,10 @@ export class GapCollectorProcessor implements OnModuleInit {
     };
   }
 
-  /** 单条候选落库：归簇决策 → 写 item（幂等）→ 重算簇根因。返回是否真的新增了成员。 */
+  /**
+   * 单条候选落库：归簇决策 → 写 item（幂等）→ 重算簇根因 → 复发判定。
+   * 返回是否真的新增了成员。
+   */
   private async ingest(
     entry: ReturnType<GapCollectorProcessor["enrich"]>,
     embedding: number[],
@@ -253,7 +261,7 @@ export class GapCollectorProcessor implements OnModuleInit {
   ): Promise<boolean> {
     const { candidate } = entry;
     // 归簇与重算根因走共享实现（`gap-ingest.ts`），与手动入池口径逐字一致。
-    const { clusterId, inserted } = await assignToCluster(
+    const { clusterId, inserted, statusBeforeAttach } = await assignToCluster(
       this.store,
       entry.clusterKey,
       {
@@ -279,6 +287,28 @@ export class GapCollectorProcessor implements OnModuleInit {
     if (!inserted) return false;
 
     await recomputeRootCause(this.store, clusterId, now);
+
+    /**
+     * 「复发」重开（原型 `:376`/`:708`）。判定用的是**并入之前**的状态：
+     * 刚建出来的新簇此刻就是 `pending`，永远不该触发。
+     *
+     * 重开走 `GapsService.reopenRecurred` 而不是直接写 status——它带 `WHERE status = 期望值`
+     * 的 CAS，簇在本轮跑的过程中被人手动动过（比如刚从 `ignored` 点了「重开」）时会抛 409。
+     * 那不是故障：目标状态已经达成了，本条样本也已经落库，**不该掀翻整轮**，记一条 warn 即可。
+     */
+    if (statusBeforeAttach !== undefined) {
+      const recurred = await checkRecurrence(this.store, clusterId, statusBeforeAttach, now);
+      if (recurred) {
+        try {
+          await this.gaps.reopenRecurred(clusterId, now);
+          this.logger.log(`缺口簇 ${clusterId} 在窗口内再度活跃，已重开并标记复发`);
+        } catch (error) {
+          this.logger.warn(
+            `缺口簇 ${clusterId} 复发重开未生效（状态已被并发改动）：${toMessage(error)}`,
+          );
+        }
+      }
+    }
     return true;
   }
 }
