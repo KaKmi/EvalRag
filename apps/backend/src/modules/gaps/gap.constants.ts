@@ -65,6 +65,15 @@ export const RECURRENCE_MIN_ITEMS = 5;
 /** 回验通过阈值（原型 `:370`：「新分数 ≥80 → 已回验✓」）。 */
 export const VERIFY_PASS_THRESHOLD = 80;
 
+/**
+ * 质心 CAS 冲突后的**总尝试次数**（首次 + 重试；021 §12② 的收口）。
+ *
+ * 冲突要求两个实例在租约超时窗口内并发处理同一个簇，极罕见；试到这个数还撞说明是持续的
+ * 高并发写入，此时让它冒泡比原地打转好。与 `GAP_COLLECT_*` 同列于此，是因为它和租约时长、
+ * 单批上限一样属于「收集器的运行机制旋钮」，不是散写的魔法数字。
+ */
+export const CENTROID_CAS_ATTEMPTS = 3;
+
 /** 根因分诊三值（原型 `:371`）。 */
 export const GAP_ROOT_CAUSES = ["missing", "retrieval", "generation"] as const;
 export type GapRootCause = (typeof GAP_ROOT_CAUSES)[number];

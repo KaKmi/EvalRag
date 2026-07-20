@@ -381,7 +381,13 @@ export class GapsRepository implements GapCollectorStore {
         })
         .where(
           target.kind === "existing"
-            ? and(eq(gapClusters.id, clusterId), eq(gapClusters.freq, target.expectedFreq))
+            ? and(
+                eq(gapClusters.id, clusterId),
+                eq(gapClusters.freq, target.expectedFreq),
+                // 与 `findNearestCluster` 的谓词对齐：那边只在未软删的簇里找最近邻，
+                // 这边若不带同样的条件，就可能把样本并进一个刚被合并走的簇。
+                isNull(gapClusters.deletedAt),
+              )
             : eq(gapClusters.id, clusterId),
         )
         .returning({ id: gapClusters.id });
@@ -644,83 +650,51 @@ export class GapsRepository implements GapCollectorStore {
       .where(eq(gapClusters.id, id));
   }
 
-  // ─────────── B2b [补知识库] 向导与回验的载荷列（021 决策 J/K） ───────────
-  // 这几个方法**只写列、不判合法性**：迁移是否允许由 `GapsService` 的 TRANSITIONS 表裁定，
-  // 与既有 `updateStatus` 的分工一致（仓库层不重复实现状态机）。
-
-  /** 点 [补知识库] 时快照当下质量分，作为「41→89」的左端。 */
-  async setFillPreScore(id: string, preScore: number | null, now: Date): Promise<void> {
-    await this.db
-      .update(gapClusters)
-      .set({ fillPreScore: preScore, updatedAt: now })
-      .where(eq(gapClusters.id, id));
-  }
-
-  /** LLM 草拟结果落库。Q 截到 200 字与列宽一致（超长由上游 schema 先拦，这里是兜底）。 */
-  async updateFillDraft(
-    id: string,
-    draft: { question: string; answer: string },
-    now: Date,
-  ): Promise<void> {
-    await this.db
-      .update(gapClusters)
-      .set({
-        fillDraftQuestion: draft.question.slice(0, 200),
-        fillDraftAnswer: draft.answer,
-        updatedAt: now,
-      })
-      .where(eq(gapClusters.id, id));
-  }
-
-  /** 人审通过、文档已提交入库：记下目标与回验参数（回验监听器按 documentId 反查本簇）。 */
-  async updateFillTarget(
-    id: string,
-    target: {
-      targetKbId: string;
-      applicationId: string;
-      configVersionId: string;
-      documentId: string;
-    },
-    now: Date,
-  ): Promise<void> {
-    await this.db
-      .update(gapClusters)
-      .set({
-        fillTargetKbId: target.targetKbId,
-        fillVerifyApplicationId: target.applicationId,
-        fillVerifyConfigVersionId: target.configVersionId,
-        fillTargetDocumentId: target.documentId,
-        updatedAt: now,
-      })
-      .where(eq(gapClusters.id, id));
-  }
-
   /**
-   * 回验结果落库。三个字段都是**可选**的，按迁移分支各写各的：
-   * 通过写 `verifiedScore`；未通过写 `verifiedScore` + `recurredAt`；
-   * 入库失败清 `fillTargetDocumentId`（那份文档废了，别让监听器再撞上它）。
+   * B2b 状态迁移的落库口（021 决策 J）：**状态 + 载荷列 + 复发标一条 UPDATE 写完**。
+   *
+   * 为什么不是「先写载荷、再写状态」两次（初版如此，peer review P1 抓出）：
+   * `verifyIngestFailed` 的载荷动作是**清空** `fill_target_document_id`，两次写之间崩溃
+   * 就留下 `status='filled'` 且 documentId 为 NULL 的行——回验监听器正是按 documentId
+   * 反查簇的，此后文档事件重投多少次都找不到它，而 `filled` 态只剩系统事件（不可达）
+   * 与 `ignore` 可走，用户连重试补库都做不到。合成一条 UPDATE 后这个中间态物理上不存在。
+   *
+   * `WHERE status = expectedStatus` 是**乐观并发校验**（peer review P2）：service 的
+   * `mustFind` 读状态与这里写状态之间有窗口，并发的 `verifyPass` + `verifyFail` 会双双
+   * 通过守卫，写出「已回验 + 复发」这种原型 §18.C 未定义的组合。
+   * `deletedAt IS NULL` 一并带上——软删的簇不该还能被推进状态。
+   *
+   * @returns false = 期望状态已不成立（并发迁移 / 簇被软删），调用方转 409。
    */
-  async updateVerification(
+  async applyTransition(
     id: string,
+    expectedStatus: string,
     patch: {
-      verifiedScore?: number | null;
-      recurredAt?: Date;
+      status: GapClusterStatus;
+      fillDraftQuestion?: string;
+      fillDraftAnswer?: string;
+      fillTargetKbId?: string;
       fillTargetDocumentId?: string | null;
+      fillVerifyApplicationId?: string;
+      fillVerifyConfigVersionId?: string;
+      fillPreScore?: number | null;
+      verifiedScore?: number | null;
+      recurredAt?: Date | null;
     },
     now: Date,
-  ): Promise<void> {
-    await this.db
+  ): Promise<boolean> {
+    const rows = await this.db
       .update(gapClusters)
       .set({ ...patch, updatedAt: now })
-      .where(eq(gapClusters.id, id));
-  }
-
-  /** 清「复发」提醒（人主动推进该簇时）。 */
-  async clearRecurred(id: string, now: Date): Promise<void> {
-    await this.db
-      .update(gapClusters)
-      .set({ recurredAt: null, updatedAt: now })
-      .where(eq(gapClusters.id, id));
+      .where(
+        and(
+          eq(gapClusters.id, id),
+          eq(gapClusters.status, expectedStatus),
+          isNull(gapClusters.deletedAt),
+        ),
+      )
+      .returning({ id: gapClusters.id });
+    return rows.length === 1;
   }
 
   /**

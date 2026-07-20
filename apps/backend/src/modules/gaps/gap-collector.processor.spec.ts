@@ -10,6 +10,7 @@ import type {
   GapItemDraft,
   NearestCluster,
 } from "./gaps.repository";
+import { CENTROID_CAS_ATTEMPTS } from "./gap.constants";
 import { GapCentroidStaleError, cosineSimilarity } from "./gap-clustering";
 
 /**
@@ -85,11 +86,24 @@ class FakeGapStore implements GapCollectorStore {
   }
 
   /**
-   * 注入质心 CAS 冲突：置成 N 就让接下来 N 次 `existing` 分支的写入抛
-   * `GapCentroidStaleError`（模拟「另一个实例抢先并入过，freq 已经变了」）。
-   * 每触发一次自减，用来测 `assignToCluster` 的有限重试。
+   * 注入并发对手：置成 N 就让接下来 N 次 `existing` 分支的写入之前，先**真的**替另一个实例
+   * 并入一条样本（`freq + 1` 且质心换成 `rivalCentroid`）。
+   *
+   * ⚠️ 刻意**不是**「直接抛 `GapCentroidStaleError`」（初版如此，peer review P2 抓出）：
+   * 那样 `freq` 不变，重试时过期的 `expectedFreq` 仍然匹配，于是「把 target 提到循环外、
+   * 拿过期的 nextCentroid 重写一遍」这种**恰恰是本次要修的缺陷**的实现也能通过测试。
+   * 让 fake 真的改 freq 与 centroid，重试就必须重新读、重新算才可能成功。
    */
   forceCentroidStale = 0;
+  /**
+   * 并发对手写入的质心。重试后的最终质心必须体现它，否则就是又被覆盖了。
+   *
+   * 默认值与 `VEC_A=[1,0]` 的余弦是 `1/√1.25 ≈ 0.894`，**刻意高于** `CLUSTER_SIMILARITY_MIN`
+   * （0.85）：这样重试时最近邻判定仍然落回同一个簇、继续走 `existing` 分支，才测得到 CAS。
+   * 若换成正交向量（如 `[0,1]`），重试会正确地判成「不相似」转而建新簇——那是另一条路径，
+   * 断言 CAS 的用例就落空了。
+   */
+  rivalCentroid: number[] = [1, 0.5];
 
   async attachItem(
     target: GapClusterTarget,
@@ -104,15 +118,16 @@ class FakeGapStore implements GapCollectorStore {
     let cluster: FakeCluster;
     if (target.kind === "existing") {
       cluster = this.clusters.find((c) => c.id === target.clusterId)!;
+      // 并发对手抢先并入一条：freq 与 centroid 都真的变了（见 forceCentroidStale 的说明）。
+      if (this.forceCentroidStale > 0) {
+        this.forceCentroidStale -= 1;
+        cluster.freq += 1;
+        cluster.centroid = [...this.rivalCentroid];
+      }
       /**
        * 真实现的 `WHERE freq = expectedFreq`（B2b 质心 CAS）。fake 必须一起守这条，
        * 否则「重试逻辑」在测试里根本走不到——fake 无条件放行的话，CAS 永远不失败。
-       * 注入的强制冲突与真实的 freq 不符，走同一条抛出路径。
        */
-      if (this.forceCentroidStale > 0) {
-        this.forceCentroidStale -= 1;
-        throw new GapCentroidStaleError(cluster.id);
-      }
       if (cluster.freq !== target.expectedFreq) throw new GapCentroidStaleError(cluster.id);
     } else {
       cluster = {
@@ -444,10 +459,11 @@ describe("GapCollectorProcessor（B2a 收集器：游标 + 租约 + 增量聚类
 
   // ───────────────── B2b：质心 CAS（021 §12② 的收口） ─────────────────
 
-  it("质心 CAS 冲突后自动重试并成功——冲突对调用方透明，两条样本都并进同一个簇", async () => {
-    // 一轮内两条同向量候选：第一条建簇，第二条归入它（`existing` 分支）。
-    // 给第二条注入一次 CAS 冲突，模拟「租约超时被接管，另一个实例抢先并入过」。
-    // `assignToCluster` 应当重新找最近邻、按**新的** freq 重算增量平均后再写一次。
+  it("质心 CAS 冲突后重算重试：最终质心体现**双方**的贡献，而不是覆盖掉对手", async () => {
+    // 一轮内两条同向量候选：第一条建簇（centroid = VEC_A，freq 1），第二条归入它。
+    // 给第二条注入一个**真的写了库**的并发对手：freq → 2、centroid → rivalCentroid。
+    // 正确实现必须重新读到 (rival, 2) 再算增量平均；若拿旧的 nextCentroid 重写，
+    // 对手那次贡献就被抹掉——下面对质心数值的断言正是用来抓这件事的。
     const { processor, store } = makeHarness(
       [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
       [VEC_A, VEC_A],
@@ -458,38 +474,57 @@ describe("GapCollectorProcessor（B2a 收集器：游标 + 租约 + 增量聚类
 
     expect(result.status).toBe("healthy");
     expect(store.clusters).toHaveLength(1);
-    expect(store.clusters[0].freq).toBe(2); // 重试后**确实**并入了，不多不少
+    expect(store.clusters[0].freq).toBe(3); // 建簇 1 + 对手 1 + 重试成功 1
     expect(store.items).toHaveLength(2);
-    expect(result.collected).toBe(2);
+
+    // 重试时观察到的是 (centroid=[1,0.5], freq=2)，并入 VEC_A=[1,0] 后应为
+    // ([1,0.5]*2 + [1,0]) / 3 = [1, 1/3]。若实现把 target 提到循环外、拿过期的
+    // nextCentroid 重写一遍（正是本次要修的缺陷），第二维会是 0 而不是 1/3。
+    expect(store.clusters[0].centroid[0]).toBeCloseTo(1, 10);
+    expect(store.clusters[0].centroid[1]).toBeCloseTo(1 / 3, 10);
   });
 
-  it("CAS 连续冲突超过重试上限就上抛，不原地打转", async () => {
+  it("CAS 一直冲突时**只放弃那一条**，整轮照常收尾（不掀翻 finishCycle）", async () => {
+    // 让它冒泡出整轮的话，游标一步不动、本轮已入池的条目下轮全部白跑，
+    // 而只要那个簇持续被别的实例写，每轮都以同样方式崩——就是「永久崩溃循环」。
     const { processor, store } = makeHarness(
-      [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
+      [
+        candidate({ traceId: "a".repeat(32), cursorTs: "2026-07-19 02:00:01.000000000" }),
+        candidate({ traceId: "b".repeat(32), cursorTs: "2026-07-19 02:00:02.000000000" }),
+      ],
       [VEC_A, VEC_A],
     );
     store.forceCentroidStale = 99; // 每次都冲突
 
-    await expect(processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW)).rejects.toBeInstanceOf(
-      GapCentroidStaleError,
-    );
+    const result = await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(result.status).toBe("healthy"); // 整轮走完，不是抛出
+    expect(result.collected).toBe(1); // 只有第一条入池
+    // 游标停在冲突那条**之前**：下一轮它还会被重新扫到。
+    expect(store.cursor).toEqual({
+      lastTs: "2026-07-19 02:00:01.000000000",
+      lastTraceId: "a".repeat(32),
+    });
   });
 
-  it("CAS 失败不会留下半条数据：第二条 item 没插进去，freq 也没涨", async () => {
+  it("CAS 失败不会留下半条数据：那条 item 没插进去", async () => {
     const { processor, store } = makeHarness(
       [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
       [VEC_A, VEC_A],
     );
     store.forceCentroidStale = 99;
 
-    await expect(processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW)).rejects.toBeInstanceOf(
-      GapCentroidStaleError,
-    );
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
 
-    // 第一条正常入池；第二条一路撞 CAS ⇒ 一行不写、freq 不涨。
-    // 真实现靠事务回滚保证这点；fake 的 CAS 检查发生在任何写入之前，等价。
+    // 第一条正常入池；第二条一路撞 CAS ⇒ **它自己一行都没写进去**。
+    // 真实现靠事务回滚保证这点；fake 的 CAS 检查发生在插 item 之前，等价。
     expect(store.items).toHaveLength(1);
-    expect(store.clusters[0].freq).toBe(1);
+    expect(store.items[0].sourceTraceId).toBe("a".repeat(32));
+
+    // freq 只反映「建簇 1 + 并发对手每次尝试各并入 1」；**没有**我方的贡献。
+    // 断言具体数值而不是「没涨」：对手是真的在写库（这正是 fake 要模拟的并发），
+    // 写成「不涨」反而会把一个忠实的 fake 判成错的。
+    expect(store.clusters[0].freq).toBe(1 + CENTROID_CAS_ATTEMPTS);
   });
 
   it("租约被接管时如实报 lease_lost，不假装 healthy", async () => {

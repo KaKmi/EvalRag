@@ -11,12 +11,14 @@ import {
   type PoolCandidate,
 } from "./clickhouse-gaps.repository";
 import {
+  CENTROID_CAS_ATTEMPTS,
   GAP_COLLECT_CANDIDATE_LIMIT,
   GAP_COLLECT_CRON,
   GAP_COLLECT_LAG_BUFFER_MS,
   GAP_COLLECT_LEASE_MS,
   GAP_COLLECT_WORKER_NAME,
 } from "./gap.constants";
+import { GapCentroidStaleError } from "./gap-clustering";
 import { assignToCluster, recomputeRootCause } from "./gap-ingest";
 import { clusterKeyOf, detectFollowUp, isRewriteResolved, shouldEnterPool } from "./gap-triage";
 import { GapsRepository, type GapCursorState } from "./gaps.repository";
@@ -142,8 +144,13 @@ export class GapCollectorProcessor implements OnModuleInit {
           : [];
 
       let collected = 0;
-      // 没拿到向量的候选：游标**不许越过**它们（见下方推进循环）。
-      const unembedded = new Set<string>();
+      /**
+       * 本轮**没能处理完**的候选：游标不许越过它们（见下方推进循环）。
+       * 两个来源，处置完全一致（都要留到下一轮重扫）：
+       *  · embedding 少返 —— provider 截断/短返；
+       *  · 质心 CAS 连撞 —— 有别的实例在持续写同一个簇。
+       */
+      const deferred = new Set<string>();
       for (let index = 0; index < enriched.length; index += 1) {
         const entry = enriched[index];
         const embedding = vectors[index];
@@ -153,11 +160,27 @@ export class GapCollectorProcessor implements OnModuleInit {
         if (!embedding || embedding.length === 0) {
           // 绝不拿别人的向量给它归簇——那会污染一个真实簇的质心。
           this.logger.warn(`embedding 缺失，本轮不处理 trace ${entry.candidate.traceId}`);
-          unembedded.add(entry.candidate.traceId);
+          deferred.add(entry.candidate.traceId);
           continue;
         }
-        const inserted = await this.ingest(entry, embedding, now);
-        if (inserted) collected += 1;
+        try {
+          const inserted = await this.ingest(entry, embedding, now);
+          if (inserted) collected += 1;
+        } catch (error) {
+          /**
+           * 质心 CAS 试满仍冲突：**只放弃这一条**，不掀翻整轮。
+           *
+           * 让它冒泡出去的话 `finishCycle` 根本不会执行 ⇒ 游标一步不动、本轮已入池的
+           * 那些条下轮全部重扫（幂等，不会重复计频，但纯属白跑），而只要那个簇持续被
+           * 别的实例写，每一轮都会以同样方式崩——正是上面 embedding 那段注释里说的
+           * 「永久崩溃循环」。按同一套处置：记 warn、游标停在它之前、下轮重来。
+           */
+          if (!(error instanceof GapCentroidStaleError)) throw error;
+          this.logger.warn(
+            `质心并发冲突未能在 ${CENTROID_CAS_ATTEMPTS} 次内解决，本轮不处理 trace ${entry.candidate.traceId}`,
+          );
+          deferred.add(entry.candidate.traceId);
+        }
       }
 
       /**
@@ -165,7 +188,7 @@ export class GapCollectorProcessor implements OnModuleInit {
        * 的 `advancesCursor` + `break`）。
        *
        * 没入池的候选可以放心越过：`shouldEnterPool` 是幂等纯函数，重扫只会得到同样结论。
-       * 但 embedding 少返的候选**不能**越过——`listPoolCandidates` 只往前看，越过即永久丢失。
+       * 但 `deferred` 里的**不能**越过——`listPoolCandidates` 只往前看，越过即永久丢失。
        * provider 若对大批量恒截断，每轮都会静默丢掉近百条真实缺口样本，而
        * `collected`/`skipped`/`healthy` 全都显示正常。宁可原地卡住等下一轮重试。
        */
@@ -174,7 +197,7 @@ export class GapCollectorProcessor implements OnModuleInit {
         lastTraceId: watermark.lastTraceId,
       };
       for (const item of candidates) {
-        if (unembedded.has(item.traceId)) break;
+        if (deferred.has(item.traceId)) break;
         cursor = { lastTs: item.cursorTs, lastTraceId: item.traceId };
       }
       const cursorMoved =

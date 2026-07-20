@@ -250,6 +250,23 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
   // ───────────────── B2b：向导与回验的四态迁移（021 决策 J） ─────────────────
 
   describe("状态机 B2b 四态（021 决策 J / 原型 §18.C）", () => {
+    /**
+     * 系统事件**没有**公开的 `transition(id, event)` 入口——公开方法只收
+     * `GapUserTransition` 三个用户事件。这里逐个调具名方法，正是在钉住那条约束：
+     * 若哪天有人把 `transition` 的参数放宽回全量 union，这段仍然通过，
+     * 但下面「载荷与状态同时落库」的断言会开始漏——所以两者都要有。
+     */
+    const SYSTEM_EVENTS = {
+      startDraft: (id: string) => service.startDraft(id),
+      cancelDraft: (id: string) => service.cancelDraft(id),
+      draftReady: (id: string) => service.recordDraftReady(id, "草拟问题", "草拟答案"),
+      cancelReview: (id: string) => service.cancelReview(id),
+      verifyPass: (id: string) => service.recordVerifyPass(id, 89),
+      verifyFail: (id: string) => service.recordVerifyFail(id, 62),
+      verifyIngestFailed: (id: string) => service.recordVerifyIngestFailed(id),
+      reopenRecurred: (id: string) => service.reopenRecurred(id),
+    } as const;
+
     it.each([
       ["pending", "startDraft", "drafting"],
       ["drafting", "cancelDraft", "pending"],
@@ -258,10 +275,12 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
       ["filled", "verifyPass", "verified"],
       ["filled", "verifyFail", "pending"],
       ["filled", "verifyIngestFailed", "pending"],
+      ["ignored", "reopenRecurred", "pending"],
+      ["verified", "reopenRecurred", "pending"],
     ] as const)("%s --%s--> %s", async (from, event, to) => {
       const { clusterId } = await seedCluster({ status: from, items: [{}] });
       try {
-        await service.transition(clusterId, event);
+        await SYSTEM_EVENTS[event](clusterId);
         expect(await statusOf(clusterId)).toBe(to);
       } finally {
         await cleanup([clusterId]);
@@ -302,15 +321,26 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
     });
 
     it.each([
-      ["routed_retrieval", "startDraft"],
-      ["pending", "draftReady"],
-      ["pending", "submitFill"],
-      ["reviewing", "verifyPass"],
-      ["drafting", "verifyFail"],
-    ] as const)("非法迁移 %s --%s--> 被拒且状态一动不动", async (from, event) => {
+      ["routed_retrieval", "startDraft", (id: string) => service.startDraft(id)],
+      ["pending", "draftReady", (id: string) => service.recordDraftReady(id, "q", "a")],
+      ["reviewing", "verifyPass", (id: string) => service.recordVerifyPass(id, 89)],
+      ["drafting", "verifyFail", (id: string) => service.recordVerifyFail(id, 62)],
+      ["pending", "reopenRecurred", (id: string) => service.reopenRecurred(id)],
+      [
+        "pending",
+        "submitFill",
+        (id: string) =>
+          service.submitFill(id, {
+            targetKbId: "44444444-4444-4444-8444-444444444444",
+            applicationId: "55555555-5555-4555-8555-555555555555",
+            configVersionId: "66666666-6666-4666-8666-666666666666",
+            documentId: "77777777-7777-4777-8777-777777777777",
+          }),
+      ],
+    ] as const)("非法迁移 %s --%s--> 被拒且状态一动不动", async (from, _event, invoke) => {
       const { clusterId } = await seedCluster({ status: from, items: [{}] });
       try {
-        await expect(service.transition(clusterId, event)).rejects.toThrow(/illegal transition/i);
+        await expect(invoke(clusterId)).rejects.toThrow(/illegal transition/i);
         expect(await statusOf(clusterId)).toBe(from);
       } finally {
         await cleanup([clusterId]);
@@ -444,27 +474,76 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
       }
     });
 
-    it("复发标在人主动推进时清除，但 reopen 不清（那是另一条独立迁移）", async () => {
-      const ignoredCluster = await seedCluster({
+    it.each([
+      ["ignore", (id: string) => service.transition(id, "ignore")],
+      ["routeRetrieval", (id: string) => service.transition(id, "routeRetrieval")],
+      ["startDraft", (id: string) => service.startDraft(id)],
+    ] as const)("复发标在人主动推进（%s）时清除", async (_event, invoke) => {
+      // 三个事件都在 CLEARS_RECURRED 里，必须逐个钉——只测 ignore 的话，
+      // 另外两个从集合里被删掉也不会有任何测试变红。
+      const { clusterId } = await seedCluster({
         status: "pending",
         recurredAt: new Date(),
         items: [{}],
       });
-      const reopened = await seedCluster({
+      try {
+        const updated = await invoke(clusterId);
+        expect(updated.recurred).toBe(false);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("reopen 不清复发标——那是另一条独立迁移，与复发判定无关", async () => {
+      const { clusterId } = await seedCluster({
         status: "ignored",
         recurredAt: new Date(),
         items: [{}],
       });
       try {
-        // ignore 是「人看到复发并做了处置」⇒ 清。
-        const afterIgnore = await service.transition(ignoredCluster.clusterId, "ignore");
-        expect(afterIgnore.recurred).toBe(false);
-
-        // reopen 与复发判定无关 ⇒ 信号保留。
-        const afterReopen = await service.transition(reopened.clusterId, "reopen");
-        expect(afterReopen.recurred).toBe(true);
+        const updated = await service.transition(clusterId, "reopen");
+        expect(updated.recurred).toBe(true);
       } finally {
-        await cleanup([ignoredCluster.clusterId, reopened.clusterId]);
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("载荷与状态是**同一条 UPDATE**：并发抢跑的那一方整体不生效", async () => {
+      // 模拟 verifyPass 与 verifyFail 并发：两者都在 mustFind 时读到 filled。
+      // 没有 CAS 的话双双写入，落得「verified 且带复发标」——原型 §18.C 里没有这种组合。
+      const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
+      try {
+        const [first, second] = await Promise.allSettled([
+          service.recordVerifyPass(clusterId, 89),
+          service.recordVerifyFail(clusterId, 62),
+        ]);
+        const outcomes = [first, second];
+        expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+        expect(outcomes.filter((o) => o.status === "rejected")).toHaveLength(1);
+
+        // 无论谁赢，结果都必须是一个自洽的状态，而不是两次写入的混合体。
+        const status = await statusOf(clusterId);
+        const fields = await fillFieldsOf(clusterId);
+        if (status === "verified") {
+          expect(fields.verifiedScore).toBe(89);
+          expect(fields.recurredAt).toBeNull(); // 通过就不该带复发标
+        } else {
+          expect(status).toBe("pending");
+          expect(fields.verifiedScore).toBe(62);
+          expect(fields.recurredAt).not.toBeNull();
+        }
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("startDraft 撞上并发软删时报 404，而不是把 fill_pre_score 记成 NULL 蒙混过去", async () => {
+      const { clusterId } = await seedCluster({ status: "pending", items: [{}] });
+      try {
+        await pool.query(`UPDATE gap_clusters SET deleted_at = now() WHERE id = $1`, [clusterId]);
+        await expect(service.startDraft(clusterId)).rejects.toThrow(/缺口不存在/);
+      } finally {
+        await cleanup([clusterId]);
       }
     });
   });

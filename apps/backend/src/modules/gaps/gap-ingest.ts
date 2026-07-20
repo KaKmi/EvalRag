@@ -1,4 +1,4 @@
-import { CLUSTER_SIMILARITY_MIN } from "./gap.constants";
+import { CENTROID_CAS_ATTEMPTS, CLUSTER_SIMILARITY_MIN } from "./gap.constants";
 import { GapCentroidStaleError, cosineSimilarity, updateCentroid } from "./gap-clustering";
 import { triageCluster, triageItem } from "./gap-triage";
 import type {
@@ -19,15 +19,6 @@ import type {
  */
 
 /**
- * 质心 CAS 冲突后的重试上限（B2b）。
- *
- * 冲突要求两个实例在租约超时窗口内并发处理**同一个簇**，极罕见；重试这么多次还撞，
- * 说明是持续的高并发写入，让它冒泡到 processor 的失败计数比原地打转好——
- * 同 `gap-collector.processor.ts` 对 embedding 缺失的既定态度：宁可本轮不处理、下轮重来。
- */
-const CENTROID_CAS_MAX_ATTEMPTS = 3;
-
-/**
  * 最近邻归簇：相似度 ≥ 阈值并入既有簇（质心增量平均），否则建新簇。
  *
  * pgvector 只用来**找**候选，相似度由 `cosineSimilarity` 重算 —— 判定只有一处实现，
@@ -38,6 +29,11 @@ const CENTROID_CAS_MAX_ATTEMPTS = 3;
  * 最近簇甚至可能换了一个），而这两步正是本函数的全部内容。放这儿对
  * 收集器 worker 与 `GapsService.addItem` 两个调用方都**透明**，也不会出现
  * 「两个调用方各写一份重试、口径悄悄漂移」——这正是本文件头注释在讲的那件事。
+ *
+ * 试满 `CENTROID_CAS_ATTEMPTS` 仍冲突就把哨兵抛给调用方。**调用方必须逐条接住它**
+ * （收集器在 `ingest` 处按「本轮不处理这条、游标不越过它」处理，同 embedding 缺失的既定做法），
+ * 而不是让它冒泡出整轮——后者会让 `finishCycle` 根本不执行，一个持续热的簇就能把每一轮都拖崩，
+ * 正是 `gap-collector.processor.ts` 对 embedding 缺失那段注释所说的「永久崩溃循环」。
  */
 export async function assignToCluster(
   store: GapCollectorStore,
@@ -60,7 +56,7 @@ export async function assignToCluster(
     try {
       return await store.attachItem(target, draft, now);
     } catch (error) {
-      if (!(error instanceof GapCentroidStaleError) || attempt >= CENTROID_CAS_MAX_ATTEMPTS) {
+      if (!(error instanceof GapCentroidStaleError) || attempt >= CENTROID_CAS_ATTEMPTS) {
         throw error;
       }
       // 循环回去重读最近邻——事务已回滚，item 没插进去，重来一次是干净的。

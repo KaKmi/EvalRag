@@ -17,6 +17,7 @@ import { EvaluationsRepository } from "../evaluations/evaluations.repository";
 import { ModelsService } from "../models/models.service";
 import { VECTOR_DIMENSION } from "../../platform/persistence/pgvector-type";
 import { FREQ_WINDOW_DAYS, type GapClusterStatus, type GapRootCause } from "./gap.constants";
+import { GapCentroidStaleError } from "./gap-clustering";
 import { assignToCluster, recomputeRootCause } from "./gap-ingest";
 import {
   GapItemsMovedConcurrentlyError,
@@ -66,9 +67,66 @@ const TRANSITIONS = {
    * 不是「这个知识缺口又出现新证据了」。混进同一个红点，运营就分不清该重投文档还是该重查缺口。
    */
   verifyIngestFailed: { from: ["filled"], to: "pending" },
+  /**
+   * worker 发现已终结的簇 7 天内又新增 ≥5 条相似样本（原型 `:376`/`:708`）。
+   * 与用户手动 `reopen` 分开：那条只从 `ignored` 起、且不打复发标；这条还覆盖 `verified`
+   * （「补过库、验过了，结果又坏了」正是最该重开的情形）。
+   */
+  reopenRecurred: { from: ["ignored", "verified"], to: "pending" },
 } as const satisfies Record<string, { from: readonly GapClusterStatus[]; to: GapClusterStatus }>;
 
 export type GapTransition = keyof typeof TRANSITIONS;
+
+/**
+ * **用户**可以直接触发的迁移——公开 `transition()` 只收这三个。
+ *
+ * 其余 8 个是系统事件，必须走各自的具名方法（`recordDraftReady`/`submitFill`/`recordVerify*`…），
+ * 因为它们都带**必须同时落库的载荷**。若公开方法收全量 `GapTransition`，controller 里一行
+ * `transition(id, "submitFill")` 就能把簇推进 `filled` 却不带 `fill_target_document_id`——
+ * 而回验监听器正是按那个 id 反查簇的，这行从此对它永久不可见（peer review P2 抓出）。
+ */
+export type GapUserTransition = Extract<
+  GapTransition,
+  "ignore" | "reopen" | "routeRetrieval"
+>;
+
+/** 迁移可以顺带写的载荷列。与状态一起进**同一条 UPDATE**（见 `applyTransition`）。 */
+export interface GapTransitionPatch {
+  fillDraftQuestion?: string;
+  fillDraftAnswer?: string;
+  fillTargetKbId?: string;
+  fillTargetDocumentId?: string | null;
+  fillVerifyApplicationId?: string;
+  fillVerifyConfigVersionId?: string;
+  fillPreScore?: number | null;
+  verifiedScore?: number | null;
+  recurredAt?: Date | null;
+}
+
+/** 向导/回验编排要读的窄投影（不含 centroid 等与它们无关的列）。 */
+export interface GapFillState {
+  id: string;
+  status: GapClusterStatus;
+  representativeQuestion: string;
+  fillDraftQuestion: string | null;
+  fillDraftAnswer: string | null;
+  fillTargetKbId: string | null;
+  fillTargetDocumentId: string | null;
+  fillVerifyApplicationId: string | null;
+  fillVerifyConfigVersionId: string | null;
+  fillPreScore: number | null;
+}
+
+/**
+ * 按**码点**截断到 `max` 个字符。
+ *
+ * 不用 `String.prototype.slice`：它按 UTF-16 码元切，正好切在代理对中间就留下一个孤立代理，
+ * PG 以非法 UTF-8 拒收——一个本来只为兜底列宽的动作反而制造 500（peer review P3）。
+ */
+function truncateByCodePoint(value: string, max: number): string {
+  const points = Array.from(value);
+  return points.length <= max ? value : points.slice(0, max).join("");
+}
 
 /**
  * 用户**主动推进**该簇时清除「复发」提醒——语义是「人已经看到这次复发并采取了行动」。
@@ -115,26 +173,41 @@ export class GapsService {
     return rows.map((row) => toGapItem(row, ttlCutoff));
   }
 
-  /** 状态迁移。非法迁移抛 400 并说清「从哪到哪不允许」，不静默 no-op。 */
-  async transition(id: string, event: GapTransition, now = new Date()): Promise<GapCluster> {
+  /**
+   * **用户**触发的状态迁移（controller 的入口）。非法迁移抛 400 并说清「从哪到哪不允许」，
+   * 不静默 no-op。
+   *
+   * 参数类型刻意是 `GapUserTransition` 而非全量 `GapTransition`：系统事件都带必须同时落库的
+   * 载荷，只能走各自的具名方法。见 `GapUserTransition` 的说明。
+   */
+  async transition(id: string, event: GapUserTransition, now = new Date()): Promise<GapCluster> {
     return this.applyTransition(id, event, now);
   }
 
   /**
-   * 迁移执行的**唯一**实现：校验 → 写副作用列 → 写状态 → 按需清复发标 → 读回。
+   * 迁移执行的**唯一**实现：校验 → **一条 UPDATE 同时写状态、载荷列与复发标** → 读回。
    *
-   * 所有对外方法（含 B2b 新增的 6 个）都经由它，这样「非法迁移一律 400」这条不变量
-   * 只有一处实现——B2b 加了 8 个事件，若每个方法各写一遍守卫，漏掉任何一个都是静默放行。
+   * 所有迁移都经由它，「非法迁移一律 400」这条不变量因此只有一处实现——B2b 加了 8 个事件，
+   * 若每个方法各写一遍守卫，漏掉任何一个都是静默放行。
    *
-   * `sideEffect` 在写状态**之前**跑：它写的是本次迁移要带的载荷列（草稿内容 / 入库目标 /
-   * 回验分数）。顺序反过来的话，副作用失败会留下「状态已推进但载荷为空」的行——
-   * 例如 `filled` 却没有 `fill_target_document_id`，回验监听器永远找不到它。
+   * ⚠️ **载荷与状态必须落在同一条 UPDATE 里，不能拆成两次写**（peer review P1 抓出）。
+   * 初版写成「先跑副作用、再写状态」，`verifyIngestFailed` 恰好是反例：它的副作用是
+   * **清空** `fill_target_document_id`，两次写之间崩溃就留下 `status='filled'` 且
+   * documentId 为 NULL 的行——而回验监听器正是按 documentId 反查簇的，此后无论文档事件
+   * 重投多少次都再也找不到它；`filled` 态又只剩系统事件（不可达）与 `ignore` 可走，
+   * 用户连重试补库都做不到，只能弃掉整个簇。合成一条 UPDATE 后这个中间态在物理上不存在。
+   *
+   * ⚠️ **WHERE 带 `status = 期望值` 的 CAS**（peer review P2 抓出）。`mustFind` 读状态与
+   * UPDATE 写状态之间有窗口：并发的 `verifyPass` + `verifyFail` 会双双通过守卫，
+   * 结果是 `verified_score` 被写两次、且 `recurred_at` 落在一个最终 `verified` 的行上——
+   * 原型 §18.C 里没有「已回验 + 复发」这种组合。影响 0 行即抛 409（请求良构、刷新重试即可），
+   * 与 `moveItems` 的 `GapItemsMovedConcurrentlyError` 同款处置。
    */
   private async applyTransition(
     id: string,
     event: GapTransition,
     now: Date,
-    sideEffect?: () => Promise<void>,
+    patch: GapTransitionPatch = {},
   ): Promise<GapCluster> {
     const cluster = await this.mustFind(id);
     const rule = TRANSITIONS[event];
@@ -143,13 +216,31 @@ export class GapsService {
         `illegal transition: ${cluster.status} --${event}--> ${rule.to}（允许的来源：${rule.from.join(" / ")}）`,
       );
     }
-    if (sideEffect) await sideEffect();
-    await this.repo.updateStatus(id, rule.to, now);
-    if (CLEARS_RECURRED.has(event)) await this.repo.clearRecurred(id, now);
+    const applied = await this.repo.applyTransition(
+      id,
+      cluster.status,
+      {
+        status: rule.to,
+        ...patch,
+        // 复发标的清除也在这条 UPDATE 里——否则崩在中间会留下一个已被处置却仍标红的簇。
+        ...(CLEARS_RECURRED.has(event) ? { recurredAt: null } : {}),
+      },
+      now,
+    );
+    if (!applied) {
+      throw new ConflictException(
+        `缺口状态在本次操作期间被改动过（并发的 ${event}？），请刷新后重试`,
+      );
+    }
     return this.mustReadBack(id, now);
   }
 
   // ───────────────── B2b [补知识库] 向导与回验的状态迁移（021 决策 J） ─────────────────
+  //
+  // 这几个方法是系统事件（draftReady/submitFill/verify*）的**唯一**入口——公开的
+  // `transition()` 只收用户事件（见其签名 `GapUserTransition`）。否则 controller 里一行
+  // `transition(id, "submitFill")` 就能落进 `filled` 却没有 documentId，
+  // 对回验监听器永久不可见（peer review P2）。
 
   /**
    * 点 [补知识库]：`pending → drafting`，并**快照当下的 avgQuality** 作为「41→89」的左端。
@@ -159,11 +250,14 @@ export class GapsService {
    * 现读会让「之前」这个数随新坏样本涌入而静默漂移，展示出来的就不再是用户当时看到的那个分。
    */
   async startDraft(id: string, now = new Date()): Promise<GapCluster> {
-    return this.applyTransition(id, "startDraft", now, async () => {
-      const windowStart = new Date(now.getTime() - FREQ_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-      const row = await this.repo.findClusterListRow(id, windowStart);
-      const preScore = row ? toNumberOrNull(row.avgQuality) : null;
-      await this.repo.setFillPreScore(id, preScore === null ? null : Math.round(preScore), now);
+    const windowStart = new Date(now.getTime() - FREQ_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const row = await this.repo.findClusterListRow(id, windowStart);
+    // 读不到行 = 簇在 mustFind 与此之间被软删了。记 NULL 会把它与「这个簇一个分都没有」
+    // 混为一谈（两者都显示为「未评」），而前者其实是不该继续的 404。
+    if (!row) throw new NotFoundException(`缺口不存在：${id}`);
+    const preScore = toNumberOrNull(row.avgQuality);
+    return this.applyTransition(id, "startDraft", now, {
+      fillPreScore: preScore === null ? null : Math.round(preScore),
     });
   }
 
@@ -179,9 +273,12 @@ export class GapsService {
     answer: string,
     now = new Date(),
   ): Promise<GapCluster> {
-    return this.applyTransition(id, "draftReady", now, () =>
-      this.repo.updateFillDraft(id, { question, answer }, now),
-    );
+    return this.applyTransition(id, "draftReady", now, {
+      // 按**码点**截断，不是 `slice`：UTF-16 码元切法会把一个代理对劈成孤立代理，
+      // PG 拒收非法 UTF-8，于是「兜底」反而制造 500（peer review P3）。
+      fillDraftQuestion: truncateByCodePoint(question, 200),
+      fillDraftAnswer: answer,
+    });
   }
 
   /** 人审驳回：回 `pending`，草稿保留供再次编辑。 */
@@ -200,23 +297,25 @@ export class GapsService {
     },
     now = new Date(),
   ): Promise<GapCluster> {
-    return this.applyTransition(id, "submitFill", now, () =>
-      this.repo.updateFillTarget(id, target, now),
-    );
+    return this.applyTransition(id, "submitFill", now, {
+      fillTargetKbId: target.targetKbId,
+      fillVerifyApplicationId: target.applicationId,
+      fillVerifyConfigVersionId: target.configVersionId,
+      fillTargetDocumentId: target.documentId,
+    });
   }
 
   /** 回验通过（≥ `VERIFY_PASS_THRESHOLD`）：记新分数，屏5 显示「✓ 41→89」。 */
   async recordVerifyPass(id: string, score: number, now = new Date()): Promise<GapCluster> {
-    return this.applyTransition(id, "verifyPass", now, () =>
-      this.repo.updateVerification(id, { verifiedScore: score }, now),
-    );
+    return this.applyTransition(id, "verifyPass", now, { verifiedScore: score });
   }
 
   /** 回验未通过（分数 <80，或判分整体失败）：回 `pending` + 复发标（原型 `:706`）。 */
   async recordVerifyFail(id: string, score: number | null, now = new Date()): Promise<GapCluster> {
-    return this.applyTransition(id, "verifyFail", now, () =>
-      this.repo.updateVerification(id, { verifiedScore: score, recurredAt: now }, now),
-    );
+    return this.applyTransition(id, "verifyFail", now, {
+      verifiedScore: score,
+      recurredAt: now,
+    });
   }
 
   /**
@@ -224,14 +323,38 @@ export class GapsService {
    * 复发是业务信号（缺口又出现了），入库失败是工程故障（文档没解析成），UI 文案也不同。
    */
   async recordVerifyIngestFailed(id: string, now = new Date()): Promise<GapCluster> {
-    return this.applyTransition(id, "verifyIngestFailed", now, () =>
-      this.repo.updateVerification(id, { fillTargetDocumentId: null }, now),
-    );
+    return this.applyTransition(id, "verifyIngestFailed", now, { fillTargetDocumentId: null });
   }
 
-  /** 向导/回验编排要读的原始行（草稿内容、入库目标等不在契约 `GapCluster` 上的列）。 */
-  async mustFindForFill(id: string) {
-    return this.mustFind(id);
+  /**
+   * worker 发现已终结的簇又冒出新样本（7 天内 ≥5 条）：重开并标复发（原型 `:708`）。
+   * 走状态机而不是让收集器直接 UPDATE status——「一切迁移都过 TRANSITIONS」这条不变量
+   * 若在第一个消费者身上就破例，它就不再是不变量了。
+   */
+  async reopenRecurred(id: string, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "reopenRecurred", now, { recurredAt: now });
+  }
+
+  /**
+   * 向导/回验编排要读的载荷列（不在契约 `GapCluster` 上）。
+   *
+   * **窄投影**而不是把整行交出去：原始行带着 1024 维 `centroid` 与 `deletedAt`，
+   * 让编排层拿到它们没有意义，还会让「谁读了什么」变得不可追（peer review P3）。
+   */
+  async mustFindForFill(id: string): Promise<GapFillState> {
+    const row = await this.mustFind(id);
+    return {
+      id: row.id,
+      status: row.status as GapClusterStatus,
+      representativeQuestion: row.representativeQuestion,
+      fillDraftQuestion: row.fillDraftQuestion,
+      fillDraftAnswer: row.fillDraftAnswer,
+      fillTargetKbId: row.fillTargetKbId,
+      fillTargetDocumentId: row.fillTargetDocumentId,
+      fillVerifyApplicationId: row.fillVerifyApplicationId,
+      fillVerifyConfigVersionId: row.fillVerifyConfigVersionId,
+      fillPreScore: row.fillPreScore,
+    };
   }
 
   /**
@@ -355,10 +478,7 @@ export class GapsService {
       );
     }
 
-    const { clusterId, inserted } = await assignToCluster(
-      this.repo,
-      body.question,
-      {
+    const { clusterId, inserted } = await this.assignToClusterOr409(body.question, {
         source: body.source,
         sourceTraceId: body.sourceTraceId,
         question: body.question,
@@ -382,9 +502,7 @@ export class GapsService {
         fallbackUsed: false,
         noCitations: false,
         followUpSuspected: false,
-      },
-      now,
-    );
+    }, now);
     if (inserted) await recomputeRootCause(this.repo, clusterId, now);
 
     const cluster = await this.mustFind(clusterId);
@@ -394,6 +512,29 @@ export class GapsService {
       representativeQuestion: cluster.representativeQuestion,
       freq: cluster.freq,
     };
+  }
+
+  /**
+   * 手动入池的归簇。`assignToCluster` 内部已经重算重试过 `CENTROID_CAS_ATTEMPTS` 次，
+   * 仍冲突才会抛到这里——说明有别的实例在持续写同一个簇。
+   *
+   * 映射成 **409 + 中文文案**，不让哨兵裸奔成 500：请求本身完全良构、刷新重试就会成功，
+   * 而 500 会把「稍等再试」误导成「系统坏了」。收集器那条路径不走这里——它按
+   * 「本轮不处理这条、游标不越过」处置（见 `gap-collector.processor.ts`）。
+   */
+  private async assignToClusterOr409(
+    clusterKey: string,
+    draft: Parameters<typeof assignToCluster>[2],
+    now: Date,
+  ): ReturnType<typeof assignToCluster> {
+    try {
+      return await assignToCluster(this.repo, clusterKey, draft, now);
+    } catch (error) {
+      if (error instanceof GapCentroidStaleError) {
+        throw new ConflictException("该缺口正在被并发更新，请稍后重试");
+      }
+      throw error;
+    }
   }
 
   /**
