@@ -6,6 +6,7 @@ import type { GapsRepository } from "./gaps.repository";
 import type { EvaluationsRepository } from "../evaluations/evaluations.repository";
 import type { ModelsService } from "../models/models.service";
 import type { EvalSetsService } from "../eval-runs/eval-sets.service";
+import type { DB } from "../../platform/persistence/persistence.module";
 
 /**
  * 「从坏样本生成」的服务端行为（021 §17.2、决策 G、Global Constraint 11）。
@@ -43,7 +44,7 @@ function itemRow(patch: Partial<GapItemRow> = {}): GapItemRow {
 
 interface Harness {
   service: GapPromoteService;
-  /** 真正落库的用例（createCase 的产物），断言对着它，不是对着调用次数。 */
+  /** 真正落库的用例（`createCasesBatchTx` 的产物），断言对着它，不是对着调用次数。 */
   created: EvalCase[];
   markedEnteredEvalSet: string[];
   chatCalls: { modelId: string; messages: { role: string; content: string }[] }[];
@@ -51,12 +52,20 @@ interface Harness {
   chatError: { value: Error | null };
 }
 
+/**
+ * 假 tx 的哨兵。promote 必须把**顶层事务的那一个** tx 原样传给两个域的方法——
+ * 传错（比如某个方法偷偷自开事务）就不再是同一个原子单元，下面的假仓库当场炸。
+ */
+const FAKE_TX = Symbol("fake-tx");
+
 function harness(
   options: {
     items?: GapItemRow[];
     judgeModelId?: string | null;
     /** 目标集里**已经有**的用例（用于跨集去重的用例）。 */
     existingCases?: { question: string }[];
+    /** 批量插入跑到这条问题时抛错——用来验证整批回滚。 */
+    failOnQuestion?: string;
   } = {},
 ): Harness {
   const items = options.items ?? [itemRow()];
@@ -70,10 +79,30 @@ function harness(
     findCluster: async (id: string) =>
       id === CLUSTER ? { id: CLUSTER, deletedAt: null } : undefined,
     listItemsByIds: async (ids: string[]) => items.filter((row) => ids.includes(row.id)),
-    markEnteredEvalSet: async (id: string) => {
+    markEnteredEvalSetTx: async (tx: unknown, id: string) => {
+      expect(tx).toBe(FAKE_TX);
       markedEnteredEvalSet.push(id);
     },
   } as unknown as GapsRepository;
+
+  /**
+   * 假事务，**带真回滚语义**：事务体抛错就把两个数组恢复到进入前的快照。
+   *
+   * 不做成「直接调用回调」的纯 pass-through：那样的桩在失败路径上永远显示「什么都没留下」，
+   * 原子性用例就会是自证的——它测的是桩不会记账，不是 promote 把两个域收进了同一个事务。
+   */
+  const db = {
+    transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+      const snapshot = { created: created.length, marked: markedEnteredEvalSet.length };
+      try {
+        return await fn(FAKE_TX);
+      } catch (error) {
+        created.length = snapshot.created;
+        markedEnteredEvalSet.length = snapshot.marked;
+        throw error;
+      }
+    },
+  } as unknown as DB;
 
   const evaluations = {
     getSettings: async () => ({
@@ -92,29 +121,38 @@ function harness(
   const evalSets = {
     /** 目标集**既有**用例——promote 会与它做归一化精确比对（防重试造整批重复）。 */
     listCases: async () => options.existingCases ?? [],
-    createCase: async (
+    createCasesBatchTx: async (
+      tx: unknown,
       setId: string,
-      req: { question: string; goldPoints: string[]; sourceTraceId?: string },
+      entries: { question: string; goldPoints: string[]; sourceTraceId?: string }[],
     ) => {
-      const row = {
-        id: `case-${created.length + 1}`,
-        setId,
-        version: 1,
-        // `insertCaseWithVersion` 的默认值，本服务不提供任何改它的开关（Global Constraint 11）。
-        status: "draft" as const,
-        question: req.question,
-        goldPoints: req.goldPoints,
-        goldDocRefs: [],
-        tags: [],
-        sourceTraceId: req.sourceTraceId ?? null,
-      } as unknown as EvalCase;
-      created.push(row);
-      return row;
+      expect(tx).toBe(FAKE_TX);
+      const rows: EvalCase[] = [];
+      for (const req of entries) {
+        if (options.failOnQuestion !== undefined && req.question === options.failOnQuestion) {
+          throw new Error(`insert failed: ${req.question}`);
+        }
+        const row = {
+          id: `case-${created.length + 1}`,
+          setId,
+          version: 1,
+          // `insertCaseWithVersion` 的默认值，本服务不提供任何改它的开关（Global Constraint 11）。
+          status: "draft" as const,
+          question: req.question,
+          goldPoints: req.goldPoints,
+          goldDocRefs: [],
+          tags: [],
+          sourceTraceId: req.sourceTraceId ?? null,
+        } as unknown as EvalCase;
+        created.push(row);
+        rows.push(row);
+      }
+      return rows;
     },
   } as unknown as EvalSetsService;
 
   return {
-    service: new GapPromoteService(repo, evaluations, models, evalSets),
+    service: new GapPromoteService(repo, evaluations, models, evalSets, db),
     created,
     markedEnteredEvalSet,
     chatCalls,
@@ -243,6 +281,31 @@ describe("GapPromoteService.promote", () => {
     );
     expect(result.created).toBe(1);
     expect(h.created.map((c) => c.question)).toEqual(["能开专票吗"]);
+  });
+
+  /**
+   * 021 §12② 的收口：B2a 的逐条插入会在这里留下「第一条已入集、第二条失败」的半批状态。
+   * 现在整批与簇标志同一个事务，失败即整体回滚。
+   */
+  it("rolls the whole batch back when one insert fails —— 不留半批已入集", async () => {
+    const a = itemRow({ id: "66666666-6666-4666-8666-666666666666" });
+    const b = itemRow({ id: "77777777-7777-4777-8777-777777777777" });
+    const h = harness({ items: [a, b], failOnQuestion: "第二条会炸" });
+
+    await expect(
+      h.service.promote(
+        promoteReq([
+          { itemId: a.id, question: "第一条没问题", goldPoints: ["要点"] },
+          { itemId: b.id, question: "第二条会炸", goldPoints: ["要点"] },
+        ]),
+        "a@b.c",
+      ),
+    ).rejects.toThrow("insert failed: 第二条会炸");
+
+    // ① 先插进去的那条也没留下 —— 整批回滚，不是「已加入 1 条，其余失败」。
+    expect(h.created).toHaveLength(0);
+    // ② 簇没有被标成「已进评测集」—— 否则一个其实没入集的簇会看起来已经完事。
+    expect(h.markedEnteredEvalSet).toEqual([]);
   });
 
   it("rejects items that belong to a different cluster", async () => {

@@ -27,7 +27,8 @@ const INJECTED_BY_TOKEN = {
   GapCollectorProcessor: [0],
   GapsService: [],
   GapsController: [],
-  GapPromoteService: [],
+  // GapPromoteService 的第 4 个参数是 `@Inject(DRIZZLE)`（跨域共享事务的顶层持有者）。
+  GapPromoteService: [4],
   GapPromoteController: [],
 } as const;
 

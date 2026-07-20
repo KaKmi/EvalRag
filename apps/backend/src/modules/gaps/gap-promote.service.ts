@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { z } from "zod";
 import type {
   DraftGoldRequest,
@@ -6,6 +6,8 @@ import type {
   PromoteGapRequest,
   PromoteGapResponse,
 } from "@codecrush/contracts";
+import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
+import type { DB } from "../../platform/persistence/persistence.module";
 import { EvaluationsRepository } from "../evaluations/evaluations.repository";
 import { parseJudgeOutput, structuredOutput } from "../evaluations/evaluation-judge.utils";
 import { EvalSetsService } from "../eval-runs/eval-sets.service";
@@ -13,24 +15,6 @@ import { ModelsService } from "../models/models.service";
 import { normalizeQuestion } from "./gap-triage";
 import { GapsRepository } from "./gaps.repository";
 import type { GapItemRow } from "./schema";
-
-/**
- * 半批失败：**已经建成的用例 id 必须随错误一起交出去**。
- *
- * 只抛一个笼统的 500，用户会以为一条都没进 ⇒ 重试 ⇒ 若哪天跨集去重被人删掉，
- * 就是整批重复。带上 `caseIds` 让前端能如实说「已加入 N 条，其余失败」。
- */
-export class PartialPromoteError extends Error {
-  constructor(
-    readonly caseIds: string[],
-    readonly cause: unknown,
-  ) {
-    super(
-      `已加入 ${caseIds.length} 条后失败：${cause instanceof Error ? cause.message : String(cause)}`,
-    );
-    this.name = "PartialPromoteError";
-  }
-}
 
 /**
  * 「从坏样本生成」的服务端一半（021 §17.2 `:596`）：LLM 草拟 gold 要点 + 批量沉淀成 gold 用例。
@@ -76,6 +60,11 @@ export class GapPromoteService {
     private readonly evaluations: EvaluationsRepository,
     private readonly models: ModelsService,
     private readonly evalSets: EvalSetsService,
+    /**
+     * 顶层事务的持有者。跨域原子性只能在**调用方**这一层开事务——两个域的仓库各开各的，
+     * 拼不出「要么全成要么全滚」（见 `promote` 里的事务块）。
+     */
+    @Inject(DRIZZLE) private readonly db: DB,
   ) {}
 
   /**
@@ -131,7 +120,11 @@ export class GapPromoteService {
    */
   async promote(
     req: PromoteGapRequest,
-    actor: string,
+    /**
+     * `eval_cases` 没有 created_by 列，批量路径也没处安放它（同 `createCase` 的 `_actor`）。
+     * 形参保留是为了不动 controller 的调用面，也为了 `now` 的位置不变。
+     */
+    _actor: string,
     now = new Date(),
   ): Promise<PromoteGapResponse> {
     const cluster = await this.repo.findCluster(req.clusterId);
@@ -179,33 +172,28 @@ export class GapPromoteService {
     }
 
     /**
-     * 插入是**逐条**的，不在一个事务里——`EvalSetsService.createCase` 不接受外部 tx，
-     * 而为了本端点去改 eval-runs 的仓库签名，代价大于收益。
+     * **整批用例 + 簇标志一个事务**（021 §12② 的收口）。这是本仓库第一处跨域共享事务：
+     * 顶层事务开在这里，同一个 `tx` 分别交给 eval-runs 与 gaps 两个域的方法。
      *
-     * 因此中途失败会留下**部分已入集**的状态。这一点靠两件事把危害压掉：
-     *  ① 上面那道「与目标集既有用例精确比对」让**重试是安全的**——已进去的那几条会被跳过，
-     *     不会因为重试而出现整批重复；
-     *  ② 失败时把**已经建成的 caseIds 一并抛给调用方**，前端据此如实提示「已加入 N 条，其余失败」，
-     *     而不是笼统报错让用户以为一条都没进（那才会诱发危险的重试）。
-     * 真正的原子批量留 B2b 与「补知识库」一起做——那时 eval-runs 侧本来就要开事务接口。
+     * B2a 曾逐条 `createCase` 后再单独打标志，中途失败就留下**部分已入集**的状态，
+     * 只能靠「重试安全 + 把已建 caseIds 随错误抛回，前端说『已加入 N 条，其余失败』」压低危害。
+     * 现在那个状态在数据库层面不存在了，所以那套半批错误处理（`PartialPromoteError`）
+     * 也一并删掉——两套错误处理并存，迟早有人照着已经不可能发生的那套写前端文案。
+     *
+     * 上面那道「与目标集既有用例归一化精确比对」照旧保留：它防的是**重复点按/重试**造整批重复，
+     * 与原子性是两回事，原子化并不使它多余。
      */
-    const caseIds: string[] = [];
-    try {
-      for (const entry of plan) {
-        const created = await this.evalSets.createCase(
-          req.targetSetId,
-          { ...entry, goldDocRefs: [], tags: [] },
-          actor,
-        );
-        caseIds.push(created.id);
-      }
-    } catch (error) {
-      throw new PartialPromoteError(caseIds, error);
-    }
-
-    // 全部落库成功才打「已进评测集」标志——半批时不打，免得一个没进全的簇看起来已经完事。
-    await this.repo.markEnteredEvalSet(req.clusterId, now);
-    return { created: caseIds.length, caseIds };
+    const created = await this.db.transaction(async (tx) => {
+      const cases = await this.evalSets.createCasesBatchTx(
+        tx,
+        req.targetSetId,
+        plan.map((entry) => ({ ...entry, goldDocRefs: [], tags: [] })),
+      );
+      // 「已进评测集」与用例同生共死：回滚掉用例却留下标志，会让一个其实没入集的簇看起来已完事。
+      await this.repo.markEnteredEvalSetTx(tx, req.clusterId, now);
+      return cases;
+    });
+    return { created: created.length, caseIds: created.map((c) => c.id) };
   }
 
   /**

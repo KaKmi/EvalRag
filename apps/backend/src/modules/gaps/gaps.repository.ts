@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
-import type { DB } from "../../platform/persistence/persistence.module";
+import type { DB, Tx } from "../../platform/persistence/persistence.module";
 import type { GapClusterStatus, GapItemSource, GapRootCause } from "./gap.constants";
 import { GapCentroidStaleError, meanVector } from "./gap-clustering";
 import { gapClusters, gapItems, gapWatermarks, type GapClusterRow, type GapItemRow } from "./schema";
@@ -728,7 +728,16 @@ export class GapsRepository implements GapCollectorStore {
    * 幂等：已标记过就保留首次时间，不刷新（它回答的是「什么时候进的」）。
    */
   async markEnteredEvalSet(id: string, now: Date): Promise<void> {
-    await this.db
+    await this.db.transaction(async (tx) => this.markEnteredEvalSetTx(tx, id, now));
+  }
+
+  /**
+   * 同上，只是**走调用方的事务**：`GapPromoteService.promote` 要让「整批用例落库」与
+   * 「打这个标志」同生共死——半批入集却已经标成「已进评测集」，簇看起来完事了，
+   * 剩下那些问题再也不会有人回来处理。
+   */
+  async markEnteredEvalSetTx(tx: Tx, id: string, now: Date): Promise<void> {
+    await tx
       .update(gapClusters)
       .set({ enteredEvalSetAt: now, updatedAt: now })
       .where(and(eq(gapClusters.id, id), isNull(gapClusters.enteredEvalSetAt)));
