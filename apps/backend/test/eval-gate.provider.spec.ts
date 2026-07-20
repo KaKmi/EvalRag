@@ -10,7 +10,15 @@ import { EvalGateProviderRegistrar } from "../src/modules/eval-runs/eval-gate.pr
  * 「改进」会被报成「回退」、真回退反而显示干净，而**没有任何既有测试会红**。
  */
 
-const NOW_ISH = new Date("2026-07-18T12:00:00Z");
+/**
+ * 「新鲜」run 的时间戳，**必须相对真实 now**，不能写死日历日期。
+ *
+ * `resolve()` 内部用真实 `new Date()` 与 `finishedAt` 比 `GATE_FRESHNESS_MS`（24h）。
+ * 若这里钉死某一天，测试跑在那天之后 >24h 就会让本该「新鲜」的夹具变 STALE，
+ * 于是「候选优于基线 → 零 issue」这条平白多出一个 `EVAL_GATE_STALE_RUN`（时间炸弹）。
+ * 取「1 分钟前」：无歧义地新鲜，且不依赖运行日期。STALE 分支由 §超 24h 的用例单独覆盖。
+ */
+const NOW_ISH = new Date(Date.now() - 60 * 1000);
 
 type Row = {
   id: string;

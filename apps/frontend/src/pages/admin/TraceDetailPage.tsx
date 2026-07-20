@@ -7,7 +7,13 @@ import type {
   TraceQualityDetail,
   TraceStatus,
 } from "@codecrush/contracts";
-import { getEvalCaseRefs, getTrace, getTraceQuality, scoreTraceNow } from "../../api/client";
+import {
+  createGapItem,
+  getEvalCaseRefs,
+  getTrace,
+  getTraceQuality,
+  scoreTraceNow,
+} from "../../api/client";
 import AddToEvalSetModal from "./AddToEvalSetModal";
 import ReplayModal, { type ReplaySource } from "./ReplayModal";
 import {
@@ -31,6 +37,10 @@ const STATUS_TAG: Record<TraceStatus, { label: string; bg: string; c: string; bd
 };
 const fmtMs = (ms: number): string =>
   ms >= 1000 ? (ms / 1000).toFixed(2) + "s" : Math.round(ms) + "ms";
+
+/** `CreateGapItemRequestSchema.question` 的上限（契约 `.max(500)`）。 */
+const GAP_QUESTION_MAX = 500;
+
 /**
  * 原型 §18.D：「面板『评分中』；轮询 5s×6」——两个数字都来自原型，不要随手调。
  *
@@ -59,6 +69,8 @@ export default function TraceDetailPage() {
   // B1/F2：这条 trace 已进过哪些评测集——决定按钮是「+ 加入评测集」还是「已在评测集 · 查看」。
   const [caseRefs, setCaseRefs] = useState<EvalCaseRef[]>([]);
   const [addOpen, setAddOpen] = useState(false);
+  /** B2a Task 8：「+ 加入问题池」进行中（防连点——重复提交会撞唯一索引，白跑一次往返）。 */
+  const [pooling, setPooling] = useState(false);
   // B1/F3：「立即评测」入队中（防连点）与「轮询到顶仍无结果」。
   const [scoreBusy, setScoreBusy] = useState(false);
   const [pollTimedOut, setPollTimedOut] = useState(false);
@@ -169,7 +181,9 @@ export default function TraceDetailPage() {
     // 后台核对拿到权威数据；但**不允许它把刚加的这条抹掉**——重取失败或读到旧快照时
     // 若直接覆盖，用户会看着「已成功」的 toast、按钮却退回「+ 加入评测集」，转头再点一次造重复用例。
     void getEvalCaseRefs(traceId)
-      .then((refs) => setCaseRefs(refs.some((r) => r.setId === setId) ? refs : [...refs, optimistic]))
+      .then((refs) =>
+        setCaseRefs(refs.some((r) => r.setId === setId) ? refs : [...refs, optimistic]),
+      )
       .catch(() => undefined);
   };
 
@@ -193,6 +207,62 @@ export default function TraceDetailPage() {
       /* ignore */
     }
     setJsonOpen(true);
+  };
+
+  /**
+   * 「+ 加入问题池」（原型 `:388`，文案照 §19.2 `:753`）。
+   *
+   * `traceStartTime` **必须带上**：后端读不了 trace（`gaps → traces` 是禁止的边，021 决策 B
+   * 规定走前端组合），而这一屏手里就有根 chain span 的 startTime——它正是
+   * `codecrush_traces.start_time` 的定义。不带则该样本只进累计 `freq`、不进 `freq30d`，
+   * 屏5 会把一条人刚断言「这是真实流量」的样本显示成「近30天 0」，读起来像陈旧流量。
+   */
+  const addToPool = async () => {
+    if (!data) return;
+    const question = data.meta.userInput.trim();
+    /**
+     * 本地先挡契约的长度上限。不挡的话 `client.ts` 的 `postJson` 会在**发请求前**同步抛
+     * ZodError，而 `ZodError.message` 是一坨序列化的 issues 数组——用户在 toast 里看到
+     * 一段 JSON，而这一屏又没有可编辑问题的输入框，等于死路。
+     * 线上 `ChatRequestSchema.query` 没有长度上限，所以 600 字的真实提问是会出现的。
+     * （同 `AddToEvalSetModal.tsx:89-99` 记过的同一个坑。）
+     */
+    if (question.length > GAP_QUESTION_MAX) {
+      message.error(`问题超过 ${GAP_QUESTION_MAX} 字，无法直接加入问题池`);
+      return;
+    }
+    // 未来时间会被后端 400（它只会给出一句面向开发的时区提示）。时钟偏移是真实存在的，
+    // 与其把这种错误弹给管理员，不如干脆不带这个字段——代价只是该样本不进 30 天窗口。
+    const startTime = rootSpanOf(spans)?.startTime;
+    const usableStartTime =
+      startTime && new Date(startTime).getTime() <= Date.now() ? startTime : undefined;
+    setPooling(true);
+    try {
+      const result = await createGapItem({
+        question,
+        source: "manual_trace",
+        sourceTraceId: data.traceId,
+        ...(usableStartTime ? { traceStartTime: usableStartTime } : {}),
+      });
+      if (result.joinedExisting) {
+        // 原型 `:648`：命中既有簇不是错误，是有用的信息——告诉他这问题已经被记了多少次，
+        // 并给一条能点过去的路。用 info 而不是 error/warning。
+        message.info({
+          content: (
+            <span>
+              该问题已在缺口『{result.representativeQuestion}』(×{result.freq}) 中 ·{" "}
+              <a onClick={() => nav("/admin/gaps")}>查看</a>
+            </span>
+          ),
+        });
+      } else {
+        message.success("已加入问题池");
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "加入问题池失败");
+    } finally {
+      setPooling(false);
+    }
   };
 
   const headBtn: CSSProperties = {
@@ -258,10 +328,7 @@ export default function TraceDetailPage() {
           {st.label}
         </span>
         <div style={{ flex: 1 }} />
-        {/*
-          原型 §10 顶部操作组（`:388` 顺序：加入评测集 → 加入问题池 → 重放 → 跳 Prompt → 复制）。
-          「+ 加入问题池」属屏5 问题池，留 B2；此处只做「加入评测集」与既有「重放」。
-        */}
+        {/* 原型 §10 顶部操作组，顺序照 `:388`：加入评测集 → 加入问题池 → 重放 → 跳 Prompt → 复制。 */}
         {caseRefs.length > 0 ? (
           // 原型 §17.6 `:647`「已在集:按钮变「已在评测集·查看」」
           <Button onClick={() => nav("/admin/eval/sets")}>已在评测集 · 查看</Button>
@@ -276,13 +343,23 @@ export default function TraceDetailPage() {
             </span>
           </Tooltip>
         )}
+        {/*
+          021 决策 B：入池入口在**前端组合**——这一屏调 `POST /api/gaps/items`，
+          后端不会出现 `traces → gaps` 或 `eval-runs → gaps` 的反向边（eslint Boundary ⑤ 机械拦）。
+        */}
+        <Tooltip title={meta.userInput?.trim() ? "" : "trace 缺少用户问题，无法加入问题池"}>
+          <span>
+            <Button
+              disabled={!meta.userInput?.trim() || pooling}
+              loading={pooling}
+              onClick={addToPool}
+            >
+              + 加入问题池
+            </Button>
+          </span>
+        </Tooltip>
         <Tooltip title={meta.agentId ? "" : "trace 缺少应用信息，无法重放"}>
-          <Button
-            type="primary"
-            ghost
-            disabled={!meta.agentId}
-            onClick={() => setReplayOpen(true)}
-          >
+          <Button type="primary" ghost disabled={!meta.agentId} onClick={() => setReplayOpen(true)}>
             ↻ 重放
           </Button>
         </Tooltip>

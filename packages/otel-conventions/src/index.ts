@@ -18,6 +18,10 @@ export const RAG = {
   MULTI_RECALL: "rag.multi",
   CHUNK_SCORES: "rag.chunk.scores",
   CITATION_IDS: "rag.citation.ids",
+  // B2a：改写节点的产出（落 rewrite 节点 span）。问题池据它判「指代是否被消解」——
+  // 非首轮且改写结果实质等于原问题 = 改写没消解成功（021 决策 F）。
+  // 之所以要一等属性而不是从 codecrush.io.output 解 JSON：后者根本没打在 rewrite 子 span 上。
+  REWRITE_QUERY: "rag.rewrite.query",
   // M9：意图路由（落 intent 节点 span，供详情面板显示「意图 → 路由到 X 库」）
   INTENT: "rag.intent",
   ROUTE_KB_NAMES: "rag.route.kb_names",

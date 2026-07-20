@@ -130,5 +130,52 @@ export default tseslint.config(
       ],
     },
   },
+  // Boundary ⑤：gaps 是依赖顶点（docs/design/021 决策 A）——它 import 别人，别人不 import 它。
+  //
+  // 为什么单独给这一条上机械门禁：`gaps → eval-runs`（进评测集要服务端批量建 gold 用例）已是既定边，
+  // 于是任何 `eval-runs → gaps` 都直接成环。而最自然的写法恰恰会踩：屏3「加入问题池」按钮长在
+  // eval-runs 的页面上，后端顺手调一下 gaps 就闭环了——所以 021 决策 B 规定它走前端组合。
+  // 这条规则就是那个决策的执行者。
+  //
+  // 注意它**不是**通用模块 DAG 强制器：本仓没装 eslint-plugin-boundaries，其余依赖边靠
+  // docs/design/003 的边表 + review 守（见 003「依赖规则的真实强制力」）。
+  //
+  // 作用范围是**整个 apps/backend/src**，不是只有 modules/：`gaps → platform/{clickhouse,persistence,queue}`
+  // 是允许边，所以 `platform → gaps` 同样成环，而 platform 恰好不在 modules/ 下。
+  //
+  // 三处豁免，都是**聚合根**——按定义就要引用每一个模块，不是域代码在建依赖：
+  //   ① gaps 域自身；
+  //   ② `app.module.ts`：必须 import GapsModule 才能注册；
+  //   ③ `db/schema.ts`：Drizzle 查询侧的类型聚合点，迁移流程（drizzle/README.md 第 3 步）
+  //      明令新表要同步到这里。
+  // 「任何文件都不许 import gaps」写成规则是**不可满足**的，这三处就是原因。
+  {
+    files: ["apps/backend/src/**/*.ts"],
+    ignores: [
+      "apps/backend/src/modules/gaps/**/*.ts",
+      "apps/backend/src/app.module.ts",
+      "apps/backend/src/db/schema.ts",
+    ],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              // 必须用 `**/gaps` + `**/gaps/**` 这种任意深度的写法。
+              // 反例（本规则第一版就踩了）：`["../gaps", "../gaps/*", "**/modules/gaps/*"]`
+              // 只拦得住深度恰为 1 的相对路径——`eval-runs/foo/bar.ts` 里写
+              // `../../gaps/gaps.service` 会畅通无阻，而 `**/modules/gaps/*` 对相对路径
+              // 根本不匹配（import 字符串里没有 "modules/" 这一段）。
+              // 后端模块下有 16 个子目录，等于门禁对绝大多数文件失效。
+              group: ["**/gaps", "**/gaps/**"],
+              message:
+                "gaps 是依赖顶点（docs/design/021 决策 A）：它 import 别人，别人不得 import 它——反向依赖会成环",
+            },
+          ],
+        },
+      ],
+    },
+  },
   prettier,
 );

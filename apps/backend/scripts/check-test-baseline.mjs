@@ -40,8 +40,15 @@ import { readFileSync } from "node:fs";
  * 别把它当作覆盖率的证据。
  */
 const BASELINES = {
-  db: { suites: 11, tests: 82, script: "test:db" },
-  infra: { suites: 7, tests: 91, script: "test:infra" },
+  // db：B2a 加 test/gaps.db.spec.ts（8 条）后**实测** 12 suites / 90 tests。
+  // 断言是 `>=`，所以基线必须写**实测值**而不是估算：写低 1 就等于给「第一条用例悄悄消失」放行
+  // ——本波初版正是估成 87（实测 88），被 peer review 抓出，随后又因补两条跨簇/跨来源用例变 90。
+  // Task 5 又加 1 条（last_ts 纳秒往返，钉死迁移 0027）⇒ 12/91。
+  // Task 6 加 test/gaps.service.db.spec.ts（peer review 后补到 25 条）⇒ 13/116。
+  db: { suites: 13, tests: 118, script: "test:db" },
+  // infra：B2a Task 5 加 test/gap-pool-isolation.spec.ts（5 条）后 8 suites / 96 tests；
+  // Task 6 再加 test/gaps.e2e.spec.ts（10 条 HTTP 全链路）⇒ 9 suites / 106 tests。
+  infra: { suites: 9, tests: 106, script: "test:infra" },
 };
 
 const [suiteKey, resultFile] = process.argv.slice(2);

@@ -1,10 +1,11 @@
-import { Alert, Button, DatePicker, Input, Select, Space, Spin, Tooltip, message } from "antd";
+import { Alert, Button, DatePicker, Flex, Input, Select, Space, Spin, Tooltip, message } from "antd";
 import { ApiOutlined, ClockCircleOutlined, DollarOutlined, DownloadOutlined, FallOutlined, MessageOutlined, QuestionCircleOutlined, RiseOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import type {
   Application,
   MetricsAppResponse,
   MetricsOverviewResponse,
   MetricsStageKey,
+  QualityOverviewResponse,
 } from "@codecrush/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -14,12 +15,22 @@ import {
   getApplicationMetrics,
   getApplications,
   getMetricsOverview,
+  getQualityOverview,
 } from "../../api/client";
 import { MetricChart } from "../../components/MetricChart";
+import { QualityMetricCard } from "./QualityMetricCard";
+import { buildMetricTraceLink } from "./qualityViewModel";
 
 type RangePreset = "today" | "7d" | "custom";
 
 const RATE_ALERT_THRESHOLD = 0.05;
+/** 屏1 的三分指标（与 `QualityPage.tsx` 的 METRICS 同序：忠实度 / 相关性 / 精确率）。 */
+const QUALITY_METRICS = [
+  { key: "faithfulness", label: "忠实度" },
+  { key: "answerRelevancy", label: "回答相关性" },
+  { key: "contextPrecision", label: "上下文精确率" },
+] as const;
+
 const METRIC_COLORS = { blue: "#1677ff", green: "#16a34a", orange: "#f59e0b", red: "#ef4444", purple: "#7c3aed", cyan: "#0891b2" };
 const STAGE_LABELS: Record<MetricsStageKey, string> = {
   rewrite: "问题改写",
@@ -110,6 +121,49 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
 
   const range = useMemo(() => queryRange(preset, fromDate, toDate), [preset, fromDate, toDate]);
+
+  /**
+   * B2a Task 10：答案质量摘要行（原型 §17.1）。独立 `try/catch` + 独立 state ——
+   * 质量读模型走的是 ClickHouse 的另一条链路，它挂掉**不该**让整个运行看板白屏。
+   */
+  const [quality, setQuality] = useState<QualityOverviewResponse | null>(null);
+  const [qualityFailed, setQualityFailed] = useState(false);
+
+  /**
+   * 契约的 `superRefine` 拒绝**超过 30 天**的窗口（`quality.ts:94`）。看板支持自定义更长的范围，
+   * 所以这里把质量行的窗口**独立收敛到近 30 天**并在行内说明——直接把看板的范围透传过去，
+   * 会在客户端 zod 就抛 ZodError（一坨 JSON），而这一行本来只是个摘要。
+   */
+  const qualityQuery = useMemo(() => {
+    const to = new Date(range.to);
+    const from = new Date(range.from);
+    const maxSpanMs = 30 * 24 * 60 * 60 * 1000;
+    const clamped = to.getTime() - from.getTime() > maxSpanMs;
+    return {
+      from: (clamped ? new Date(to.getTime() - maxSpanMs) : from).toISOString(),
+      to: to.toISOString(),
+      clamped,
+    };
+  }, [range]);
+
+  useEffect(() => {
+    if (preset === "custom" && (!fromDate || !toDate || fromDate > toDate)) return;
+    let live = true;
+    setQualityFailed(false);
+    getQualityOverview({ from: qualityQuery.from, to: qualityQuery.to })
+      .then((response) => {
+        if (live) setQuality(response);
+      })
+      .catch(() => {
+        if (live) {
+          setQuality(null);
+          setQualityFailed(true);
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [qualityQuery, preset, fromDate, toDate]);
 
   useEffect(() => {
     let live = true;
@@ -316,6 +370,84 @@ export default function DashboardPage() {
             return card.tooltip ? <Tooltip key={card.label} title={card.tooltip}>{content}</Tooltip> : content;
           })}
         </div>
+
+        {/*
+          B2a Task 10：答案质量摘要行（原型 §17.1）。位置在第 1 行 6 卡与第 2 行之间。
+          卡片语言沿用同页既有的白底 / 1px #e8edf3 / radius 12 / 同款阴影，不引入第二种。
+          三分卡本体复用 `QualityMetricCard`——阈值/样本不足/未评的判定只此一处。
+        */}
+        {!qualityFailed && quality && (
+          <div
+            style={{
+              background: "#fff",
+              border: "1px solid #e8edf3",
+              borderRadius: 12,
+              padding: "18px 20px",
+              boxShadow: "0 4px 18px rgba(15,23,42,.04)",
+              marginBottom: 16,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                marginBottom: 12,
+              }}
+            >
+              <div>
+                <span style={{ fontSize: 15, fontWeight: 600 }}>答案质量</span>
+                {qualityQuery.clamped && (
+                  <span style={{ marginLeft: 8, fontSize: 12, color: "#94a3b8" }}>
+                    仅统计最近 30 天（评测窗口上限）
+                  </span>
+                )}
+              </div>
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={() => navigate("/admin/quality")}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    navigate("/admin/quality");
+                  }
+                }}
+                style={{ fontSize: 12, color: "#1677ff", cursor: "pointer" }}
+              >
+                查看详情 →
+              </span>
+            </div>
+            {!quality.meta.enabled || quality.meta.evaluatedCount === 0 ? (
+              // 原型 §19.2 `:761` 逐字。**不是**渲染一排 0——未开启与「全 0 分」是两件事。
+              <div style={{ fontSize: 13, color: "rgba(0,0,0,.45)" }}>
+                在线评测未开启 — 开启后将自动抽样评估真实问答质量，不影响线上性能 ·{" "}
+                <a onClick={() => navigate("/admin/quality")}>去设置</a>
+              </div>
+            ) : (
+              <Flex gap={12} wrap>
+                {QUALITY_METRICS.map(({ key, label }) => (
+                  <QualityMetricCard
+                    key={key}
+                    compact
+                    label={label}
+                    metric={quality.metrics[key]}
+                    testId={`dash-metric-${key}`}
+                    onClick={() =>
+                      navigate(
+                        buildMetricTraceLink(
+                          key,
+                          quality.metrics[key].threshold,
+                          qualityQuery.from,
+                        ),
+                      )
+                    }
+                  />
+                ))}
+              </Flex>
+            )}
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0,2fr) minmax(260px,1fr)", gap: 16 }}>
           <div style={{ background: "#fff", border: "1px solid #e8edf3", borderRadius: 12, padding: "18px 20px", boxShadow: "0 4px 18px rgba(15,23,42,.04)" }}>

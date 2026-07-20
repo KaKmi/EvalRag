@@ -8,6 +8,9 @@ vi.mock("../../api/client", () => ({
   getApplications: vi.fn(),
   getMetricsOverview: vi.fn(),
   getApplicationMetrics: vi.fn(),
+  // B2a Task 10：答案质量摘要行。**漏加这一个**会让该导出为 undefined，
+  // 本文件既有用例会在渲染时全炸——工厂是穷举的，不是 partial mock。
+  getQualityOverview: vi.fn(),
 }));
 
 const mocked = vi.mocked(client);
@@ -104,10 +107,45 @@ const appMetrics = {
   },
 };
 
+/** 屏1 的 overview 响应（只造摘要行用得到的字段）。 */
+function qualityOverview(over: {
+  enabled?: boolean;
+  evaluatedCount?: number;
+  sampleCount?: number;
+  previousDelta?: number | null;
+} = {}) {
+  const sampleCount = over.sampleCount ?? 120;
+  const metric = (value: number, low: boolean) => ({
+    value,
+    threshold: 85,
+    low,
+    sampleCount,
+    previousDelta: over.previousDelta === undefined ? 3 : over.previousDelta,
+  });
+  return {
+    meta: {
+      enabled: over.enabled ?? true,
+      evaluatedCount: over.evaluatedCount ?? 120,
+      judgeVersion: "online-v1",
+      lagHours: 0,
+      backlog: 0,
+      budgetReduced: false,
+    },
+    metrics: {
+      faithfulness: metric(91, false),
+      answerRelevancy: metric(88, false),
+      contextPrecision: metric(70, true),
+    },
+    trend: [],
+    perApp: [],
+  };
+}
+
 beforeEach(() => {
   mocked.getApplications.mockResolvedValue([]);
   mocked.getMetricsOverview.mockResolvedValue(metrics);
   mocked.getApplicationMetrics.mockResolvedValue(appMetrics);
+  mocked.getQualityOverview.mockResolvedValue(qualityOverview() as never);
 });
 
 it("loads real metrics and does not present reserved zero cost as actual spend", async () => {
@@ -184,4 +222,63 @@ it("drills repair metrics into the exact signal/model trace filter", async () =>
   expect(screen.getByTestId("location").textContent).toContain("signal=repair");
   expect(screen.getByTestId("location").textContent).toContain("agentId=app-1");
   expect(screen.getByTestId("location").textContent).toContain("model=deepseek-chat");
+});
+
+
+// ───────────────── B2a Task 10：答案质量摘要行（原型 §17.1 / :226 / :761） ─────────────────
+
+function renderDashboard() {
+  return render(
+    <MemoryRouter>
+      <Routes>
+        <Route
+          path="*"
+          element={
+            <>
+              <DashboardPage />
+              <LocationProbe />
+            </>
+          }
+        />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+it("渲染「答案质量」摘要行，并可跳屏1", async () => {
+  renderDashboard();
+  expect(await screen.findByText("答案质量")).toBeInTheDocument();
+  expect(await screen.findByTestId("dash-metric-faithfulness")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("查看详情 →"));
+  expect(screen.getByTestId("location").textContent).toContain("/admin/quality");
+});
+
+it("样本不足（n<20）时显示「样本不足」且不显 Δ（原型 :226）", async () => {
+  mocked.getQualityOverview.mockResolvedValue(qualityOverview({ sampleCount: 5 }) as never);
+  renderDashboard();
+  await screen.findByTestId("dash-metric-faithfulness");
+
+  expect(screen.getAllByText("样本不足").length).toBeGreaterThan(0);
+  // Δ 是「▲/▼ N」形态；小样本下一个都不该出现（避免小样本误读）。
+  expect(screen.queryByText(/[▲▼]\s*\d/)).not.toBeInTheDocument();
+});
+
+it("在线评测未开启时给原型 :761 的空态，而不是一排 0", async () => {
+  mocked.getQualityOverview.mockResolvedValue(
+    qualityOverview({ enabled: false, evaluatedCount: 0 }) as never,
+  );
+  renderDashboard();
+  await screen.findByText("答案质量");
+
+  expect(await screen.findByText(/在线评测未开启/)).toBeInTheDocument();
+  expect(screen.queryByTestId("dash-metric-faithfulness")).not.toBeInTheDocument();
+});
+
+it("质量行失败不拖垮整页（其余看板照常渲染）", async () => {
+  mocked.getQualityOverview.mockRejectedValue(new Error("boom"));
+  renderDashboard();
+
+  expect(await screen.findByText("问答量与异常趋势")).toBeInTheDocument();
+  expect(await screen.findByText("1,284")).toBeInTheDocument();
 });

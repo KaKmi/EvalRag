@@ -17,8 +17,13 @@ import { ReplayController } from "./replay.controller";
 import { ReplayService } from "./replay.service";
 
 /**
- * 018 决策 A：`eval-runs` 是依赖顶点 —— 它 import 别人，别人不 import 它。
- * 唯一允许的新依赖方向：`eval-runs → {chat, evaluations, applications}`
+ * 018 决策 A 曾把 `eval-runs` 定为依赖顶点。**021 决策 A 起它不再是顶点**：
+ * `gaps → eval-runs` 是既定边（屏5 [进评测集] / 屏2「从坏样本生成」要在服务端批量建 gold 用例，
+ * 见 `eslint.config.mjs` Boundary ⑤ 的注释），故本模块 `exports` 了 `EvalSetsService`。
+ * **反向的 `eval-runs → gaps` 依然禁止**——那会立刻成环，eslint Boundary ⑤ 会拦下；
+ * 屏3 的「加入问题池」按钮因此走前端组合（021 决策 B），不是后端直调 gaps。
+ *
+ * 它 import 谁这一半没变：`eval-runs → {chat, evaluations, applications}`
  *  · ChatModule 提供 `OrchestrationService.runForEvaluation`（与线上同一编排路径）；
  *  · EvaluationsModule 只导出 `EvaluationJudgeService`（怎么判分是它的域知识）；
  *  · ApplicationsModule 提供 `resolveForTest`（preview=true 的显式版本解析）；
@@ -40,5 +45,8 @@ import { ReplayService } from "./replay.service";
     GoldStaleNotifier, // B1/F4：onModuleInit 注册 gold 过期检测器
     ReplayService, // F7：单条重放（SSE + 即时判分）
   ],
+  // 只导出 `EvalSetsService`（`gaps` 的 [进评测集] 需要 `createCase`）。**不导出 run 侧的任何东西**：
+  // 发起/停止评测是本域的编排入口，导出去等于把「谁能发起 run」这条边界交给调用方自觉。
+  exports: [EvalSetsService],
 })
 export class EvalRunsModule {}

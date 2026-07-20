@@ -47,6 +47,7 @@ import {
   importEvalCases,
   updateEvalCase,
 } from "../../api/client";
+import BadSampleToEvalSetModal from "./BadSampleToEvalSetModal";
 import { downloadCsv as downloadCsvFile } from "../../utils/csv";
 import { GoldRefSelector } from "./GoldRefSelector";
 import { GOLD_DOC_MAX } from "./evalShared";
@@ -208,6 +209,7 @@ export default function EvalSetsPage() {
   const [cases, setCases] = useState<Record<string, EvalCase[]>>({});
   const [expanded, setExpanded] = useState<string[]>([]);
   const [selectedCases, setSelectedCases] = useState<Record<string, string[]>>({});
+  const [badSampleOpen, setBadSampleOpen] = useState(false);
 
   const kbName = useCallback(
     (id: string) => kbs.find((kb) => kb.id === id)?.name ?? "未知知识库",
@@ -262,8 +264,10 @@ export default function EvalSetsPage() {
             管理 gold 题库；渐进式标注：先只标 gold answer（能测正确率），gold docs 后补
           </Text>
         </div>
+        {/* 按钮顺序照原型 `:238`：导入 CSV / 从坏样本生成 / ＋新建评测集。 */}
         <Space>
           <ImportModal sets={sets} onDone={refreshSet} />
+          <Button onClick={() => setBadSampleOpen(true)}>从坏样本生成</Button>
           <CreateSetModal kbs={kbs} onCreated={reload} />
         </Space>
       </Flex>
@@ -284,6 +288,20 @@ export default function EvalSetsPage() {
         onChanged={refreshSet}
         onDeleted={reload}
         onStarted={(runId) => navigate(`/admin/eval/runs/${runId}`)}
+      />
+
+      {/*
+        从这里打开时**不预选簇**——第①步给出问题池全部缺口供选择。
+        成功后展开目标集并刷新（原型 `:596`：「完成 → toast + 跳该集展开」）。
+      */}
+      <BadSampleToEvalSetModal
+        open={badSampleOpen}
+        onClose={() => setBadSampleOpen(false)}
+        onDone={(setId) => {
+          setBadSampleOpen(false);
+          setExpanded((prev) => (prev.includes(setId) ? prev : [...prev, setId]));
+          void refreshSet(setId);
+        }}
       />
     </div>
   );

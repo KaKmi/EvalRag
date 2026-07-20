@@ -1,4 +1,32 @@
 import {
+  CreateGapItemRequestSchema,
+  type CreateGapItemRequest,
+  CreateGapItemResponseSchema,
+  type CreateGapItemResponse,
+  DraftGoldRequestSchema,
+  type DraftGoldRequest,
+  DraftGoldResponseSchema,
+  type DraftGoldResponse,
+  PromoteGapRequestSchema,
+  type PromoteGapRequest,
+  PromoteGapResponseSchema,
+  type PromoteGapResponse,
+  GapClusterSchema,
+  type GapCluster,
+  type GapClusterStatus,
+  type GapRootCause,
+  GapItemSchema,
+  type GapItem,
+  GapListResponseSchema,
+  type GapListResponse,
+  GapSummarySchema,
+  type GapSummary,
+  MergeGapRequestSchema,
+  type MergeGapRequest,
+  SplitGapRequestSchema,
+  type SplitGapRequest,
+  UpdateGapRootCauseRequestSchema,
+  type UpdateGapRootCauseRequest,
   AgentListResponseSchema,
   AgentSchema,
   type Agent,
@@ -1036,3 +1064,96 @@ export async function getEvalCompare(a: string, b: string): Promise<EvalCompareR
   }
   return EvalCompareResponseSchema.parse(await resp.json());
 }
+
+// ───────────────────────── B2a 屏5 知识缺口 / 问题池 ─────────────────────────
+
+const gapPath = (id: string) => `/api/gaps/${encodeURIComponent(id)}`;
+
+/** 屏5 列表。状态/根因两个筛选走 URL 参数（原型 §17.5）。 */
+export function getGaps(query: {
+  status?: GapClusterStatus;
+  rootCause?: GapRootCause;
+  limit?: number;
+  offset?: number;
+}): Promise<GapListResponse> {
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.rootCause) params.set("rootCause", query.rootCause);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.offset !== undefined) params.set("offset", String(query.offset));
+  const qs = params.toString();
+  return getJson(`/api/gaps${qs ? `?${qs}` : ""}`, GapListResponseSchema);
+}
+
+export const getGapSummary = (): Promise<GapSummary> =>
+  getJson("/api/gaps/summary", GapSummarySchema);
+
+export const getGapItems = (id: string): Promise<GapItem[]> =>
+  getJson(`${gapPath(id)}/items`, GapItemSchema.array());
+
+/** 手动入池（Trace 详情 / 屏3 调用；021 决策 B 前端组合）。 */
+export const createGapItem = (req: CreateGapItemRequest): Promise<CreateGapItemResponse> =>
+  postJson("/api/gaps/items", req, CreateGapItemRequestSchema, CreateGapItemResponseSchema);
+
+/**
+ * 三个状态迁移端点都是**无 body 的 POST**，故走 `applicationActionJson` 而不是 `postJson`
+ * ——后者要求一个请求 schema，而前端不 import `zod`（边界：只 import `@codecrush/contracts`），
+ * 现造一个空对象 schema 就得把 zod 拉进来。顺带把后端 400（非法迁移）的中文文案透给 toast。
+ */
+const gapAction = (id: string, action: string): Promise<GapCluster> =>
+  applicationActionJson(`${gapPath(id)}/${action}`, { method: "POST" }, (d) =>
+    GapClusterSchema.parse(d),
+  );
+
+export const ignoreGap = (id: string): Promise<GapCluster> => gapAction(id, "ignore");
+export const reopenGap = (id: string): Promise<GapCluster> => gapAction(id, "reopen");
+export const routeGapToRetrieval = (id: string): Promise<GapCluster> =>
+  gapAction(id, "route-retrieval");
+
+export const updateGapRootCause = (
+  id: string,
+  req: UpdateGapRootCauseRequest,
+): Promise<GapCluster> =>
+  patchJson(`${gapPath(id)}/root-cause`, req, UpdateGapRootCauseRequestSchema, GapClusterSchema);
+
+/**
+ * 拆分/合并的响应形状没有进契约包（它们只被本页消费，不是跨端共享的领域对象），
+ * 故用局部结构化 schema 而不是 zod——同 `ZodSchema<T>` 那条边界注释的理由。
+ */
+const newClusterIdSchema: ZodSchema<{ newClusterId: string }> = {
+  parse(input) {
+    const id = (input as { newClusterId?: unknown } | null)?.newClusterId;
+    if (typeof id !== "string") throw new Error("拆分响应缺少 newClusterId");
+    return { newClusterId: id };
+  },
+};
+
+const mergeResultSchema: ZodSchema<{ targetClusterId: string; sourceSoftDeleted: boolean }> = {
+  parse(input) {
+    const body = input as { targetClusterId?: unknown; sourceSoftDeleted?: unknown } | null;
+    if (typeof body?.targetClusterId !== "string" || typeof body.sourceSoftDeleted !== "boolean") {
+      throw new Error("合并响应格式不符");
+    }
+    return { targetClusterId: body.targetClusterId, sourceSoftDeleted: body.sourceSoftDeleted };
+  },
+};
+
+export const splitGap = (id: string, req: SplitGapRequest): Promise<{ newClusterId: string }> =>
+  postJson(`${gapPath(id)}/split`, req, SplitGapRequestSchema, newClusterIdSchema);
+
+export const mergeGap = (
+  id: string,
+  req: MergeGapRequest,
+): Promise<{ targetClusterId: string; sourceSoftDeleted: boolean }> =>
+  postJson(`${gapPath(id)}/merge`, req, MergeGapRequestSchema, mergeResultSchema);
+
+/**
+ * 「从坏样本生成」第②步的行内草拟：**同步单条**，一次请求一次 LLM 调用。
+ * 调用方须自行限流（Modal 里是最多 3 条并发），别让 N 行同时打爆判官模型。
+ */
+export const draftGapGold = (req: DraftGoldRequest): Promise<DraftGoldResponse> =>
+  postJson("/api/gaps/draft-gold", req, DraftGoldRequestSchema, DraftGoldResponseSchema);
+
+/** 批量沉淀成 gold 用例（状态恒「待审核」），成功后后端给簇打「已进评测集」标志。 */
+export const promoteGapToEvalSet = (req: PromoteGapRequest): Promise<PromoteGapResponse> =>
+  postJson("/api/gaps/promote", req, PromoteGapRequestSchema, PromoteGapResponseSchema);

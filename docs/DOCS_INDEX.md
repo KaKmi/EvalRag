@@ -5,8 +5,8 @@
 | Category | # | Status | Name | Description | Last Modified | Path |
 |----------|---|--------|------|-------------|---------------|------|
 | design | 001 | draft | CodeCrushBot RAG 平台架构 | 通用 RAG 平台的系统架构：NestJS 薄编排 + Postgres/pgvector + OTel→Collector→ClickHouse 可观测，本地优先、阿里云就绪。 | 2026-07-11 | [001](docs/design/001-rag-platform-architecture.md) |
-| design | 002 | draft | RAG 平台实现路线图（模块级） | 按依赖排序的模块级实现路线图：地基→可观测→用户/骨架→可配置域→问答/追踪，逐波用 /ship:design 拆细 spec。 | 2026-07-13 | [002](docs/design/002-implementation-roadmap.md) |
-| design | 003 | draft | 代码组织与工程架构（M0） | monorepo 布局、NestJS 模块边界与依赖规则、端口/适配器、Zod 契约、Drizzle/ClickHouse 分工、docker-compose 与约定。 | 2026-07-11 | [003](docs/design/003-code-organization.md) |
+| design | 002 | draft | RAG 平台实现路线图（模块级） | 按依赖排序的模块级实现路线图：地基→可观测→用户/骨架→可配置域→问答/追踪，逐波用 /ship:design 拆细 spec。 | 2026-07-19 | [002](docs/design/002-implementation-roadmap.md) |
+| design | 003 | draft | 代码组织与工程架构（M0） | monorepo 布局、NestJS 模块边界与依赖规则、端口/适配器、Zod 契约、Drizzle/ClickHouse 分工、docker-compose 与约定。 | 2026-07-19 | [003](docs/design/003-code-organization.md) |
 | design | 004 | draft | 轻量级 Trace 可观测（自研 Langfuse 式） | 自研轻量 Langfuse：Session>Trace>Observation 模型、OTLP 结束即写、大 payload offload、首期以 VIEW 读模型跑通功能，后续按需演进物化层；本版聚焦 RAG 节点。 | 2026-07-05 | [004](docs/design/004-trace-observability.md) |
 | design | 005 | draft | 用户/认证（M1） | M1 身份边界：users 叶子 + auth 横切、argon2id、JWT HS256、全局 default-deny guard；四条数据流图与失败模式。 | 2026-07-05 | [005](docs/design/005-user-auth.md) |
 | design | 006 | draft | M2 前后端页面骨架 | M2 把原型 15 屏 1:1 还原为 React+antd 路由化骨架 + NestJS 各域模块 skeleton + Zod 契约扩展 + OpenAPI 自动生成 + SSE 客户端骨架；mock 前端硬编码，真实逻辑 M3+ 按依赖填入。 | 2026-07-06 | [006](docs/design/006-m2-app-shell-skeleton.md) |
@@ -20,6 +20,8 @@
 | design | 014 | draft | 两级意图表与知识库外挂意图路由 | 意图节点只做静态闭集大分类，路由靠 KB↔意图绑定映射；替换 013 的 KB-UUID 路由方案。 | 2026-07-12 | [014](docs/design/014-intent-routing.md) |
 | design | 015 | draft | M9 Trace 追踪（完整版）读模型 | M9 落地：根 span 补 session/agent/user 身份 → 纯 VIEW 读模型（列表/Session/详情）+ 只读 API + 前端四屏；out-flow 延后 M11。 | 2026-07-13 | [015](docs/design/015-m9-trace-read-model.md) |
 | design | 016 | draft | 指标读模型：ClickHouse 汇总层 + 第一批运行看板 | 在 otel_traces 之上加一层 AggregatingMergeTree 预聚合（物化视图增量卷积）作为指标读模型；第一批 8 指标全部复用已有埋点，纯读侧增量；产品做总览→应用→样本三层下钻。触发 004 演进第 2 步，喂 M10 运行看板。 | 2026-07-14 | [016](docs/design/016-metrics-rollup-dashboard.md) |
-| design | 018 | draft | 离线评测 run 与评测集（E-W2a） | gold 题库 + 对指定配置版本发起离线 run（真实走编排产出 preview trace）+ 屏3 报告；结果存 Postgres 与在线 rag.eval 读模型物理隔离。 | 2026-07-17 | [018](docs/design/018-offline-eval-runs.md) |
-| design | 019 | draft | 评测 worker 独立部署物（PROCESS_ROLE 分流） | 把 eval-run + online-eval 两个 pg-boss 消费者拆到独立 worker 进程：同一代码按 PROCESS_ROLE 分流，租约代码零改动。 | 2026-07-17 | [019](docs/design/019-eval-worker-split.md) |
+| design | 018 | draft | 离线评测 run 与评测集（E-W2a） | gold 题库 + 对指定配置版本发起离线 run（真实走编排产出 preview trace）+ 屏3 报告；结果存 Postgres 与在线 rag.eval 读模型物理隔离。 | 2026-07-19 | [018](docs/design/018-offline-eval-runs.md) |
+| design | 019 | draft | 评测 worker 独立部署物（PROCESS_ROLE 分流） | 把 eval-run + online-eval 两个 pg-boss 消费者拆到独立 worker 进程：同一代码按 PROCESS_ROLE 分流，租约代码零改动。 | 2026-07-18 | [019](docs/design/019-eval-worker-split.md) |
+| design | 020 | current | Judge scoring integrity v2 | 让 faithfulness 未评分在在线/离线、OTLP、ClickHouse、API 与 UI 全链路保持为 null，并以 v2 解析契约修复长答案确定性拒绝。 | 2026-07-18 | [020](docs/design/020-judge-scoring-integrity.md) |
+| design | 021 | draft | 知识缺口 / 问题池域（E-W4 B2a） | 坏样本自动入池、增量 embedding 聚类、根因分诊与缺口状态机；新建 gaps 域作为 eval-runs 之上的新依赖顶点，并把坏样本批量沉淀为 gold 用例。 | 2026-07-19 | [021](docs/design/021-problem-pool-gap-domain.md) |
 
