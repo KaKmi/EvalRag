@@ -87,22 +87,43 @@ export default function GapFillWizard({
     Record<string, string | null | undefined>
   >({});
 
-  const load = useCallback(async () => {
-    if (!clusterId) return;
-    setLoading(true);
-    try {
-      const next = await getGapFillDraft(clusterId);
-      setDraft(next);
-      setQuestion(next.draftQuestion ?? "");
-      setAnswer(next.draftAnswer ?? "");
-      setKbId(next.targetKbId ?? undefined);
-      setErr(null);
-    } catch (error) {
-      setErr(error instanceof Error ? error.message : "加载补库草稿失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [clusterId]);
+  /**
+   * 拉草稿。`preserveEdits` 决定**要不要用服务端内容覆盖用户正在编辑的文本**。
+   *
+   * ⛔ 这个参数是红线设施，不是便利开关。复审在第二轮抓到：提交失败后无条件 `load()`
+   * 会把运营已经人工核实、改写过的答案换回 LLM 原始草稿，而 `confirmed` 复选框
+   * **仍然是勾上的**（`setConfirmed(false)` 只在 open effect 里跑）。用户再点一次
+   * 确认入库，进知识库的就是一份没有任何人看过的 LLM 生成内容，还带着「已核对」标记——
+   * 正是整个向导存在要防的那件事。
+   *
+   * 于是分成两类调用：
+   *  · `preserveEdits: false`（打开、草拟完成）——服务端内容就是**新的事实**，该覆盖，
+   *    同时把 `confirmed` 清掉：换了内容，之前那次确认自然作废。
+   *  · `preserveEdits: true`（提交失败后）——只刷新状态，用户的编辑一个字都不能动。
+   */
+  const load = useCallback(
+    async (opts: { preserveEdits?: boolean } = {}) => {
+      if (!clusterId) return;
+      setLoading(true);
+      try {
+        const next = await getGapFillDraft(clusterId);
+        setDraft(next);
+        if (!opts.preserveEdits) {
+          setQuestion(next.draftQuestion ?? "");
+          setAnswer(next.draftAnswer ?? "");
+          setKbId(next.targetKbId ?? undefined);
+          // 内容被换掉 ⇒ 上一次的「我已核对」作废。人只确认过他看见的那份。
+          setConfirmed(false);
+          setErr(null);
+        }
+      } catch (error) {
+        setErr(error instanceof Error ? error.message : "加载补库草稿失败");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [clusterId],
+  );
 
   // 每次打开都重新拉：草稿可能被上一次会话改过，也可能已经被别人推进到别的状态。
   useEffect(() => {
@@ -157,10 +178,14 @@ export default function GapFillWizard({
       await load();
       onChanged();
     } catch (error) {
-      setErr(error instanceof Error ? error.message : "草拟失败");
+      const msg = error instanceof Error ? error.message : "草拟失败";
       // 重新拉一次拿到退回后的状态，否则界面会停在一个已经不成立的「草拟中」。
       await load();
       onChanged();
+      // 与 submit 同理：`setErr` 必须在 `load()` 之后，否则被 `load` 的 `setErr(null)`
+      // 抹掉，用户点完「开始草拟」只看到界面弹回原样、没有任何原因说明。
+      // （第二轮复审指出这里原本就是错的，而修 submit 时的注释还写着「与 runDraft 对齐」。）
+      setErr(msg);
     } finally {
       setDrafting(false);
     }
@@ -214,7 +239,9 @@ export default function GapFillWizard({
        * 不在 reviewing 了」——别人并发取消/推进过。不刷新的话界面会继续显示人审表单、
        * 确认入库按钮仍然可点，用户重试多少次都是同一个错。
        */
-      await load();
+      // `preserveEdits`：只刷新状态，**绝不**拿服务端草稿覆盖用户已核实的文本。
+      // 详见 `load` 的注释——覆盖 + confirmed 残留 = 未经人审的内容进库。
+      await load({ preserveEdits: true });
       onChanged();
       /**
        * ⚠️ `setErr` 必须在 `load()` **之后**：`load()` 成功时会 `setErr(null)`，

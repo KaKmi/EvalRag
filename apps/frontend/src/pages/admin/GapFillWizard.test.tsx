@@ -68,6 +68,23 @@ function renderWizard() {
   return { onChanged, onClose };
 }
 
+/** 需要在同一个组件实例上开关 `open` / 换 `clusterId` 的用例走这个。 */
+function renderWizardRaw(clusterId: string) {
+  const onChanged = vi.fn();
+  const onClose = vi.fn();
+  const view = render(
+    <GapFillWizard open clusterId={clusterId} onClose={onClose} onChanged={onChanged} />,
+  );
+  return {
+    onChanged,
+    onClose,
+    rerender: (open: boolean, id: string) =>
+      view.rerender(
+        <GapFillWizard open={open} clusterId={id} onClose={onClose} onChanged={onChanged} />,
+      ),
+  };
+}
+
 /** 把第②步填到「只差勾确认」的状态。 */
 async function fillForm() {
   await screen.findByDisplayValue("能开增值税专用发票吗？");
@@ -175,6 +192,61 @@ describe("补知识库向导", () => {
     await waitFor(() => expect(api.getGapFillDraft).toHaveBeenCalledTimes(2));
   });
 
+  /**
+   * 第二轮复审抓到的 P1，且是**我修 P3 时自己引入的**：为了让并发取消能刷新状态，
+   * 我在提交失败分支加了无条件 `load()`——它会把运营人工核实、改写过的答案换回
+   * LLM 原始草稿，而「我已核对」复选框仍然勾着。再点一次确认入库，进知识库的
+   * 就是一份没有任何人看过的 LLM 生成内容，还带着人审通过的标记。
+   *
+   * 这三条是那个 P1 的回归网：编辑必须活下来、确认状态必须诚实。
+   */
+  it("提交失败后**不覆盖**用户已改写的答案（否则人审内容被换回 LLM 草稿）", async () => {
+    api.getGapFillDraft.mockResolvedValue(draft());
+    api.submitGapFill.mockRejectedValue(new Error("知识库正在重建"));
+    renderWizard();
+    await fillForm();
+
+    const edited = "可以。抬头+税号发我，2 个工作日内电子发票发邮箱。";
+    fireEvent.change(screen.getByLabelText("补库答案"), { target: { value: edited } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "确认入库" }));
+
+    await screen.findByText("知识库正在重建");
+    // 服务端草稿仍是 LLM 那份；重新拉过之后，屏上必须还是**人写的**那份。
+    expect(screen.getByLabelText("补库答案")).toHaveValue(edited);
+    expect(screen.queryByDisplayValue(draft().draftAnswer!)).not.toBeInTheDocument();
+  });
+
+  it("内容被服务端草稿覆盖时，「我已核对」必须跟着作废", async () => {
+    // 人只确认过他当时看见的那一份。换了内容还留着勾，等于替用户认可了他没读过的文本。
+    api.getGapFillDraft.mockResolvedValue(
+      draft({ status: "pending", draftQuestion: null, draftAnswer: null }),
+    );
+    api.draftGapFill.mockResolvedValue({});
+    renderWizard();
+
+    fireEvent.click(await screen.findByRole("button", { name: /草拟/ }));
+
+    // 草拟完成 → load(preserveEdits=false) 覆盖内容，复选框必须是未勾的。
+    api.getGapFillDraft.mockResolvedValue(draft());
+    await screen.findByDisplayValue("能开增值税专用发票吗？");
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+  });
+
+  it("草拟失败要**出声**——错误不能被随后的 load 抹掉", async () => {
+    // `setErr` 写在 `load()` 之前就会被 `load` 的 `setErr(null)` 吞掉，
+    // 用户点完「AI 草拟」只看到界面弹回原样、没有任何原因说明。
+    api.getGapFillDraft.mockResolvedValue(
+      draft({ status: "pending", draftQuestion: null, draftAnswer: null }),
+    );
+    api.draftGapFill.mockRejectedValue(new Error("草拟模型未配置"));
+    renderWizard();
+
+    fireEvent.click(await screen.findByRole("button", { name: /草拟/ }));
+
+    expect(await screen.findByText("草拟模型未配置")).toBeInTheDocument();
+  });
+
   it("详情请求失败的应用标「状态未知」而不是谎称「未上线」", async () => {
     setup();
     api.getApplicationDetail.mockRejectedValue(new Error("网络抖动"));
@@ -188,6 +260,31 @@ describe("补知识库向导", () => {
     // 根本不存在的问题。
     expect(await screen.findByText("状态未知")).toBeInTheDocument();
     expect(screen.queryByText("未上线")).not.toBeInTheDocument();
+  });
+
+  it("换簇重开 → 上个簇选的回验应用不能跟着带过来", async () => {
+    /**
+     * 复审第二轮：`appId` 是纯本地选择，`load()` 只重置来自草稿的字段，
+     * 而 `destroyOnHidden` 销毁的是 Drawer 子树、不是本组件 state。
+     * 不清的话，换一个簇打开会静默沿用上一个簇选的应用——回验会跑在错误的应用上，
+     * 而界面看起来完全正常。这条测的就是那个 `setAppId(undefined)`。
+     */
+    api.getGapFillDraft.mockResolvedValue(draft());
+    const { rerender } = renderWizardRaw(CLUSTER);
+    await fillForm();
+    // 选中项的文字在 `.ant-select-selection-item` 上，不在 `combobox`（那是里面的 input）上。
+    const appSelect = () =>
+      screen.getByRole("combobox", { name: "回验应用" }).closest(".ant-select")!;
+    expect(appSelect()).toHaveTextContent("客服机器人");
+
+    // 关掉再以**另一个簇**打开——组件实例不变，state 会活下来。
+    rerender(false, CLUSTER);
+    const other = "55555555-5555-4555-8555-555555555555";
+    api.getGapFillDraft.mockResolvedValue(draft({ clusterId: other }));
+    rerender(true, other);
+
+    await screen.findByDisplayValue("能开增值税专用发票吗？");
+    expect(appSelect()).not.toHaveTextContent("客服机器人");
   });
 
   it("状态 filled → 第③步「入库中」，表单不再可编辑", async () => {

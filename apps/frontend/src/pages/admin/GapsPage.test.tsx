@@ -289,7 +289,19 @@ describe("屏5 问题池", () => {
     renderPage();
     await screen.findByText("能开专用发票吗/对公转账");
 
-    expect(await screen.findByText("复发")).toBeInTheDocument();
+    // 标题写的是「**红色**复发标」，就得断言红色：这个角标全靠颜色在一屏几十行里
+    // 抓住注意力，掉成默认灰色时文字还在、测试照绿，而它已经不起作用了。
+    const tag = await screen.findByText("复发");
+    expect(tag).toHaveClass("ant-tag-red");
+  });
+
+  it("没复发的簇不显示复发标", async () => {
+    // 与上一条配对：只测「有的时候有」，一个无条件渲染的角标也能通过。
+    mockGaps([cluster({ recurred: false })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    expect(screen.queryByText("复发")).not.toBeInTheDocument();
   });
 
   it("已回验的簇在平均质量列显示改善 41→89（原型 §9 `:370`）", async () => {
