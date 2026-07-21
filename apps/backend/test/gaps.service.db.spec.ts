@@ -13,6 +13,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import { ConflictException } from "@nestjs/common";
 import { GapCentroidStaleError } from "../src/modules/gaps/gap-clustering";
 import { GapsRepository } from "../src/modules/gaps/gaps.repository";
 import { GapsService } from "../src/modules/gaps/gaps.service";
@@ -148,6 +149,15 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
       [id],
     );
     return rows[0].status;
+  }
+
+  /** 复发窗口的锚点（迁移 0029）。由 `applyTransition` 在进出终态时维护。 */
+  async function terminalAtOf(id: string): Promise<Date | null> {
+    const { rows } = await pool.query<{ terminal_at: Date | null }>(
+      `SELECT terminal_at FROM gap_clusters WHERE id = $1`,
+      [id],
+    );
+    return rows[0].terminal_at;
   }
 
   async function itemCount(id: string): Promise<number> {
@@ -514,30 +524,149 @@ describeDb("GapsService（状态机 / 拆分合并 / 频次口径，RUN_DB_TESTS
       }
     });
 
-    it("载荷与状态是**同一条 UPDATE**：并发抢跑的那一方整体不生效", async () => {
-      // 模拟 verifyPass 与 verifyFail 并发：两者都在 mustFind 时读到 filled。
-      // 没有 CAS 的话双双写入，落得「verified 且带复发标」——原型 §18.C 里没有这种组合。
+    /**
+     * ⚠️ 这条**取代**了原来那个用 `Promise.allSettled` 造并发的版本。
+     * 清理复审证明它是**空测**：删掉 repository 的 `WHERE status = expected` 后 60/60 全绿。
+     * 原因是两个 Promise 在同一连接池上实际被**串行化**了——第二个的 `mustFind` 读到的
+     * 已经是 `verified`，被 service 的内存守卫（TRANSITIONS 表）挡下抛 `BadRequestException`，
+     * `ConflictException` 从头到尾没被触发过。它守住的是迁移表，不是 CAS。
+     *
+     * 现在直接在 repository 层造**确定性**窗口：先读到 filled，再用裸 SQL 模拟
+     * 「另一个请求已经把簇推走了」，然后拿旧的 expectedStatus 去写——CAS 必须拦下。
+     */
+    it("CAS：expectedStatus 与库里不符时，整条 UPDATE 不生效（返回 false）", async () => {
       const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
       try {
-        const [first, second] = await Promise.allSettled([
-          service.recordVerifyPass(clusterId, 89),
-          service.recordVerifyFail(clusterId, 62),
-        ]);
-        const outcomes = [first, second];
-        expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
-        expect(outcomes.filter((o) => o.status === "rejected")).toHaveLength(1);
+        // 模拟并发写者：在我们「读到 filled」之后、「写入」之前把它推到 verified。
+        await pool.query(`UPDATE gap_clusters SET status = 'verified' WHERE id = $1`, [clusterId]);
 
-        // 无论谁赢，结果都必须是一个自洽的状态，而不是两次写入的混合体。
-        const status = await statusOf(clusterId);
+        const applied = await repo.applyTransition(
+          clusterId,
+          "filled", // ← 我们以为的状态，已经过期
+          { status: "pending", verifiedScore: 62, recurredAt: new Date() },
+          new Date(),
+        );
+
+        expect(applied).toBe(false);
+        // 关键：**载荷一个字段都不许落**。没有 CAS 的话这里会写成
+        // 「verified 却带 recurred_at + verifiedScore=62」——021 §18.C 里没有这种组合。
+        expect(await statusOf(clusterId)).toBe("verified");
         const fields = await fillFieldsOf(clusterId);
-        if (status === "verified") {
-          expect(fields.verifiedScore).toBe(89);
-          expect(fields.recurredAt).toBeNull(); // 通过就不该带复发标
-        } else {
-          expect(status).toBe("pending");
-          expect(fields.verifiedScore).toBe(62);
-          expect(fields.recurredAt).not.toBeNull();
-        }
+        expect(fields.verifiedScore).toBeNull();
+        expect(fields.recurredAt).toBeNull();
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    /**
+     * `terminal_at` 的**写入**此前零覆盖——把 `applyTransition` 里那行改成恒 `null`，
+     * 238 个测试全绿（清理复审实测）。而它是迁移 0029 存在的**全部理由**：
+     * 没有锚点，`checkRecurrence` 就退回「now 往前 7 天」的滚动窗口，
+     * 于是运营刚点[忽略]的热簇会被它**忽略之前**攒下的样本立刻顶回 pending——
+     * 「忽略」按钮等于没有，而且没有任何报错。
+     *
+     * 复发窗口的**判定**逻辑在 `gap-collector.processor.spec.ts` 有覆盖，但那是内存 fake、
+     * 自带一个 `terminalAt` 字段，与真实 UPDATE 是否写库毫无关系。这两条补的正是那一段。
+     */
+    it("进入终态 ⇒ 写 terminal_at 锚点", async () => {
+      const { clusterId } = await seedCluster({ status: "pending", items: [{}] });
+      try {
+        expect(await terminalAtOf(clusterId)).toBeNull();
+
+        await service.transition(clusterId, "ignore");
+
+        expect(await statusOf(clusterId)).toBe("ignored");
+        expect(await terminalAtOf(clusterId)).not.toBeNull();
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("离开终态 ⇒ 清掉 terminal_at（否则下一轮会沿用上一次的旧锚点）", async () => {
+      const { clusterId } = await seedCluster({ status: "ignored", items: [{}] });
+      try {
+        // seed 出来的 ignored 簇锚点为空，先走一遍 reopen→ignore 把它做实。
+        await service.transition(clusterId, "reopen");
+        await service.transition(clusterId, "ignore");
+        expect(await terminalAtOf(clusterId)).not.toBeNull();
+
+        await service.transition(clusterId, "reopen");
+
+        expect(await statusOf(clusterId)).toBe("pending");
+        expect(await terminalAtOf(clusterId)).toBeNull();
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("回验通过（filled → verified）同样是终态，也要落锚点", async () => {
+      // verified 与 ignored 一样属「已终结」，7 天窗口从这一刻起算。
+      const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
+      try {
+        await service.recordVerifyPass(clusterId, 89);
+
+        expect(await statusOf(clusterId)).toBe("verified");
+        expect(await terminalAtOf(clusterId)).not.toBeNull();
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("回验未过（filled → pending）不是终态 ⇒ 不留锚点", async () => {
+      // 与上一条配对：只测「终态要写」的话，一个无条件写入的实现也能通过。
+      const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
+      try {
+        await service.recordVerifyFail(clusterId, 62);
+
+        expect(await statusOf(clusterId)).toBe("pending");
+        expect(await terminalAtOf(clusterId)).toBeNull();
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("CAS：expectedStatus 相符时正常写入（证明上一条不是恒 false）", async () => {
+      // 与上一条配对。只测「不符时拦下」的话，一个恒返回 false 的实现也能通过。
+      const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
+      try {
+        const applied = await repo.applyTransition(
+          clusterId,
+          "filled",
+          { status: "verified", verifiedScore: 89 },
+          new Date(),
+        );
+
+        expect(applied).toBe(true);
+        expect(await statusOf(clusterId)).toBe("verified");
+        expect((await fillFieldsOf(clusterId)).verifiedScore).toBe(89);
+      } finally {
+        await cleanup([clusterId]);
+      }
+    });
+
+    it("service 层把 CAS 落空翻译成 409（不是 400）——两者对调用方含义完全不同", async () => {
+      /**
+       * 400「非法迁移」= 你要做的事本身不允许，重试多少次都一样；
+       * 409「并发冲突」= 事情合法，只是有人抢先了，刷新后可以重来。
+       * 前端据此决定「弹错误」还是「提示刷新重试」，混淆会把可恢复的操作说成非法。
+       */
+      const { clusterId } = await seedCluster({ status: "filled", fillPreScore: 41, items: [{}] });
+      try {
+        const original = repo.applyTransition.bind(repo);
+        // 在 service 读到 filled 之后、写入之前插一手，制造真实的 mustFind→UPDATE 窗口。
+        const spy = jest
+          .spyOn(repo, "applyTransition")
+          .mockImplementation(async (id, expected, patch, now) => {
+            await pool.query(`UPDATE gap_clusters SET status = 'ignored' WHERE id = $1`, [id]);
+            return original(id, expected, patch, now);
+          });
+
+        await expect(service.recordVerifyPass(clusterId, 89)).rejects.toThrow(ConflictException);
+        spy.mockRestore();
+
+        expect(await statusOf(clusterId)).toBe("ignored");
+        expect((await fillFieldsOf(clusterId)).verifiedScore).toBeNull();
       } finally {
         await cleanup([clusterId]);
       }
