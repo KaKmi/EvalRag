@@ -27,7 +27,13 @@ import type {
   EvalRunStatus,
   EvalVerdict,
 } from "@codecrush/contracts";
-import { ApiError, createGapItem, getEvalRunReport, stopEvalRun } from "../../api/client";
+import {
+  ApiError,
+  createGapItem,
+  getEvalRunReport,
+  setEvalResultIgnored,
+  stopEvalRun,
+} from "../../api/client";
 import { formatHitRate5, formatNdcg5 } from "./evalShared";
 import ReplayModal, { type ReplaySource } from "./ReplayModal";
 
@@ -130,6 +136,8 @@ export default function EvalRunDetailPage() {
   const [replaySource, setReplaySource] = useState<ReplaySource | null>(null);
   /** B2a Task 8：正在入池的行（防连点——两次往返里第二次会回 joinedExisting，看起来像自己加重了）。 */
   const [poolingRow, setPoolingRow] = useState<string | null>(null);
+  /** B2b：正在切忽略态的行 caseId（防连点——连点会让最后一次往返决定最终态，与用户看到的相反）。 */
+  const [ignoringRow, setIgnoringRow] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -186,6 +194,8 @@ export default function EvalRunDetailPage() {
       error: null,
       repeatCount: 1,
       repeats: [],
+      // 没跑过的用例谈不上「忽略」——它连结果行都没有，标记忽略的行尾操作对它也是禁用的。
+      ignoredAt: null,
       skipped: true,
     }));
     const score = (row: Row) => (sortKey === "min" ? row.minScore : row[sortKey]);
@@ -303,6 +313,28 @@ export default function EvalRunDetailPage() {
     }
   };
 
+  /**
+   * B2b：行尾「标记忽略」/「取消忽略」（原型 `:322`）。**逐 case 粒度**——后端按 caseId
+   * 覆盖该 case 在本 run 内的全部重复行，不牵连缺口簇里的其他成员。
+   *
+   * 成功后重新 `load()` 而不是本地改 state：`ignoredAt` 是服务端时间戳，本地猜一个
+   * 会让「什么时候忽略的」这条信息在刷新前后不一致。
+   */
+  const toggleRowIgnored = async (row: Row) => {
+    if (row.skipped || ignoringRow) return;
+    const next = row.ignoredAt === null;
+    setIgnoringRow(row.caseId);
+    try {
+      await setEvalResultIgnored(runId, row.caseId, next);
+      message.success(next ? "已标记忽略" : "已取消忽略");
+      await load();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setIgnoringRow(null);
+    }
+  };
+
   // F7：行尾「重放该条」打开 ReplayModal（预填 run 的 app/version + 行 question + previewTraceId）。
   const onReplayRow = (row: Row) => {
     if (!row.previewTraceId) return;
@@ -328,7 +360,20 @@ export default function EvalRunDetailPage() {
       dataIndex: "question",
       key: "question",
       render: (text: string, row) => (
-        <span style={{ color: row.skipped ? "rgba(0,0,0,.45)" : undefined }}>{text}</span>
+        <span
+          style={{
+            // 已忽略与未跑都置灰，但成因不同 → 已忽略再加一个 tag 显式说明，
+            // 否则两种灰在同一张表里无法区分（「没测」vs「测了但不算数」）。
+            color: row.skipped || row.ignoredAt !== null ? "rgba(0,0,0,.45)" : undefined,
+          }}
+        >
+          {text}
+          {row.ignoredAt !== null && (
+            <Tag style={{ marginLeft: 8 }} data-testid="ignored-tag">
+              已忽略
+            </Tag>
+          )}
+        </span>
       ),
     },
     ...(["faithfulness", "answerRelevancy", "correctness", "contextPrecision"] as const).map(
@@ -387,10 +432,13 @@ export default function EvalRunDetailPage() {
               判分依据
             </Button>
             {/*
-              原型 §7 行尾「…」快捷操作（`:322`：重放该条 / 加入问题池 / 标记忽略）。
-              「标记忽略」**本波不渲染**：`EvalRunResult` 上没有任何可落这个标记的字段，
-              而 B2a 明令不改 eval-runs 的 schema。若把它做成「入池后顺手忽略整个缺口簇」，
-              一条用例的判断就会连坐簇里其他所有成员——那不是忽略，是误伤。留给有字段之后再做。
+              原型 §7 行尾「…」快捷操作（`:322`：重放该条 / 加入问题池 / 标记忽略）三项齐全。
+              「标记忽略」落 `eval_run_results.ignored_at`（B2b 迁移 0028），**逐 case** 粒度：
+              后端按 caseId 覆盖该 case 在本 run 内的全部重复行。不做成「顺手忽略整个缺口簇」
+              ——那会让一条用例的判断连坐簇里其他所有成员，不是忽略，是误伤。
+              它是**叠加标志**：分数与 verdict 全部保留，记分卡不看它，只影响本表的**视觉**
+              （行置灰 + 「已忽略」Tag）。判定列的筛选器**不看** `ignoredAt`——
+              「按忽略与否筛选」原型没要求，本波也没做，别据本注释去找一个不存在的筛选项。
             */}
             <Dropdown
               trigger={["click"]}
@@ -408,6 +456,13 @@ export default function EvalRunDetailPage() {
                     // 没跑出 preview trace 就没有可引用的样本 id（`source_trace_id` 是幂等键）。
                     disabled: row.previewTraceId === null || poolingRow !== null,
                     onClick: () => void addRowToPool(row),
+                  },
+                  {
+                    key: "ignore",
+                    // 可撤销：已忽略的行菜单项翻成「取消忽略」，同一个入口两态，不另开一项。
+                    label: row.ignoredAt === null ? "标记忽略" : "取消忽略",
+                    disabled: ignoringRow !== null,
+                    onClick: () => void toggleRowIgnored(row),
                   },
                 ] satisfies MenuProps["items"],
               }}

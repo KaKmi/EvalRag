@@ -174,6 +174,11 @@ export const EvalRunResultSchema = z.object({
   /** F5：每题重复次数与逐次明细（repeatCount=1 时 repeats 长度 1）。 */
   repeatCount: z.number().int().min(1).max(5),
   repeats: z.array(EvalRunRepeatSchema),
+  /**
+   * B2b 屏3「标记忽略」：非空即已忽略（原型 `:322` 行尾快捷操作）。
+   * **叠加标志**——分数与 verdict 一概保留，只影响列表默认筛选；记分卡/综合分不看它。
+   */
+  ignoredAt: z.string().nullable(),
 });
 export type EvalRunResult = z.infer<typeof EvalRunResultSchema>;
 
@@ -202,6 +207,13 @@ export const EvalRunReportSchema = z.object({
   skipped: z.array(EvalRunSkippedCaseSchema),
 });
 export type EvalRunReport = z.infer<typeof EvalRunReportSchema>;
+
+/**
+ * B2b 屏3 行尾「标记忽略」的请求体（`PATCH /eval/runs/:runId/results/:caseId/ignore`）。
+ * 布尔而非「只置不清」：原型的这一项是可撤销的，`ignored=false` 把 `ignoredAt` 置回 null。
+ */
+export const SetEvalResultIgnoredRequestSchema = z.object({ ignored: z.boolean() });
+export type SetEvalResultIgnoredRequest = z.infer<typeof SetEvalResultIgnoredRequestSchema>;
 
 /** 1h 幂等：命中已有完成 run 时 409 body（前端弹「查看 / 仍重新运行」）。 */
 export const RecentEvalRunConflictSchema = z.object({

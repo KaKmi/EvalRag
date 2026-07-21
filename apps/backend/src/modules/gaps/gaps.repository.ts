@@ -1,10 +1,16 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
-import type { DB } from "../../platform/persistence/persistence.module";
+import type { DB, Tx } from "../../platform/persistence/persistence.module";
 import type { GapClusterStatus, GapItemSource, GapRootCause } from "./gap.constants";
-import { meanVector } from "./gap-clustering";
-import { gapClusters, gapItems, gapWatermarks, type GapClusterRow, type GapItemRow } from "./schema";
+import { GapCentroidStaleError, meanVector } from "./gap-clustering";
+import {
+  gapClusters,
+  gapItems,
+  gapWatermarks,
+  type GapClusterRow,
+  type GapItemRow,
+} from "./schema";
 
 /**
  * 问题池的 Postgres 读写。**只碰 `gap_*` 三张表**——Global Constraint 9：
@@ -31,7 +37,18 @@ export interface NearestCluster {
  * 单测就只能测到 fake 自己重写的一份判定逻辑。
  */
 export type GapClusterTarget =
-  | { kind: "existing"; clusterId: string; nextCentroid: number[] }
+  | {
+      kind: "existing";
+      clusterId: string;
+      nextCentroid: number[];
+      /**
+       * processor 读最近邻时**观察到的** `freq`，用作质心 UPDATE 的乐观并发校验条件
+       * （B2b：021 §12② 的收口）。`nextCentroid` 正是用这个 freq 算的增量平均，
+       * 落库时若 freq 已经变了，说明这个 centroid 已过期，必须整条重算——
+       * 见 `GapCentroidStaleError`。
+       */
+      expectedFreq: number;
+    }
   | { kind: "new"; representativeQuestion: string; centroid: number[] };
 
 export interface GapItemDraft {
@@ -70,6 +87,11 @@ export interface GapClusterListRow {
   rootCause: string | null;
   rootCauseIsManual: boolean;
   enteredEvalSetAt: Date | null;
+  /** B2b：非空即屏5 显示「复发」红点（契约层转成布尔 `recurred`）。 */
+  recurredAt: Date | null;
+  /** B2b：「41→89」的两端。均为 null 表示这个簇还没走到 filled/verified。 */
+  fillPreScore: number | null;
+  verifiedScore: number | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
   freq30d: number | string;
@@ -81,6 +103,19 @@ export interface AttachItemResult {
   clusterId: string;
   /** false = 这条 trace 已在池中（唯一索引挡下）⇒ 本次不该计频、不该动 centroid。 */
   inserted: boolean;
+  /**
+   * 本次并入**之前**簇的状态（复发判定的入参，见 `gap-ingest.ts:checkRecurrence`）。
+   *
+   * 由 `attachItem` 顺手返回而不是让调用方事后再 `findCluster` 一次：事务里本来就要
+   * 定位/更新这个簇，`RETURNING` 捎带一列不多花一次往返；更要紧的是**时序**——
+   * 事后再读拿到的是「并入之后」的状态，中间若有别的迁移提交，判定就用错了基准。
+   *
+   * `inserted === false` 时为 `undefined`：没并入就无从谈复发（并且那条路径上
+   * 簇是靠 `source_trace_id` 反查出来的，并没有读过它的状态）。
+   */
+  statusBeforeAttach?: GapClusterStatus;
+  /** 簇进入终态的时刻（复发窗口的锚点，迁移 0029）；非终态簇为 null。 */
+  terminalAtBeforeAttach?: Date | null;
 }
 
 /**
@@ -96,6 +131,9 @@ export interface GapCollectorStore {
   attachItem(target: GapClusterTarget, item: GapItemDraft, now: Date): Promise<AttachItemResult>;
   listClusterTriageInputs(clusterId: string): Promise<ClusterTriageInput[]>;
   setClusterRootCauseAuto(clusterId: string, cause: GapRootCause, now: Date): Promise<void>;
+  countRecentItems(clusterId: string, windowStart: Date): Promise<number>;
+  /** 兜底扫描：停在 `filled` 太久的簇（终态广播疑似丢失）。 */
+  listStuckFilled(before: Date, limit: number): Promise<string[]>;
   /** @returns false = 租约已被别人抢走，本轮什么都没落库（见实现处注释）。 */
   finishCycle(
     workerName: string,
@@ -265,6 +303,9 @@ export class GapsRepository implements GapCollectorStore {
     try {
       return await this.runAttachItem(target, item, now);
     } catch (error) {
+      // 质心 CAS 失败**原样上抛**，不走下面「已在池中」那条路：并发改的是簇的质心，
+      // 与这条 trace 是否已入池毫无关系。调用方要做的是重新找最近邻、重算增量平均后再来一次。
+      if (error instanceof GapCentroidStaleError) throw error;
       if (!(error instanceof GapItemConflictError)) throw error;
       // 并发插入赢了：事务已回滚（没留下空簇），按「已在池中」返回赢家所属的簇。
       const [row] = await this.db
@@ -292,6 +333,9 @@ export class GapsRepository implements GapCollectorStore {
       if (existing) return { clusterId: existing.clusterId, inserted: false };
 
       let clusterId: string;
+      // 新建簇的状态取 `RETURNING` 的实际值而不是写死 `"pending"`：默认值住在
+      // `schema.ts`/迁移里，写死等于在这里复制一份会悄悄过期的副本。
+      let createdStatus: string | undefined;
       if (target.kind === "existing") {
         clusterId = target.clusterId;
       } else {
@@ -306,8 +350,9 @@ export class GapsRepository implements GapCollectorStore {
             createdAt: now,
             updatedAt: now,
           })
-          .returning({ id: gapClusters.id });
+          .returning({ id: gapClusters.id, status: gapClusters.status });
         clusterId = created.id;
+        createdStatus = created.status;
       }
 
       const inserted = await tx
@@ -338,7 +383,21 @@ export class GapsRepository implements GapCollectorStore {
       // 抛错回滚整个事务 ⇒ 簇消失、item 保持原样，调用方按「没插进去」处理。
       if (inserted.length === 0) throw new GapItemConflictError(item.sourceTraceId);
 
-      await tx
+      /**
+       * ③ 质心写入带**乐观并发校验**（B2b：021 §12② 的收口）。
+       *
+       * `freq + 1` 自增本身是原子的，从来不会丢计数；丢的是 `centroid`——它是 processor
+       * 在**事务外**用「读到的 centroid + 读到的 freq」算好的一个完整向量，无条件写下去
+       * 就会覆盖掉期间别的实例并入的那一次贡献。触发窗口：单轮跑超租约（10min）被接管，
+       * 两个实例同时处理同一个簇。危害是聚类质量退化（质心偏向某个成员），不是丢数/错数。
+       *
+       * `AND freq = expectedFreq` 让这种情况影响 0 行 ⇒ 抛哨兵 ⇒ **整个事务回滚**
+       * （连同刚插入的 item 与可能新建的簇），调用方重新走一遍归簇判定。
+       * 不能只是重写一次：`nextCentroid` 已经基于过期的 freq 算出来了。
+       *
+       * `new` 分支不需要这个条件——簇是本事务刚建的，不存在并发方。
+       */
+      const updated = await tx
         .update(gapClusters)
         .set({
           freq: sql`${gapClusters.freq} + 1`,
@@ -346,9 +405,50 @@ export class GapsRepository implements GapCollectorStore {
           lastSeenAt: now,
           updatedAt: now,
         })
-        .where(eq(gapClusters.id, clusterId));
-      return { clusterId, inserted: true };
+        .where(
+          target.kind === "existing"
+            ? and(
+                eq(gapClusters.id, clusterId),
+                eq(gapClusters.freq, target.expectedFreq),
+                // 与 `findNearestCluster` 的谓词对齐：那边只在未软删的簇里找最近邻，
+                // 这边若不带同样的条件，就可能把样本并进一个刚被合并走的簇。
+                isNull(gapClusters.deletedAt),
+              )
+            : eq(gapClusters.id, clusterId),
+        )
+        .returning({
+          id: gapClusters.id,
+          status: gapClusters.status,
+          terminalAt: gapClusters.terminalAt,
+        });
+      if (updated.length === 0) throw new GapCentroidStaleError(clusterId);
+      /**
+       * `RETURNING` 拿的是**更新后**的行，但这条 UPDATE 从不写 `status`
+       * （见方法头注释「不碰 status」）⇒ 它就是并入前的状态，供复发判定用。
+       */
+      return {
+        clusterId,
+        inserted: true,
+        statusBeforeAttach: (createdStatus ?? updated[0].status) as GapClusterStatus,
+        // 与 status 同理：这条 UPDATE 不写 terminal_at，读到的就是并入前的值。
+        terminalAtBeforeAttach: createdStatus ? null : updated[0].terminalAt,
+      };
     });
+  }
+
+  /**
+   * 簇在 `windowStart` 之后新增的成员数——「复发」判定的分子（原型 `:376`/`:708`）。
+   *
+   * 口径是 `created_at`（入池时间）而**不是** `trace_start_time`：要判的是「这个缺口最近
+   * 又被踩到了多少次」，即样本**流入**的节奏。`trace_start_time` 手动入池时为 NULL
+   * （整批不计数），补扫历史 trace 时又会拿很旧的时间落进/落出窗口，两头都失真。
+   */
+  async countRecentItems(clusterId: string, windowStart: Date): Promise<number> {
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(gapItems)
+      .where(and(eq(gapItems.clusterId, clusterId), gte(gapItems.createdAt, windowStart)));
+    return Number(row?.n ?? 0);
   }
 
   async listClusterTriageInputs(clusterId: string): Promise<ClusterTriageInput[]> {
@@ -372,11 +472,7 @@ export class GapsRepository implements GapCollectorStore {
   }
 
   /** 只写 `root_cause_auto`。`root_cause_manual` 由人写、worker 永不覆盖（Global Constraint 8）。 */
-  async setClusterRootCauseAuto(
-    clusterId: string,
-    cause: GapRootCause,
-    now: Date,
-  ): Promise<void> {
+  async setClusterRootCauseAuto(clusterId: string, cause: GapRootCause, now: Date): Promise<void> {
     await this.db
       .update(gapClusters)
       .set({ rootCauseAuto: cause, updatedAt: now })
@@ -508,6 +604,9 @@ export class GapsRepository implements GapCollectorStore {
         >`COALESCE(${gapClusters.rootCauseManual}, ${gapClusters.rootCauseAuto})`,
         rootCauseIsManual: sql<boolean>`${gapClusters.rootCauseManual} IS NOT NULL`,
         enteredEvalSetAt: gapClusters.enteredEvalSetAt,
+        recurredAt: gapClusters.recurredAt,
+        fillPreScore: gapClusters.fillPreScore,
+        verifiedScore: gapClusters.verifiedScore,
         firstSeenAt: gapClusters.firstSeenAt,
         lastSeenAt: gapClusters.lastSeenAt,
         /**
@@ -576,22 +675,59 @@ export class GapsRepository implements GapCollectorStore {
     return row;
   }
 
-  async listItems(clusterId: string): Promise<GapItemRow[]> {
-    return this.db
-      .select()
-      .from(gapItems)
-      .where(eq(gapItems.clusterId, clusterId))
-      // NULLS LAST：手动入池的行没有 trace 开始时间，PG 的 DESC 默认 NULLS FIRST
-      // 会把它们顶到最新真实样本之上，读起来像「最近发生的」。
-      .orderBy(sql`${gapItems.traceStartTime} DESC NULLS LAST`);
+  /**
+   * B2b 自动回验：按补库文档反查「哪个簇在等这份文档」（`GapVerificationNotifier` 的入口）。
+   *
+   * 只选 id 与 status：调用方只需要这两个就能决定要不要继续，把 1024 维 centroid 拖出来
+   * 纯属浪费——而这条查询在**每一份**文档处理完成时都会跑（广播是 fan-out 的）。
+   * 走迁移 0028 建的 partial index `gap_clusters_fill_document_idx`。
+   * 软删的簇排除：它的补库结果已经没有归属了。
+   */
+  async findClusterByFillTargetDocument(
+    documentId: string,
+  ): Promise<{ id: string; status: string } | undefined> {
+    const [row] = await this.db
+      .select({ id: gapClusters.id, status: gapClusters.status })
+      .from(gapClusters)
+      .where(
+        and(eq(gapClusters.fillTargetDocumentId, documentId), isNull(gapClusters.deletedAt)),
+      )
+      .limit(1);
+    return row;
   }
 
-  /** 状态迁移。合法性由 service 的迁移表判定，这里只落库。 */
-  async updateStatus(id: string, status: GapClusterStatus, now: Date): Promise<void> {
-    await this.db
-      .update(gapClusters)
-      .set({ status, updatedAt: now })
-      .where(eq(gapClusters.id, id));
+  /**
+   * 停在 `filled` 太久的簇——终态广播多半丢了（见 `STUCK_FILLED_AFTER_MS`）。
+   *
+   * 只选 `id`：调用方拿到就直接交给 `verifyCluster`，由它自己重新读全量并判定。
+   * 按 `updated_at` 升序，卡得最久的先处理——它们等得最冤，且最可能已经被用户看见。
+   */
+  async listStuckFilled(before: Date, limit: number): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: gapClusters.id })
+      .from(gapClusters)
+      .where(
+        and(
+          eq(gapClusters.status, "filled"),
+          lt(gapClusters.updatedAt, before),
+          isNull(gapClusters.deletedAt),
+        ),
+      )
+      .orderBy(asc(gapClusters.updatedAt))
+      .limit(limit);
+    return rows.map((r) => r.id);
+  }
+
+  async listItems(clusterId: string): Promise<GapItemRow[]> {
+    return (
+      this.db
+        .select()
+        .from(gapItems)
+        .where(eq(gapItems.clusterId, clusterId))
+        // NULLS LAST：手动入池的行没有 trace 开始时间，PG 的 DESC 默认 NULLS FIRST
+        // 会把它们顶到最新真实样本之上，读起来像「最近发生的」。
+        .orderBy(sql`${gapItems.traceStartTime} DESC NULLS LAST`)
+    );
   }
 
   /** 人工改判根因。**只写 manual 列**，auto 保留——「worker 现在会怎么判」要始终可回答。 */
@@ -603,11 +739,69 @@ export class GapsRepository implements GapCollectorStore {
   }
 
   /**
+   * B2b 状态迁移的落库口（021 决策 J）：**状态 + 载荷列 + 复发标一条 UPDATE 写完**。
+   *
+   * 为什么不是「先写载荷、再写状态」两次（初版如此，peer review P1 抓出）：
+   * `verifyIngestFailed` 的载荷动作是**清空** `fill_target_document_id`，两次写之间崩溃
+   * 就留下 `status='filled'` 且 documentId 为 NULL 的行——回验监听器正是按 documentId
+   * 反查簇的，此后文档事件重投多少次都找不到它，而 `filled` 态只剩系统事件（不可达）
+   * 与 `ignore` 可走，用户连重试补库都做不到。合成一条 UPDATE 后这个中间态物理上不存在。
+   *
+   * `WHERE status = expectedStatus` 是**乐观并发校验**（peer review P2）：service 的
+   * `mustFind` 读状态与这里写状态之间有窗口，并发的 `verifyPass` + `verifyFail` 会双双
+   * 通过守卫，写出「已回验 + 复发」这种原型 §18.C 未定义的组合。
+   * `deletedAt IS NULL` 一并带上——软删的簇不该还能被推进状态。
+   *
+   * @returns false = 期望状态已不成立（并发迁移 / 簇被软删），调用方转 409。
+   */
+  async applyTransition(
+    id: string,
+    expectedStatus: string,
+    patch: {
+      status: GapClusterStatus;
+      fillDraftQuestion?: string;
+      fillDraftAnswer?: string;
+      fillTargetKbId?: string;
+      fillTargetDocumentId?: string | null;
+      fillVerifyApplicationId?: string;
+      fillVerifyConfigVersionId?: string;
+      fillPreScore?: number | null;
+      verifiedScore?: number | null;
+      recurredAt?: Date | null;
+      /** 复发窗口锚点：进入终态时置 now、离开时置 null（迁移 0029）。 */
+      terminalAt?: Date | null;
+    },
+    now: Date,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(gapClusters)
+      .set({ ...patch, updatedAt: now })
+      .where(
+        and(
+          eq(gapClusters.id, id),
+          eq(gapClusters.status, expectedStatus),
+          isNull(gapClusters.deletedAt),
+        ),
+      )
+      .returning({ id: gapClusters.id });
+    return rows.length === 1;
+  }
+
+  /**
    * 「已进评测集」是**叠加标志不是状态**（原型 `:634` 明令非排他）——只写时间戳，**不碰 status**。
    * 幂等：已标记过就保留首次时间，不刷新（它回答的是「什么时候进的」）。
    */
   async markEnteredEvalSet(id: string, now: Date): Promise<void> {
-    await this.db
+    await this.db.transaction(async (tx) => this.markEnteredEvalSetTx(tx, id, now));
+  }
+
+  /**
+   * 同上，只是**走调用方的事务**：`GapPromoteService.promote` 要让「整批用例落库」与
+   * 「打这个标志」同生共死——半批入集却已经标成「已进评测集」，簇看起来完事了，
+   * 剩下那些问题再也不会有人回来处理。
+   */
+  async markEnteredEvalSetTx(tx: Tx, id: string, now: Date): Promise<void> {
+    await tx
       .update(gapClusters)
       .set({ enteredEvalSetAt: now, updatedAt: now })
       .where(and(eq(gapClusters.id, id), isNull(gapClusters.enteredEvalSetAt)));
@@ -632,7 +826,8 @@ export class GapsRepository implements GapCollectorStore {
   async moveItems(
     itemIds: string[],
     fromClusterId: string,
-    target: { kind: "existing"; clusterId: string } | { kind: "new"; representativeQuestion: string },
+    target:
+      { kind: "existing"; clusterId: string } | { kind: "new"; representativeQuestion: string },
     now: Date,
   ): Promise<{ targetClusterId: string; sourceSoftDeleted: boolean }> {
     return this.db.transaction(async (tx) => {

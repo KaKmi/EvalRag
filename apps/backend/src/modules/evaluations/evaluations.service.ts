@@ -25,6 +25,7 @@ import {
   ONLINE_EVALUATION_WORKER,
 } from "../../platform/queue/queue.constants";
 import type { Queue } from "../../platform/queue/queue.port";
+import { SlidingWindowLimiter } from "../../platform/rate-limit/sliding-window-limiter";
 import { ModelsService } from "../models/models.service";
 import {
   ClickHouseEvaluationsRepository,
@@ -68,7 +69,15 @@ export class EvaluationsService {
    * finishCycle 在租约内写，端点侧并发写会破坏租约不变量。
    */
   private static readonly MANUAL_SCORE_RATE_LIMIT_MS = 60_000;
-  private readonly lastManualScoreAt = new Map<string, number>();
+  /**
+   * 限频（019 Boundary 5：单副本前提）。与 `ReplayService` 共用同一份实现。
+   *
+   * 这里原本是一张裸 `Map`，**只增不减**——B2b 给 `ReplayService` 那份加过期清理时
+   * 漏了这一份，同一个 bug 修了一半（清理复审指出）。抽成共享类后不会再漂。
+   */
+  private readonly limiter = new SlidingWindowLimiter(
+    EvaluationsService.MANUAL_SCORE_RATE_LIMIT_MS,
+  );
 
   async getOverview(
     query: QualityOverviewQuery,
@@ -313,18 +322,15 @@ export class EvaluationsService {
 
     // ③ 限频：只挡「会新增一次裁判调用」的请求，且失败态重试放行。
     const now = Date.now();
-    const last = this.lastManualScoreAt.get(targetTraceId);
+    // 上次判分失败 ⇒ 放行重试（这条旁路**跳过检查但仍要记时间**，
+    // 所以限频器把「查」和「记」分成两个方法，而不是一个 hit()）。
     const retryAfterFailure = job?.status === "failed";
-    if (
-      !retryAfterFailure &&
-      last !== undefined &&
-      now - last < EvaluationsService.MANUAL_SCORE_RATE_LIMIT_MS
-    ) {
+    if (!retryAfterFailure && this.limiter.isLimited(targetTraceId, now)) {
       throw new HttpException("操作过于频繁，请 1 分钟后再试", 429);
     }
 
     // 置位限频只在真正受理之后——上面的早退路径不该占用配额。
-    this.lastManualScoreAt.set(targetTraceId, now);
+    this.limiter.record(targetTraceId, now);
 
     // ④ 原子占位：抢不到说明已有同名作业 queued/running，直接回 scoring 而**不再入队**。
     // 进程内限频挡不住多副本，`singletonKey` 在 standard 策略下又是惰性的，

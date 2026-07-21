@@ -33,12 +33,59 @@ export const FOLLOWUP_RATIO_MIN = 0.5;
 /** 入集重复检测：与目标集既有用例相似度 > 此值时标「疑似重复」（原型 `:269`），用户仍可强制加入。 */
 export const DUPLICATE_SIMILARITY_MIN = 0.95;
 
+/**
+ * 入集重复检测的**跨集比对上限**：目标集用例数超过此值时，只与**前 N 条**比对。
+ *
+ * 021 §12② 当初把语义近似这一半降级掉，理由正是「跨集比对要把目标集全部用例 embed 一遍，
+ * 成本随集大小线性增长」——一次 promote 顶多 50 条候选，却可能拖着一个上千条的目标集去 embed。
+ * 封顶把单次成本钉死在 `50 + N` 个文本，与目标集规模脱钩。
+ *
+ * 代价是**漏检**（第 N+1 条之后的近似用例查不到），所以截断这件事**必须回给调用方**
+ * （`PromoteGapResponse.duplicateCheckTruncated`）——静默截断会让「没有 warning」
+ * 被当成「集里确实没有重复」。与 `GAP_COLLECT_CANDIDATE_LIMIT` 同列于此：都是成本旋钮。
+ */
+export const DUPLICATE_COMPARE_CASE_LIMIT = 200;
+
 /** 滚动频次窗口天数（原型 `:377`，与 trace TTL 30 天对齐）。 */
 export const FREQ_WINDOW_DAYS = 30;
 
-/** 缺口簇状态（B2a 可达子集；B2b 加四态时须同步 ALTER `gap_clusters_status_check`）。 */
-export const GAP_CLUSTER_STATUSES = ["pending", "routed_retrieval", "ignored"] as const;
+/**
+ * 缺口簇状态（B2b 全七态）。
+ *
+ * ⚠️ **三处独立声明必须同步**（不是互相 re-export，改一处不会带动另外两处）：
+ * 本常量 → `gaps.service.ts` 的 `TRANSITIONS` 表按它做类型约束；
+ * `packages/contracts/src/gaps.ts:GAP_CLUSTER_STATUSES` → 前端与 API 契约；
+ * `schema.ts` 的 `gap_clusters_status_check` → DB 值域（迁移 0028）。
+ * 少同步任何一处的后果：service 判定合法但 DB 拒绝（500），或前端拿到解析不了的枚举值。
+ */
+export const GAP_CLUSTER_STATUSES = [
+  "pending",
+  "routed_retrieval",
+  "ignored",
+  "drafting",
+  "reviewing",
+  "filled",
+  "verified",
+] as const;
 export type GapClusterStatus = (typeof GAP_CLUSTER_STATUSES)[number];
+
+/** 「复发」判定窗口（原型 `:376`/`:708`：「7 天内新增 ≥5 条」）。 */
+export const RECURRENCE_WINDOW_DAYS = 7;
+
+/** 「复发」判定阈值：窗口内新增相似样本达到此数，已终结的簇自动重开为 `pending` + 复发标。 */
+export const RECURRENCE_MIN_ITEMS = 5;
+
+/** 回验通过阈值（原型 `:370`：「新分数 ≥80 → 已回验✓」）。 */
+export const VERIFY_PASS_THRESHOLD = 80;
+
+/**
+ * 质心 CAS 冲突后的**总尝试次数**（首次 + 重试；021 §12② 的收口）。
+ *
+ * 冲突要求两个实例在租约超时窗口内并发处理同一个簇，极罕见；试到这个数还撞说明是持续的
+ * 高并发写入，此时让它冒泡比原地打转好。与 `GAP_COLLECT_*` 同列于此，是因为它和租约时长、
+ * 单批上限一样属于「收集器的运行机制旋钮」，不是散写的魔法数字。
+ */
+export const CENTROID_CAS_ATTEMPTS = 3;
 
 /** 根因分诊三值（原型 `:371`）。 */
 export const GAP_ROOT_CAUSES = ["missing", "retrieval", "generation"] as const;
@@ -70,3 +117,41 @@ export const GAP_COLLECT_LAG_BUFFER_MS = 15 * 60 * 1000;
 
 /** 收集节奏。比在线评测（*\/15）慢一档——问题池是趋势看板，不需要准实时。 */
 export const GAP_COLLECT_CRON = "*/30 * * * *";
+
+/**
+ * 「已终结」的两个状态——复发判定只对它们生效（原型 `:376`/`:708`：
+ * 「已入库/已忽略的簇再收到相似问题只涨频次不重开；已回验后 7 天内 ≥5 条才重开」）。
+ * 进入其一时记 `terminal_at` 作为那个 7 天窗口的起点。
+ *
+ * ⚠️ **必须只有这一份**。它同时驱动一件事的两端：`applyTransition` 据它决定何时盖
+ * `terminal_at` 锚点（写侧），`checkRecurrence` 据它决定要不要查库判复发（读侧）。
+ * 清理复审三位独立指出：B2b 初版在 `gaps.service.ts` 与 `gap-ingest.ts` 各写了一份，
+ * 类型还不同（`Set<GapClusterStatus>` vs `readonly string[]`）。真出事的方式是静默的——
+ * 将来加第八个终态只改写侧，锚点照打而复发判定永远返回 false，
+ * 「复发功能对新状态失效」不会让任何测试变红。
+ */
+export const GAP_TERMINAL_STATUSES = new Set<GapClusterStatus>(["ignored", "verified"]);
+
+/**
+ * `filled` 兜底扫描：停在该态超过这么久的簇，视为「终态广播丢了」，由收集器补触发一次回验。
+ *
+ * **为什么需要**：`filled` 的出口只有系统事件（四条 verify*），唯一入口是
+ * `DocumentChangeNotifier` 的终态广播。worker 若在写完 `documents.status` 之后、
+ * 广播之前被杀/OOM，那次广播永不重放，簇就永久停在一个用户只剩「忽略」可走的态里——
+ * 这次补库的成果和缺口一起被埋掉。`gap-fill.service` 改成「先 CAS 抢占再上传」之后
+ * 又多了一个窗口：抢占成功、上传返回前崩溃，簇会停在 `filled` 且没有文档 id。
+ *
+ * **阈值为什么取这么大**：判据是 `updated_at`，而一次回验（重放 + 判分）实测约 25 秒，
+ * 期间簇一直停在 `filled` 且 `updated_at` 停留在入库那一刻。取小了会在上一次回验
+ * 还没跑完时重复触发——虽然 CAS 会让输的那次落空（不会写坏数据），但白烧一次
+ * 重放和判分的模型调用。15 分钟远大于任何一次正常回验，且小于收集器半小时的周期。
+ */
+export const STUCK_FILLED_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * 单轮兜底扫描最多补触发几个簇。
+ *
+ * 每个都要跑一次完整重放 + 判分（约 25 秒），不设上限的话一次积压能把收集周期
+ * 拖成几十分钟，把它本职的入池工作饿死。剩下的下一轮继续——卡住的簇不会跑掉。
+ */
+export const STUCK_FILLED_SCAN_LIMIT = 5;

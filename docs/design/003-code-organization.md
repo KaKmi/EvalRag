@@ -145,7 +145,7 @@ rag-service/
 > 注意:这与 002 的 DAG 不同——002 是**建造顺序**,这里是**代码 import 依赖**。两者一致但视角不同。
 
 ```
-⓪ 知识缺口    gaps 问题池 / 坏样本聚类(E-W4 B2a 新顶点，见 021)
+⓪ 知识缺口    gaps 问题池 / 坏样本聚类 / 补库人审向导 / 入库后自动回验(E-W4，见 021)
                   │  依赖 ↓（eval-runs 进评测集 + evaluations 阈值 + models embedding）
 ① 评测编排    eval-runs 离线评测 run(E-W2a，见 018)
                   │  依赖 ↓（chat 编排 + evaluations 判分 + applications 版本解析）
@@ -165,7 +165,7 @@ rag-service/
 ```
 
 精确依赖边:
-- `gaps` → `eval-runs`(进评测集：批量建 draft 用例)、`evaluations`(阈值/judge 版本/embeddingModelId)、`models`(`ModelProviderPort`：聚类 embedding 与 gold 草拟)、`platform/{clickhouse,persistence,queue}`——E-W4 B2a 新顶点，见 021 决策 A；**除三个聚合根（`gaps` 域自身、`app.module.ts`、`db/schema.ts`）外，`apps/backend/src` 下任何文件不得 import `gaps`**（`eslint.config.mjs` 的 Boundary ⑤ 机械强制）。**无** `gaps → traces`（自持 CH 只读 repository，同 evaluations 先例）、**无** `gaps → chunks/retrieval/applications`
+- `gaps` → `eval-runs`(进评测集：批量建 draft 用例)、`evaluations`(阈值/judge 版本/embeddingModelId)、`models`(`ModelProviderPort`：聚类 embedding 与 gold 草拟)、`documents`(**B2b 新增，写**：人审后的 Q&A 合成文档走 upload 管线)、`knowledge-bases`(**B2b 新增，只读**：入库前校验目标 KB `status==='ready'`)、`platform/{clickhouse,persistence,queue,events}`——E-W4 B2a 新顶点（B2b 追加两条出边），见 021 决策 A 与 §9b 决策 I；**除三个聚合根（`gaps` 域自身、`app.module.ts`、`db/schema.ts`）外，`apps/backend/src` 下任何文件不得 import `gaps`**（`eslint.config.mjs` 的 Boundary ⑤ 机械强制）。**无** `gaps → traces`（自持 CH 只读 repository，同 evaluations 先例）、**无** `gaps → chunks/retrieval/applications`
 - `eval-runs` → `chat`(编排 `OrchestrationService`)、`evaluations`(判分 `EvaluationJudgeService`)、`applications`(`resolveForTest` 版本解析)——E-W2a，见 018 决策 A；反向依赖一律禁止（`chat`/`evaluations` 不感知 `eval-runs`）
 - `chat` → `applications`、`retrieval`、`prompts`、`node-runtime`、`conversations`、`observability`（配置只经 `ApplicationConfigResolver`，LLM 调用经 node-runtime）
 - `evaluations` → `conversations`、`chunks`、`models` + ClickHouse 读客户端（E-W1，见下方「E-W1 evaluations 域边界」；与 `traces` 互不 import，写侧经 OTLP `rag.eval` 解耦）

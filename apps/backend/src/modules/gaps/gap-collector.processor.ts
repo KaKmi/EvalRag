@@ -11,15 +11,21 @@ import {
   type PoolCandidate,
 } from "./clickhouse-gaps.repository";
 import {
+  CENTROID_CAS_ATTEMPTS,
   GAP_COLLECT_CANDIDATE_LIMIT,
   GAP_COLLECT_CRON,
   GAP_COLLECT_LAG_BUFFER_MS,
   GAP_COLLECT_LEASE_MS,
   GAP_COLLECT_WORKER_NAME,
+  STUCK_FILLED_AFTER_MS,
+  STUCK_FILLED_SCAN_LIMIT,
 } from "./gap.constants";
-import { assignToCluster, recomputeRootCause } from "./gap-ingest";
+import { GapCentroidStaleError } from "./gap-clustering";
+import { assignToCluster, checkRecurrence, recomputeRootCause } from "./gap-ingest";
 import { clusterKeyOf, detectFollowUp, isRewriteResolved, shouldEnterPool } from "./gap-triage";
 import { GapsRepository, type GapCursorState } from "./gaps.repository";
+import { GapsService } from "./gaps.service";
+import { GapVerificationService } from "./gap-verification.service";
 
 const WorkerPayloadSchema = z.strictObject({ workerName: z.string().min(1).max(100) });
 
@@ -69,6 +75,18 @@ export class GapCollectorProcessor implements OnModuleInit {
     private readonly clickhouse: ClickHouseGapsRepository,
     private readonly evaluations: EvaluationsRepository,
     private readonly models: ModelsService,
+    // 「复发重开」必须走状态机（`TRANSITIONS`），故收集器持有 service 而不是自己 UPDATE status。
+    // 不构成循环依赖：`GapsService` 只依赖 GapsRepository / EvaluationsRepository / ModelsService，
+    // 三者都不认识本类（`gaps.di-metadata.spec.ts` 守构造参数可解析，`pnpm test` 全量验行为）。
+    private readonly gaps: GapsService,
+    /**
+     * 兜底扫描用（`sweepStuckFilled`）。同样必须写**具体类**——上面那段关于
+     * `emitDecoratorMetadata` 的警告对每一个构造参数都成立。
+     *
+     * 不构成循环依赖：`GapVerificationService` 依赖 GapsService / ReplayService /
+     * DocumentsRepository，三者都不认识本类（`gaps.di-metadata.spec.ts` 守构造参数可解析）。
+     */
+    private readonly verification: GapVerificationService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -142,8 +160,13 @@ export class GapCollectorProcessor implements OnModuleInit {
           : [];
 
       let collected = 0;
-      // 没拿到向量的候选：游标**不许越过**它们（见下方推进循环）。
-      const unembedded = new Set<string>();
+      /**
+       * 本轮**没能处理完**的候选：游标不许越过它们（见下方推进循环）。
+       * 两个来源，处置完全一致（都要留到下一轮重扫）：
+       *  · embedding 少返 —— provider 截断/短返；
+       *  · 质心 CAS 连撞 —— 有别的实例在持续写同一个簇。
+       */
+      const deferred = new Set<string>();
       for (let index = 0; index < enriched.length; index += 1) {
         const entry = enriched[index];
         const embedding = vectors[index];
@@ -153,11 +176,27 @@ export class GapCollectorProcessor implements OnModuleInit {
         if (!embedding || embedding.length === 0) {
           // 绝不拿别人的向量给它归簇——那会污染一个真实簇的质心。
           this.logger.warn(`embedding 缺失，本轮不处理 trace ${entry.candidate.traceId}`);
-          unembedded.add(entry.candidate.traceId);
+          deferred.add(entry.candidate.traceId);
           continue;
         }
-        const inserted = await this.ingest(entry, embedding, now);
-        if (inserted) collected += 1;
+        try {
+          const inserted = await this.ingest(entry, embedding, now);
+          if (inserted) collected += 1;
+        } catch (error) {
+          /**
+           * 质心 CAS 试满仍冲突：**只放弃这一条**，不掀翻整轮。
+           *
+           * 让它冒泡出去的话 `finishCycle` 根本不会执行 ⇒ 游标一步不动、本轮已入池的
+           * 那些条下轮全部重扫（幂等，不会重复计频，但纯属白跑），而只要那个簇持续被
+           * 别的实例写，每一轮都会以同样方式崩——正是上面 embedding 那段注释里说的
+           * 「永久崩溃循环」。按同一套处置：记 warn、游标停在它之前、下轮重来。
+           */
+          if (!(error instanceof GapCentroidStaleError)) throw error;
+          this.logger.warn(
+            `质心并发冲突未能在 ${CENTROID_CAS_ATTEMPTS} 次内解决，本轮不处理 trace ${entry.candidate.traceId}`,
+          );
+          deferred.add(entry.candidate.traceId);
+        }
       }
 
       /**
@@ -165,7 +204,7 @@ export class GapCollectorProcessor implements OnModuleInit {
        * 的 `advancesCursor` + `break`）。
        *
        * 没入池的候选可以放心越过：`shouldEnterPool` 是幂等纯函数，重扫只会得到同样结论。
-       * 但 embedding 少返的候选**不能**越过——`listPoolCandidates` 只往前看，越过即永久丢失。
+       * 但 `deferred` 里的**不能**越过——`listPoolCandidates` 只往前看，越过即永久丢失。
        * provider 若对大批量恒截断，每轮都会静默丢掉近百条真实缺口样本，而
        * `collected`/`skipped`/`healthy` 全都显示正常。宁可原地卡住等下一轮重试。
        */
@@ -174,7 +213,7 @@ export class GapCollectorProcessor implements OnModuleInit {
         lastTraceId: watermark.lastTraceId,
       };
       for (const item of candidates) {
-        if (unembedded.has(item.traceId)) break;
+        if (deferred.has(item.traceId)) break;
         cursor = { lastTs: item.cursorTs, lastTraceId: item.traceId };
       }
       const cursorMoved =
@@ -189,6 +228,15 @@ export class GapCollectorProcessor implements OnModuleInit {
         return { status: "lease_lost", collected, skipped: candidates.length - collected };
       }
 
+      /**
+       * 顺带扫一遍卡住的 `filled` 簇（见 `STUCK_FILLED_AFTER_MS`）。
+       *
+       * 放在**租约之内**：这是个写操作，多实例同时补触发只会互相 CAS 落空、白烧模型调用。
+       * 放在游标推进**之后**：它与入池是两件独立的事，不该因为它失败就让本轮的
+       * 入池成果不落库。
+       */
+      await this.sweepStuckFilled(now);
+
       return {
         status: "healthy",
         collected,
@@ -197,6 +245,41 @@ export class GapCollectorProcessor implements OnModuleInit {
       };
     } finally {
       await this.store.releaseLease(workerName, owner, now);
+    }
+  }
+
+  /**
+   * 补触发那些「终态广播丢了」的回验。
+   *
+   * `filled` 的出口只有系统事件，唯一入口是 `DocumentChangeNotifier` 的终态广播；
+   * worker 若在写完 `documents.status` 之后、广播之前被杀，那次广播永不重放，
+   * 簇就永久停在一个用户只剩「忽略」可走的态里——补库的成果和缺口一起被埋掉。
+   *
+   * **整个方法自吞异常**：兜底扫描是附加动作，它失败绝不该让一次正常的收集轮次报错。
+   * 逐个 try/catch 而不是整体包一层——一个簇的回验炸了不该让后面的都收不到补触发。
+   *
+   * 幂等性由 `verifyCluster` 自己保证（开头判 `status !== "filled"` 直接返回，
+   * 且所有写入走 CAS）：与正常广播撞车时，输的那次落空，不会写坏数据。
+   */
+  private async sweepStuckFilled(now: Date): Promise<void> {
+    try {
+      const stuck = await this.store.listStuckFilled(
+        new Date(now.getTime() - STUCK_FILLED_AFTER_MS),
+        STUCK_FILLED_SCAN_LIMIT,
+      );
+      if (stuck.length === 0) return;
+
+      // 用 warn 而非 debug：走到这里说明有广播真的丢了，运维应当看得见频次。
+      this.logger.warn(`补触发 ${stuck.length} 个卡在 filled 的簇的回验（终态广播疑似丢失）`);
+      for (const clusterId of stuck) {
+        try {
+          await this.verification.verifyCluster(clusterId, now);
+        } catch (error) {
+          this.logger.error(`兜底回验失败：cluster=${clusterId}（${toMessage(error)}）`);
+        }
+      }
+    } catch (error) {
+      this.logger.error(`filled 兜底扫描失败（不影响本轮入池）：${toMessage(error)}`);
     }
   }
 
@@ -222,7 +305,10 @@ export class GapCollectorProcessor implements OnModuleInit {
     };
   }
 
-  /** 单条候选落库：归簇决策 → 写 item（幂等）→ 重算簇根因。返回是否真的新增了成员。 */
+  /**
+   * 单条候选落库：归簇决策 → 写 item（幂等）→ 重算簇根因 → 复发判定。
+   * 返回是否真的新增了成员。
+   */
   private async ingest(
     entry: ReturnType<GapCollectorProcessor["enrich"]>,
     embedding: number[],
@@ -230,7 +316,8 @@ export class GapCollectorProcessor implements OnModuleInit {
   ): Promise<boolean> {
     const { candidate } = entry;
     // 归簇与重算根因走共享实现（`gap-ingest.ts`），与手动入池口径逐字一致。
-    const { clusterId, inserted } = await assignToCluster(
+    const { clusterId, inserted, statusBeforeAttach, terminalAtBeforeAttach } =
+      await assignToCluster(
       this.store,
       entry.clusterKey,
       {
@@ -256,6 +343,34 @@ export class GapCollectorProcessor implements OnModuleInit {
     if (!inserted) return false;
 
     await recomputeRootCause(this.store, clusterId, now);
+
+    /**
+     * 「复发」重开（原型 `:376`/`:708`）。判定用的是**并入之前**的状态：
+     * 刚建出来的新簇此刻就是 `pending`，永远不该触发。
+     *
+     * 重开走 `GapsService.reopenRecurred` 而不是直接写 status——它带 `WHERE status = 期望值`
+     * 的 CAS，簇在本轮跑的过程中被人手动动过（比如刚从 `ignored` 点了「重开」）时会抛 409。
+     * 那不是故障：目标状态已经达成了，本条样本也已经落库，**不该掀翻整轮**，记一条 warn 即可。
+     */
+    if (statusBeforeAttach !== undefined) {
+      const recurred = await checkRecurrence(
+        this.store,
+        clusterId,
+        statusBeforeAttach,
+        terminalAtBeforeAttach ?? null,
+        now,
+      );
+      if (recurred) {
+        try {
+          await this.gaps.reopenRecurred(clusterId, now);
+          this.logger.log(`缺口簇 ${clusterId} 在窗口内再度活跃，已重开并标记复发`);
+        } catch (error) {
+          this.logger.warn(
+            `缺口簇 ${clusterId} 复发重开未生效（状态已被并发改动）：${toMessage(error)}`,
+          );
+        }
+      }
+    }
     return true;
   }
 }

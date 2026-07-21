@@ -1,5 +1,13 @@
 import type { PoolCandidate } from "./clickhouse-gaps.repository";
-import { GAP_COLLECT_WORKER_NAME, type GapRootCause } from "./gap.constants";
+import {
+  GAP_COLLECT_WORKER_NAME,
+  RECURRENCE_MIN_ITEMS,
+  STUCK_FILLED_AFTER_MS,
+  STUCK_FILLED_SCAN_LIMIT,
+  RECURRENCE_WINDOW_DAYS,
+  type GapClusterStatus,
+  type GapRootCause,
+} from "./gap.constants";
 import { GapCollectorProcessor } from "./gap-collector.processor";
 import type {
   AttachItemResult,
@@ -10,7 +18,8 @@ import type {
   GapItemDraft,
   NearestCluster,
 } from "./gaps.repository";
-import { cosineSimilarity } from "./gap-clustering";
+import { CENTROID_CAS_ATTEMPTS } from "./gap.constants";
+import { GapCentroidStaleError, cosineSimilarity } from "./gap-clustering";
 
 /**
  * 收集器 worker 的行为测试。全部断言落在**产出的簇/成员/游标**上，不断言「某方法被调用过」
@@ -37,10 +46,18 @@ interface FakeCluster {
   rootCauseAuto: GapRootCause | null;
   rootCauseManual: GapRootCause | null;
   deleted: boolean;
+  /** 簇进入终态的时刻——复发窗口的锚点（迁移 0029）。 */
+  terminalAt: Date | null;
+  /** 非空即屏5 的「复发」红点。由假 `GapsService.reopenRecurred` 置。 */
+  recurredAt: Date | null;
+  /** 最后一次写入时刻——`filled` 兜底扫描按它判「卡了多久」。 */
+  updatedAt: Date | null;
 }
 
 interface FakeItem extends GapItemDraft {
   clusterId: string;
+  /** 复发判定的时间口径是**入池时间**（`gap_items.created_at`），不是 `traceStartTime`。 */
+  createdAt: Date;
 }
 
 /**
@@ -57,6 +74,15 @@ class FakeGapStore implements GapCollectorStore {
   leaseStolen = false;
   failures: string[] = [];
   private seq = 0;
+
+  /** 兜底扫描的数据源。按 `updatedAt` 升序返回停在 `filled` 且早于 `before` 的簇。 */
+  async listStuckFilled(before: Date, limit: number): Promise<string[]> {
+    return this.clusters
+      .filter((c) => c.status === "filled" && c.updatedAt !== null && c.updatedAt < before)
+      .sort((a, b) => (a.updatedAt as Date).getTime() - (b.updatedAt as Date).getTime())
+      .slice(0, limit)
+      .map((c) => c.id);
+  }
 
   async getOrCreateWatermark(_w: string, _now: Date, seedFrom: string): Promise<GapCursorState> {
     if (this.cursor.lastTs === "") this.cursor = { lastTs: seedFrom, lastTraceId: "" };
@@ -84,10 +110,30 @@ class FakeGapStore implements GapCollectorStore {
     return { id: best.id, centroid: [...best.centroid], freq: best.freq };
   }
 
+  /**
+   * 注入并发对手：置成 N 就让接下来 N 次 `existing` 分支的写入之前，先**真的**替另一个实例
+   * 并入一条样本（`freq + 1` 且质心换成 `rivalCentroid`）。
+   *
+   * ⚠️ 刻意**不是**「直接抛 `GapCentroidStaleError`」（初版如此，peer review P2 抓出）：
+   * 那样 `freq` 不变，重试时过期的 `expectedFreq` 仍然匹配，于是「把 target 提到循环外、
+   * 拿过期的 nextCentroid 重写一遍」这种**恰恰是本次要修的缺陷**的实现也能通过测试。
+   * 让 fake 真的改 freq 与 centroid，重试就必须重新读、重新算才可能成功。
+   */
+  forceCentroidStale = 0;
+  /**
+   * 并发对手写入的质心。重试后的最终质心必须体现它，否则就是又被覆盖了。
+   *
+   * 默认值与 `VEC_A=[1,0]` 的余弦是 `1/√1.25 ≈ 0.894`，**刻意高于** `CLUSTER_SIMILARITY_MIN`
+   * （0.85）：这样重试时最近邻判定仍然落回同一个簇、继续走 `existing` 分支，才测得到 CAS。
+   * 若换成正交向量（如 `[0,1]`），重试会正确地判成「不相似」转而建新簇——那是另一条路径，
+   * 断言 CAS 的用例就落空了。
+   */
+  rivalCentroid: number[] = [1, 0.5];
+
   async attachItem(
     target: GapClusterTarget,
     item: GapItemDraft,
-    _now: Date,
+    now: Date,
   ): Promise<AttachItemResult> {
     // `gap_items_source_trace_unique` 的先探分支：命中就**一行不写**地返回。
     // 真实现把它放在事务最前面，正是为了不留下「建了簇却插不进 item」的空簇。
@@ -97,6 +143,17 @@ class FakeGapStore implements GapCollectorStore {
     let cluster: FakeCluster;
     if (target.kind === "existing") {
       cluster = this.clusters.find((c) => c.id === target.clusterId)!;
+      // 并发对手抢先并入一条：freq 与 centroid 都真的变了（见 forceCentroidStale 的说明）。
+      if (this.forceCentroidStale > 0) {
+        this.forceCentroidStale -= 1;
+        cluster.freq += 1;
+        cluster.centroid = [...this.rivalCentroid];
+      }
+      /**
+       * 真实现的 `WHERE freq = expectedFreq`（B2b 质心 CAS）。fake 必须一起守这条，
+       * 否则「重试逻辑」在测试里根本走不到——fake 无条件放行的话，CAS 永远不失败。
+       */
+      if (cluster.freq !== target.expectedFreq) throw new GapCentroidStaleError(cluster.id);
     } else {
       cluster = {
         id: `cluster-${(this.seq += 1)}`,
@@ -107,13 +164,25 @@ class FakeGapStore implements GapCollectorStore {
         rootCauseAuto: null,
         rootCauseManual: null,
         deleted: false,
+        recurredAt: null,
       };
       this.clusters.push(cluster);
     }
-    this.items.push({ ...item, clusterId: cluster.id });
+    // 真实现由 `RETURNING` 捎回并入**之前**的状态与终态时刻（那条 UPDATE 两列都不写）。
+    const statusBeforeAttach = cluster.status as GapClusterStatus;
+    const terminalAtBeforeAttach = cluster.terminalAt;
+    this.items.push({ ...item, clusterId: cluster.id, createdAt: now });
     cluster.freq += 1;
     if (target.kind === "existing") cluster.centroid = [...target.nextCentroid];
-    return { clusterId: cluster.id, inserted: true };
+    return { clusterId: cluster.id, inserted: true, statusBeforeAttach, terminalAtBeforeAttach };
+  }
+
+  /** 调用次数——「`pending` 簇不该白查一次库」那条用例要断言它没被碰过。 */
+  countRecentItemsCalls = 0;
+
+  async countRecentItems(clusterId: string, windowStart: Date): Promise<number> {
+    this.countRecentItemsCalls += 1;
+    return this.items.filter((i) => i.clusterId === clusterId && i.createdAt >= windowStart).length;
   }
 
   async listClusterTriageInputs(clusterId: string): Promise<ClusterTriageInput[]> {
@@ -156,10 +225,39 @@ class FakeGapStore implements GapCollectorStore {
       rootCauseAuto: null,
       rootCauseManual: null,
       deleted: false,
+      terminalAt: null,
+      recurredAt: null,
+      updatedAt: null,
       ...patch,
     };
     this.clusters.push(cluster);
     return cluster;
+  }
+
+  /** 造历史成员：`createdAt` 决定它落不落进复发窗口（`freq` 一并对齐，别造出自相矛盾的簇）。 */
+  seedItems(clusterId: string, count: number, createdAt: Date): void {
+    for (let i = 0; i < count; i += 1) {
+      this.items.push({
+        clusterId,
+        createdAt,
+        source: "online",
+        sourceTraceId: `seeded-${clusterId}-${(this.seq += 1)}`,
+        question: "历史样本",
+        rewrittenQuestion: null,
+        rewriteResolved: true,
+        embedding: [1, 0],
+        traceStartTime: createdAt,
+        faithfulness: null,
+        answerRelevancy: null,
+        contextPrecision: null,
+        confidence: 30,
+        fallbackUsed: false,
+        noCitations: false,
+        followUpSuspected: false,
+      });
+    }
+    const cluster = this.clusters.find((c) => c.id === clusterId);
+    if (cluster) cluster.freq += count;
   }
 }
 
@@ -185,6 +283,10 @@ function candidate(patch: Partial<PoolCandidate> & { traceId: string }): PoolCan
 interface Harness {
   processor: GapCollectorProcessor;
   store: FakeGapStore;
+  /** 被 `sweepStuckFilled` 补触发回验的簇 id，按顺序。 */
+  verified: string[];
+  /** 设成某个簇 id ⇒ 对它的回验抛错，用来验「一个炸了不影响后面的」。 */
+  failVerifyOn: string | null;
   embedCalls: string[][];
   settingsReads: number;
   evaluationsTouched: string[];
@@ -203,6 +305,8 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     embedCalls,
     settingsReads: 0,
     evaluationsTouched: [],
+    verified: [],
+    failVerifyOn: null,
     processor: undefined as never,
   };
 
@@ -230,6 +334,43 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     },
   });
   const queue = { publish: jest.fn(), subscribe: jest.fn(), schedule: jest.fn() };
+  /**
+   * 假 `GapsService`：只复刻 `reopenRecurred` 的**可观察效果**（状态回 `pending` + 置复发标）
+   * 与它的 CAS 守卫（`from` 不合法就抛，同真实现的 400/409）。
+   * 断言全部落在簇的最终状态上，不断言「这个方法被调用过」。
+   */
+  const gaps = {
+    reopenRecurred: async (id: string, now: Date) => {
+      const cluster = store.clusters.find((c) => c.id === id)!;
+      if (cluster.status !== "ignored" && cluster.status !== "verified") {
+        throw new Error(`illegal transition: ${cluster.status} --reopenRecurred--> pending`);
+      }
+      cluster.status = "pending";
+      cluster.recurredAt = now;
+      return undefined as never;
+    },
+  };
+
+  /**
+   * 假回验服务：只记录「谁被补触发了」。
+   *
+   * ⚠️ 这个参数**必须传**。加它的那一版忘了改本 harness，第 7 个参数是 `undefined`，
+   * `sweepStuckFilled` 里那句 `this.verification.verifyCluster` 抛
+   * `Cannot read properties of undefined`——而该方法整体自吞异常，于是
+   * **整个兜底扫描是死的，25 个测试照样全绿**。spec 不在 tsconfig 覆盖内，tsc 也看不见。
+   * 本波第 6 次踩「看起来在跑、实际是死的」这一类坑。
+   */
+  const verified: string[] = [];
+  harness.verified = verified;
+  const verification = {
+    verifyCluster: async (clusterId: string) => {
+      if (harness.failVerifyOn === clusterId) throw new Error("判官不可用");
+      verified.push(clusterId);
+      // 复刻真实语义：回验完成后簇离开 filled，下一轮不该再被扫到。
+      const c = store.clusters.find((x) => x.id === clusterId);
+      if (c) c.status = "verified";
+    },
+  };
 
   harness.processor = new GapCollectorProcessor(
     queue as never,
@@ -237,6 +378,8 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     clickhouse as never,
     evaluations as never,
     models as never,
+    gaps as never,
+    verification as never,
   );
   return harness;
 }
@@ -425,6 +568,76 @@ describe("GapCollectorProcessor（B2a 收集器：游标 + 租约 + 增量聚类
     expect(store.items).toHaveLength(1);
   });
 
+  // ───────────────── B2b：质心 CAS（021 §12② 的收口） ─────────────────
+
+  it("质心 CAS 冲突后重算重试：最终质心体现**双方**的贡献，而不是覆盖掉对手", async () => {
+    // 一轮内两条同向量候选：第一条建簇（centroid = VEC_A，freq 1），第二条归入它。
+    // 给第二条注入一个**真的写了库**的并发对手：freq → 2、centroid → rivalCentroid。
+    // 正确实现必须重新读到 (rival, 2) 再算增量平均；若拿旧的 nextCentroid 重写，
+    // 对手那次贡献就被抹掉——下面对质心数值的断言正是用来抓这件事的。
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
+      [VEC_A, VEC_A],
+    );
+    store.forceCentroidStale = 1;
+
+    const result = await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(result.status).toBe("healthy");
+    expect(store.clusters).toHaveLength(1);
+    expect(store.clusters[0].freq).toBe(3); // 建簇 1 + 对手 1 + 重试成功 1
+    expect(store.items).toHaveLength(2);
+
+    // 重试时观察到的是 (centroid=[1,0.5], freq=2)，并入 VEC_A=[1,0] 后应为
+    // ([1,0.5]*2 + [1,0]) / 3 = [1, 1/3]。若实现把 target 提到循环外、拿过期的
+    // nextCentroid 重写一遍（正是本次要修的缺陷），第二维会是 0 而不是 1/3。
+    expect(store.clusters[0].centroid[0]).toBeCloseTo(1, 10);
+    expect(store.clusters[0].centroid[1]).toBeCloseTo(1 / 3, 10);
+  });
+
+  it("CAS 一直冲突时**只放弃那一条**，整轮照常收尾（不掀翻 finishCycle）", async () => {
+    // 让它冒泡出整轮的话，游标一步不动、本轮已入池的条目下轮全部白跑，
+    // 而只要那个簇持续被别的实例写，每轮都以同样方式崩——就是「永久崩溃循环」。
+    const { processor, store } = makeHarness(
+      [
+        candidate({ traceId: "a".repeat(32), cursorTs: "2026-07-19 02:00:01.000000000" }),
+        candidate({ traceId: "b".repeat(32), cursorTs: "2026-07-19 02:00:02.000000000" }),
+      ],
+      [VEC_A, VEC_A],
+    );
+    store.forceCentroidStale = 99; // 每次都冲突
+
+    const result = await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(result.status).toBe("healthy"); // 整轮走完，不是抛出
+    expect(result.collected).toBe(1); // 只有第一条入池
+    // 游标停在冲突那条**之前**：下一轮它还会被重新扫到。
+    expect(store.cursor).toEqual({
+      lastTs: "2026-07-19 02:00:01.000000000",
+      lastTraceId: "a".repeat(32),
+    });
+  });
+
+  it("CAS 失败不会留下半条数据：那条 item 没插进去", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) }), candidate({ traceId: "b".repeat(32) })],
+      [VEC_A, VEC_A],
+    );
+    store.forceCentroidStale = 99;
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    // 第一条正常入池；第二条一路撞 CAS ⇒ **它自己一行都没写进去**。
+    // 真实现靠事务回滚保证这点；fake 的 CAS 检查发生在插 item 之前，等价。
+    expect(store.items).toHaveLength(1);
+    expect(store.items[0].sourceTraceId).toBe("a".repeat(32));
+
+    // freq 只反映「建簇 1 + 并发对手每次尝试各并入 1」；**没有**我方的贡献。
+    // 断言具体数值而不是「没涨」：对手是真的在写库（这正是 fake 要模拟的并发），
+    // 写成「不涨」反而会把一个忠实的 fake 判成错的。
+    expect(store.clusters[0].freq).toBe(1 + CENTROID_CAS_ATTEMPTS);
+  });
+
   it("租约被接管时如实报 lease_lost，不假装 healthy", async () => {
     const { processor, store } = makeHarness([candidate({ traceId: "a".repeat(32) })], [VEC_A]);
     store.leaseStolen = true; // 本轮跑超时，游标 UPDATE 影响 0 行
@@ -468,5 +681,233 @@ describe("GapCollectorProcessor（B2a 收集器：游标 + 租约 + 增量聚类
     expect(result.status).toBe("model_unavailable");
     expect(store.cursor.lastTraceId).toBe("");
     expect(store.failures).toHaveLength(1);
+  });
+
+  // ───────────────── B2b：「复发」重开（原型 `:376` / `:708`） ─────────────────
+  //
+  // 规则：已「已入库/已忽略」的簇再收到相似新问题只涨频次、不重开；但若在
+  // `RECURRENCE_WINDOW_DAYS` 天内新增达到 `RECURRENCE_MIN_ITEMS` 条，自动重开为
+  // `pending` 并标「复发」。本轮新入池的这一条**计入**分子（它正是压垮阈值的那根稻草）。
+
+  /** 窗口内的时间点：足够旧到能和「本轮新增」区分开，又没出窗口。 */
+  const IN_WINDOW = new Date(NOW.getTime() - (RECURRENCE_WINDOW_DAYS - 1) * 24 * 60 * 60 * 1000);
+  /** 窗口外：比窗口起点还早一天。 */
+  const OUT_OF_WINDOW = new Date(
+    NOW.getTime() - (RECURRENCE_WINDOW_DAYS + 1) * 24 * 60 * 60 * 1000,
+  );
+
+  it(`已忽略的簇窗口内新增第 ${RECURRENCE_MIN_ITEMS} 条 ⇒ 重开为 pending 并标复发`, async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "ignored" });
+    // 本轮这条落地后正好凑满阈值。
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 1, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("pending");
+    expect(store.clusters[0].recurredAt).toEqual(NOW);
+  });
+
+  it(`窗口内只有 ${RECURRENCE_MIN_ITEMS - 1} 条时不重开（阈值是「达到」不是「接近」）`, async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "ignored" });
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 2, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("ignored");
+    expect(store.clusters[0].recurredAt).toBeNull();
+  });
+
+  it("**刚被忽略的热簇不会被它忽略之前的历史立刻顶回来**（窗口从终态时刻起算）", async () => {
+    // peer review P2：原型说的是「已回验**后** 7 天内新增 ≥5 条」——锚点是终态时刻。
+    // 只按滚动 7 天数的话，一个本周命中过 N 次的热簇，运营刚点「忽略」，
+    // 下一条相似样本进来计数就已过阈值、立刻重开——「频次+1 但不重开」对**真正会被忽略的簇**
+    // 永远不成立，[忽略] 按钮等于没有。
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const justIgnored = new Date(NOW.getTime() - 60 * 1000); // 一分钟前刚被忽略
+    const cluster = store.seedCluster({
+      centroid: VEC_A,
+      freq: 0,
+      status: "ignored",
+      terminalAt: justIgnored,
+    });
+    // 忽略**之前**就攒够了阈值的历史样本，且全都落在滚动 7 天窗口内。
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS + 2, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    // 忽略之后只新增了本轮这 1 条，远不到阈值 ⇒ 只涨频次，不重开。
+    expect(store.clusters[0].status).toBe("ignored");
+    expect(store.clusters[0].recurredAt).toBeNull();
+  });
+
+  it("终态之后才攒够阈值 ⇒ 照常重开（锚点不是「永不重开」的挡箭牌）", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    // 很久以前就被忽略了，此后窗口内又攒了 N-1 条，本轮这条压垮阈值。
+    const longAgo = new Date(NOW.getTime() - RECURRENCE_WINDOW_DAYS * 10 * 24 * 60 * 60 * 1000);
+    const cluster = store.seedCluster({
+      centroid: VEC_A,
+      freq: 0,
+      status: "ignored",
+      terminalAt: longAgo,
+    });
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 1, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("pending");
+    expect(store.clusters[0].recurredAt).toEqual(NOW);
+  });
+
+  it("窗口外的老样本不进分子——否则一个陈年老簇随便来一条就会被顶回待处理", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "ignored" });
+    // 总数够阈值，但全部落在窗口之外 ⇒ 分子只有本轮这一条。
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 1, OUT_OF_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("ignored");
+    expect(store.clusters[0].recurredAt).toBeNull();
+  });
+
+  it("已回验的簇同样会被复发重开（补过库、验过了，结果又坏了）", async () => {
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "verified" });
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS - 1, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters[0].status).toBe("pending");
+    expect(store.clusters[0].recurredAt).toEqual(NOW);
+  });
+
+  it("并入 pending 簇时连查都不查——绝大多数样本走这条路，白查一次库就是翻倍开销", async () => {
+    // 这条例外地断言「某方法没被调用」：要证明的恰恰是**没有发生的 IO**，
+    // 从最终状态上观察不到（pending 簇本来就不会被重开，状态断言恒真）。
+    const { processor, store } = makeHarness(
+      [candidate({ traceId: "a".repeat(32) })],
+      [VEC_NEAR_A],
+    );
+    const cluster = store.seedCluster({ centroid: VEC_A, freq: 0, status: "pending" });
+    store.seedItems(cluster.id, RECURRENCE_MIN_ITEMS + 5, IN_WINDOW);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.countRecentItemsCalls).toBe(0);
+    expect(store.clusters[0].status).toBe("pending");
+  });
+
+  it("新建的簇永不触发复发——它此刻就是 pending", async () => {
+    const { processor, store } = makeHarness([candidate({ traceId: "a".repeat(32) })], [VEC_A]);
+
+    await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+    expect(store.clusters).toHaveLength(1);
+    expect(store.clusters[0].status).toBe("pending");
+    expect(store.countRecentItemsCalls).toBe(0);
+  });
+  // ───────────────── B2b 收尾：`filled` 兜底扫描（终态广播丢失） ─────────────────
+  //
+  // `filled` 的出口只有系统事件（四条 verify*），唯一入口是 DocumentChangeNotifier 的
+  // 终态广播。worker 若在写完 documents.status 之后、广播之前被杀，那次广播永不重放，
+  // 簇就永久停在一个用户只剩「忽略」可走的态里——补库的成果和缺口一起被埋掉。
+  describe("filled 兜底扫描", () => {
+    /** 早于 `STUCK_FILLED_AFTER_MS` 阈值，视为卡住。 */
+    const STUCK_AT = new Date(NOW.getTime() - STUCK_FILLED_AFTER_MS - 60_000);
+    /** 刚入库不久，还在正常回验窗口内。 */
+    const FRESH_AT = new Date(NOW.getTime() - 60_000);
+
+    it("卡在 filled 超过阈值 ⇒ 补触发一次回验", async () => {
+      const { processor, store, verified } = makeHarness([], []);
+      const stuck = store.seedCluster({
+        centroid: VEC_A,
+        status: "filled",
+        updatedAt: STUCK_AT,
+      });
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toEqual([stuck.id]);
+    });
+
+    it("刚入库不久的 filled **不动**——那是正常回验窗口，重复触发会白烧一次重放+判分", async () => {
+      // 与上一条配对。只测「卡住的会触发」的话，一个无差别扫全部 filled 的实现也能通过。
+      const { processor, store, verified } = makeHarness([], []);
+      store.seedCluster({ centroid: VEC_A, status: "filled", updatedAt: FRESH_AT });
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toEqual([]);
+    });
+
+    it("非 filled 的簇一律不碰", async () => {
+      const { processor, store, verified } = makeHarness([], []);
+      for (const status of ["pending", "reviewing", "verified", "ignored"]) {
+        store.seedCluster({ centroid: VEC_A, status, updatedAt: STUCK_AT });
+      }
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toEqual([]);
+    });
+
+    it("单轮补触发数量封顶——一次积压不能把入池工作饿死", async () => {
+      const { processor, store, verified } = makeHarness([], []);
+      for (let i = 0; i < STUCK_FILLED_SCAN_LIMIT + 3; i += 1) {
+        store.seedCluster({
+          centroid: VEC_A,
+          status: "filled",
+          // 越早卡住的越靠前，扫描按 updatedAt 升序取。
+          updatedAt: new Date(STUCK_AT.getTime() + i * 1000),
+        });
+      }
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toHaveLength(STUCK_FILLED_SCAN_LIMIT);
+      // 卡得最久的先处理——它们等得最冤，也最可能已经被用户看见。
+      expect(verified[0]).toBe(store.clusters[0].id);
+    });
+
+    it("某个簇回验炸了 ⇒ 后面的照样补触发，且本轮入池不受影响", async () => {
+      /**
+       * 兜底扫描是附加动作。让它冒泡出去的话，一次回验失败会把整轮收集打回失败 ⇒
+       * 游标不推进 ⇒ 下一轮重扫同一页、再以同样方式崩——永久崩溃循环。
+       */
+      const harness = makeHarness([], []);
+      const { processor, store, verified } = harness;
+      const bad = store.seedCluster({ centroid: VEC_A, status: "filled", updatedAt: STUCK_AT });
+      const good = store.seedCluster({
+        centroid: VEC_A,
+        status: "filled",
+        updatedAt: new Date(STUCK_AT.getTime() + 1000),
+      });
+      harness.failVerifyOn = bad.id;
+
+      const result = await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(result.status).toBe("healthy");
+      expect(verified).toEqual([good.id]);
+    });
   });
 });

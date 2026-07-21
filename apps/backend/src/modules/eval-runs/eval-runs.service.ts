@@ -361,6 +361,28 @@ export class EvalRunsService {
     return { withGold, total: snapshot.length };
   }
 
+  /**
+   * B2b 屏3 行尾「标记忽略」（原型 `:322`）。薄转发——这是**叠加标志**，
+   * 不改任何分数/verdict/记分卡口径，故没有状态机可校验。
+   *
+   * 不做「行不存在 → 404」：`ignored_at` 是幂等的置位/清位，对已忽略的行再标一次、
+   * 或对没有结果行的 case（未跑到）标一次，语义都是「标完了，现在就是这个状态」。
+   * 为此额外查一次只会换来一个既贵又能被并发绕过的断言。
+   *
+   * **代价说清楚**：一个合法 UUID 但在本 run 里没有任何结果行的 caseId（陈旧标签页、
+   * run 已删、或直接调 API），会得到 204 + 前端一句「已标记忽略」，而重拉后那行并没有标记——
+   * 一个被 UI 打脸的成功提示。当前 UI 走不到这条路（未跑到的行不渲染操作菜单，有测试钉着），
+   * 故接受；若将来这个端点被别处复用，要重新掂量。
+   */
+  async setResultIgnored(
+    runId: string,
+    caseId: string,
+    ignored: boolean,
+    now = new Date(),
+  ): Promise<void> {
+    await this.repo.setResultIgnored(runId, caseId, ignored, now);
+  }
+
   /** 原型 §18.A：只有 queued/running 可停；终态 → 409（报告不可变）。 */
   async stop(id: string): Promise<void> {
     const run = await this.repo.findRunById(id);

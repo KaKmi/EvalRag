@@ -713,6 +713,60 @@ describe("IngestionService 的 gold 过期广播时机", () => {
     expect(seen).toEqual([]);
   });
 
+  /**
+   * 【B2b 终态通道】上面三条测的是「内容变了」通道；这一组测**另一条**通道。
+   *
+   * 复审指出：终态广播原先**只有消费侧**（gaps 的监听器）有测试，生产侧一条都没有——
+   * 把下面两个 `notifyDocumentSettled` 调用整个删掉，或者把 ready/failed 映射写反，
+   * 后端 1272 条全绿，而线上每一个补库簇都会永久卡在 `filled`。
+   * 这正是本次提交在修的那个 P1 的同类缺陷，只是高了一层。
+   */
+  describe("终态广播（ready 与 failed 都发）", () => {
+    function wireTerminal() {
+      const changes = new DocumentChangeNotifier();
+      const seen: Array<[string, string]> = [];
+      changes.registerTerminal(async (docId, status) => {
+        seen.push([docId, status]);
+      });
+      return { changes, seen };
+    }
+
+    it("processDocument 成功 → 发 ready", async () => {
+      const deps = readyDeps();
+      deps.pipeline.run.mockResolvedValue({ chunkCount: 3, parsedText: "hello" });
+      const { changes, seen } = wireTerminal();
+
+      await makeService(deps, undefined, changes).processDocument("d1", 1);
+
+      expect(seen).toEqual([["d1", "ready"]]);
+    });
+
+    it("processDocument 失败 → **照样发**，status=failed", async () => {
+      const deps = readyDeps();
+      deps.pipeline.run.mockRejectedValue(new Error("boom"));
+      const { changes, seen } = wireTerminal();
+
+      await makeService(deps, undefined, changes).processDocument("d1", 1);
+
+      // 与上面「内容变更」那条的 `expect(seen).toEqual([])` 形成对照：
+      // 同一次失败，一条通道刻意沉默，另一条必须出声。
+      expect(seen).toEqual([["d1", "failed"]]);
+    });
+
+    it("终态监听方抛错不影响文档主流程", async () => {
+      const deps = readyDeps();
+      deps.pipeline.run.mockResolvedValue({ chunkCount: 3, parsedText: "hello" });
+      const changes = new DocumentChangeNotifier();
+      changes.registerTerminal(async () => {
+        throw new Error("回验监听器崩了");
+      });
+
+      await expect(
+        makeService(deps, undefined, changes).processDocument("d1", 1),
+      ).resolves.not.toThrow();
+    });
+  });
+
   it("processRun 走到 ready → 广播一次；失败则不广播", async () => {
     const deps = readyDeps();
     const changes = new DocumentChangeNotifier();

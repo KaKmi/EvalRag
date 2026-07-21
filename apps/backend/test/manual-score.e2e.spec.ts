@@ -1,3 +1,4 @@
+import { SlidingWindowLimiter } from "../src/platform/rate-limit/sliding-window-limiter";
 import { APP_PIPE } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import type { INestApplication } from "@nestjs/common";
@@ -249,8 +250,9 @@ describeInfra("B1/F3 立即评测（真 PG + 真 ClickHouse）", () => {
   beforeEach(async () => {
     publishedJobs.length = 0;
     judgeSpy.mockClear();
-    // 限频是进程内 Map，跨用例必须清，否则第二条用例起全是 429。
-    (service as unknown as { lastManualScoreAt: Map<string, number> }).lastManualScoreAt.clear();
+    // 限频是进程内状态，跨用例必须清，否则第二条用例起全是 429。
+    // 走限频器的 `reset()`，不再强转私有字段——那样一改实现测试就整片炸。
+    (service as unknown as { limiter: SlidingWindowLimiter }).limiter.reset();
     await repo.updateSettings({
       enabled: true,
       judgeModelId: E2E_JUDGE_MODEL_ID,
@@ -332,7 +334,7 @@ describeInfra("B1/F3 立即评测（真 PG + 真 ClickHouse）", () => {
     await post(targetTraceId).expect(201);
     await drainManualQueue();
     judgeSpy.mockClear();
-    (service as unknown as { lastManualScoreAt: Map<string, number> }).lastManualScoreAt.clear();
+    (service as unknown as { limiter: SlidingWindowLimiter }).limiter.reset();
 
     const res = await post(targetTraceId).expect(201);
     expect(res.body).toEqual({ status: "scored" });
@@ -340,7 +342,7 @@ describeInfra("B1/F3 立即评测（真 PG + 真 ClickHouse）", () => {
     expect(judgeSpy).not.toHaveBeenCalled();
 
     // 【顺序钉】早退路径**不得**占用限频配额：紧接着再打一次仍应是 scored 而非 429。
-    // 不清 lastManualScoreAt——若哪天有人把 `set()` 挪到 findExisting 之前，这里当场变红。
+    // 这里**故意不重置限频器**——若哪天有人把 `record()` 挪到 findExisting 之前，这里当场变红。
     const again = await post(targetTraceId).expect(201);
     expect(again.body).toEqual({ status: "scored" });
   });

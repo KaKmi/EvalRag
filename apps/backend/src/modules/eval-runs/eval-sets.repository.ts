@@ -2,7 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import type { EvalCaseRef } from "@codecrush/contracts";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
-import type { DB } from "../../platform/persistence/persistence.module";
+import type { DB, Tx } from "../../platform/persistence/persistence.module";
 import {
   evalCaseVersions,
   evalCases,
@@ -128,17 +128,77 @@ const SET_AGG_SELECT = {
   )`.as("has_completed_run"),
 } as const;
 
+/**
+ * 「取存活集」这一句查询的**唯一**副本，`findSetById` 与 `findSetByIdTx` 共用。
+ * 抄成两份的话，哪天 `deletedAt` 之外再加一个存活条件，只改一处就会让事务内校验比事务外松。
+ * 形参只要 `select` 能力，`DB` 与 `Tx` 都满足。
+ *
+ * `lock` 只在事务内传 true（见 `findSetByIdTx`）：`FOR SHARE` 必须处在事务里才有意义，
+ * 自动提交的单句查询一提交就把锁放了，等于没加。
+ */
+async function selectSetById(
+  exec: Pick<DB, "select">,
+  id: string,
+  lock = false,
+): Promise<EvalSetRow | undefined> {
+  const query = exec
+    .select()
+    .from(evalSets)
+    .where(and(eq(evalSets.id, id), isNull(evalSets.deletedAt)))
+    .limit(1);
+  const rows = await (lock ? query.for("share") : query);
+  return rows[0];
+}
+
+/**
+ * 「身份行 + v1 版本行」的插入本体，**逐条**跑。
+ *
+ * 不合并成一条多值 INSERT：版本行的 `caseId` 要等身份行 returning 出来，
+ * 而且逐条跑在同一事务里，原子性由事务给，不由语句条数给。
+ */
+async function insertCases(tx: Tx, inputs: NewEvalCaseInput[]): Promise<EvalCaseWithVersion[]> {
+  const results: EvalCaseWithVersion[] = [];
+  for (const input of inputs) {
+    const created = (
+      await tx
+        .insert(evalCases)
+        .values({ setId: input.setId, sourceTraceId: input.sourceTraceId ?? null })
+        .returning()
+    )[0];
+    const version = (
+      await tx
+        .insert(evalCaseVersions)
+        .values({ caseId: created.id, version: 1, ...input.content })
+        .returning()
+    )[0];
+    results.push({ case: created, version });
+  }
+  return results;
+}
+
 @Injectable()
 export class EvalSetsRepository {
   constructor(@Inject(DRIZZLE) private readonly db: DB) {}
 
   async findSetById(id: string): Promise<EvalSetRow | undefined> {
-    const rows = await this.db
-      .select()
-      .from(evalSets)
-      .where(and(eq(evalSets.id, id), isNull(evalSets.deletedAt)))
-      .limit(1);
-    return rows[0];
+    return await selectSetById(this.db, id);
+  }
+
+  /**
+   * 与 `findSetById` 同款查询，只是走**调用方的事务**并对该行加 `FOR SHARE`。
+   *
+   * 要防的是：事务外校验完「集还在」、提交前被另一请求软删掉，插入照样成功
+   * （FK 只保证父行存在，不保证它没被软删），结果是一个已删的集底下长出新用例。
+   *
+   * ⚠️ **光把 SELECT 挪进事务并不能消除这个窗口**（peer review P2 订正了初版注释的说法）：
+   * `db.transaction` 发的是裸 `BEGIN`，隔离级别是默认的 READ COMMITTED，而不加锁的 SELECT
+   * 不会阻止别的事务改这一行——A 读到存活、B 软删并提交、A 再插入并提交，那个状态照样出现。
+   * 真正关上它的是 `FOR SHARE`：它与并发的 `UPDATE ... SET deleted_at` 冲突，
+   * 后者会被阻塞到本事务提交为止。共享锁而非 `FOR UPDATE`——我们只要求「别在我插完前删掉它」，
+   * 不排斥另一个也在往同一个集里插用例的事务。
+   */
+  async findSetByIdTx(tx: Tx, id: string): Promise<EvalSetRow | undefined> {
+    return await selectSetById(tx, id, true);
   }
 
   /**
@@ -245,21 +305,23 @@ export class EvalSetsRepository {
   // 身份行 + v1 同事务（两步分离会在第二步失败时留下无版本的用例 —— listCases 的
   // innerJoin 会直接把它吞掉，成为查不到也删不掉的幽灵行）。
   async insertCaseWithVersion(input: NewEvalCaseInput): Promise<EvalCaseWithVersion> {
-    return await this.db.transaction(async (tx) => {
-      const created = (
-        await tx
-          .insert(evalCases)
-          .values({ setId: input.setId, sourceTraceId: input.sourceTraceId ?? null })
-          .returning()
-      )[0];
-      const version = (
-        await tx
-          .insert(evalCaseVersions)
-          .values({ caseId: created.id, version: 1, ...input.content })
-          .returning()
-      )[0];
-      return { case: created, version };
-    });
+    // 自开事务 + 单元素批量：事务体本身只有一份（下面那个方法），两条路径不可能漂移。
+    return await this.db.transaction(async (tx) => (await insertCases(tx, [input]))[0]);
+  }
+
+  /**
+   * 批量建用例，**用调用方传进来的事务**——本仓库第一个跨域共享事务的接入点。
+   *
+   * `GapPromoteService.promote` 要的是「整批用例 + 簇上的『已进评测集』标志要么全成要么全滚」，
+   * 而那个标志属于 gaps 域。跨两个域的原子性只能由**调用方**开一个顶层事务、把同一个 `tx`
+   * 交给两边，仓库各自开各自的事务做不到。故这里不 `this.db.transaction`——
+   * 在别人的事务里再开一个只会得到嵌套 savepoint，回滚语义不是调用方要的那个。
+   */
+  async insertCasesWithVersionsTx(
+    tx: Tx,
+    inputs: NewEvalCaseInput[],
+  ): Promise<EvalCaseWithVersion[]> {
+    return await insertCases(tx, inputs);
   }
 
   /**

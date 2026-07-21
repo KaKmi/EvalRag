@@ -27,6 +27,10 @@ import {
   type SplitGapRequest,
   UpdateGapRootCauseRequestSchema,
   type UpdateGapRootCauseRequest,
+  GapFillDraftSchema,
+  type GapFillDraft,
+  SubmitFillRequestSchema,
+  type SubmitFillRequest,
   AgentListResponseSchema,
   AgentSchema,
   type Agent,
@@ -211,6 +215,7 @@ import {
   EvalRunReportSchema,
   type EvalRunReport,
   RecentEvalRunConflictSchema,
+  SetEvalResultIgnoredRequestSchema,
 } from "@codecrush/contracts";
 
 const TOKEN_KEY = "token";
@@ -1042,6 +1047,25 @@ export async function stopEvalRun(runId: string): Promise<void> {
   if (!resp.ok) throw await responseError(resp, `停止失败（${resp.status}）`);
 }
 
+/**
+ * B2b 屏3 行尾「标记忽略」。204 无响应体，故不走 `patchJson`（它要求 JSON 响应体）。
+ * `caseId` 是 **case 身份**（不是 case_version_id）——后端据此覆盖该 case 的全部重复行。
+ */
+export async function setEvalResultIgnored(
+  runId: string,
+  caseId: string,
+  ignored: boolean,
+): Promise<void> {
+  const resp = await apiFetch(
+    `/api/eval/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(caseId)}/ignore`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(SetEvalResultIgnoredRequestSchema.parse({ ignored })),
+    },
+  );
+  if (!resp.ok) throw await responseError(resp, `操作失败（${resp.status}）`);
+}
+
 /** 题库版本集合不一致时后端抛 409 `{code:"incomparable"}`——前端据此渲染红条「结论不可比」。 */
 export class EvalCompareIncomparableError extends Error {
   constructor() {
@@ -1157,3 +1181,30 @@ export const draftGapGold = (req: DraftGoldRequest): Promise<DraftGoldResponse> 
 /** 批量沉淀成 gold 用例（状态恒「待审核」），成功后后端给簇打「已进评测集」标志。 */
 export const promoteGapToEvalSet = (req: PromoteGapRequest): Promise<PromoteGapResponse> =>
   postJson("/api/gaps/promote", req, PromoteGapRequestSchema, PromoteGapResponseSchema);
+
+// ───────────────────────── B2b `[补知识库]` 三步向导 ─────────────────────────
+
+/** 向导打开时回显草稿（第②步的数据源）。草稿字段不进屏5 列表行——2000 字的答案不该跟着每页 50 行走。 */
+export const getGapFillDraft = (id: string): Promise<GapFillDraft> =>
+  getJson(`${gapPath(id)}/fill-draft`, GapFillDraftSchema);
+
+/**
+ * 第①步：进入草拟并**同步**等 LLM 出结果（同 `draft-gold` 的既定形态，不建批次不轮询）。
+ * 失败时后端会把簇退回 `pending`，前端据此允许重试。
+ */
+export const draftGapFill = (id: string): Promise<GapCluster> => gapAction(id, "draft-fill");
+
+/** 取消补库：回 `pending`，草稿**保留**（下次打开向导可直接从第②步继续）。 */
+export const cancelGapFill = (id: string): Promise<GapCluster> => gapAction(id, "cancel-fill");
+
+/**
+ * 拿回上次保留的草稿，直接回第②步人审编辑（021 §9b 决策 J）。
+ *
+ * **不调模型**——这正是它与「重新草拟」的区别。草稿为空时后端 400，
+ * 所以只在 `fill-draft` 确实回了内容时才渲染这个入口。
+ */
+export const resumeGapFill = (id: string): Promise<GapCluster> => gapAction(id, "resume-fill");
+
+/** 第③步：人审通过 → 走既有上传管线入库 → 转 `filled`，文档处理完成后自动回验。 */
+export const submitGapFill = (id: string, req: SubmitFillRequest): Promise<GapCluster> =>
+  postJson(`${gapPath(id)}/submit-fill`, req, SubmitFillRequestSchema, GapClusterSchema);

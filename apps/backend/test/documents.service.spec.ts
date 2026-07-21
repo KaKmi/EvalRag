@@ -532,6 +532,26 @@ describe("gold-stale 通知（B1/F4）", () => {
   });
 
   /**
+   * 【B2b】删除也要发**终态**通道。
+   *
+   * 复审抓出：`fill_target_document_id` 是裸 uuid 列（无 FK、无级联），用户把补库文档
+   * 从知识库里删掉时，等它的缺口簇不会收到任何信号，于是永久停在 `filled`——
+   * 那个态只剩「忽略」可走。删一份文档 = 悄悄埋掉一个缺口。
+   * 按 `failed` 发：对等待方而言「没了」和「没做成」的后续处理完全一致。
+   */
+  it("remove 同时广播终态 failed（否则等这份文档的缺口簇永久卡死）", async () => {
+    const { deps, service } = serviceWithDoc();
+    const seen: Array<[string, string]> = [];
+    deps.changes.registerTerminal(async (docId, status) => {
+      seen.push([docId, status]);
+    });
+
+    await service.remove("d1");
+
+    expect(seen).toEqual([["d1", "failed"]]);
+  });
+
+  /**
    * 【fail-open 不变量】评测集标不上「可能过期」是体验问题；
    * 因为它把一次文档删除打回失败，是事故。通知抛错**绝不**能冒泡。
    */

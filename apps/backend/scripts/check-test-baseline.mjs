@@ -45,10 +45,20 @@ const BASELINES = {
   // ——本波初版正是估成 87（实测 88），被 peer review 抓出，随后又因补两条跨簇/跨来源用例变 90。
   // Task 5 又加 1 条（last_ts 纳秒往返，钉死迁移 0027）⇒ 12/91。
   // Task 6 加 test/gaps.service.db.spec.ts（peer review 后补到 25 条）⇒ 13/116。
-  db: { suites: 13, tests: 118, script: "test:db" },
+  // B2b：gaps.db 补 fill_* 列用例、gaps.service.db 补四态迁移与质心 CAS 共 33 条，
+  // 再加 test/eval-run-ignore.db.spec.ts（5 条，钉死「标记忽略」的 caseId→caseVersionId 桥接
+  // ——那个坑内存 fake 与前端测试都抓不住，只有真库里两个真实 UUID 才分得开）⇒ **实测** 14/157。
+  // B2b 收尾：补 2 条 CAS（原来那条「并发」用例被证明是空测——两个 Promise 实际串行、
+  // 撞的是内存守卫抛 400，ConflictException 从没触发）+ 4 条 terminal_at 写入
+  // （改成恒 null 时 238 测试全绿，而它是迁移 0029 的全部理由）⇒ **实测** 14/163。
+  db: { suites: 14, tests: 166, script: "test:db" },
   // infra：B2a Task 5 加 test/gap-pool-isolation.spec.ts（5 条）后 8 suites / 96 tests；
   // Task 6 再加 test/gaps.e2e.spec.ts（10 条 HTTP 全链路）⇒ 9 suites / 106 tests。
-  infra: { suites: 9, tests: 106, script: "test:infra" },
+  // B2b e2e 阶段：gaps.e2e 追加「补知识库向导」6 条（三步走通 / 两条红线 / 取消保留草稿 /
+  // 草拟失败退回 / 非 UUID 400）⇒ **实测** 9 suites / 112 tests。
+  // 其中「跳过人审直接 submit ⇒ 400 且 uploads 为空」已用变异测试验过：
+  // 把 upload 前的状态守卫改成恒假，该条立刻变红——它钉的正是本波唯一的产品红线。
+  infra: { suites: 9, tests: 116, script: "test:infra" },
 };
 
 const [suiteKey, resultFile] = process.argv.slice(2);

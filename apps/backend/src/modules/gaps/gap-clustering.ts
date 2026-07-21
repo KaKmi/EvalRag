@@ -56,6 +56,31 @@ export function meanVector(vs: number[][]): number[] {
 }
 
 /**
+ * 质心写入的乐观并发校验失败（B2b：021 §12② 的收口）。
+ *
+ * **它是什么**：`assignToCluster` 读最近邻拿到 `(centroid, freq)`，据此算出 `nextCentroid`
+ * （增量平均 `(c*f+v)/(f+1)`），随后 repository 的 UPDATE 带 `WHERE freq = 观察到的 freq`。
+ * 若期间另一个实例已经并入过别的样本，`freq` 已经变了 ⇒ 影响 0 行 ⇒ 抛本错误。
+ *
+ * **为什么必须重算而不是简单重试写入**：`nextCentroid` 是用**旧的** centroid 与 freq 算出来的，
+ * 此刻已经过期——直接重写会把对方那次并入的贡献覆盖掉，正是要防的那个丢失更新。
+ * 调用方必须重新走一遍 `findNearestCluster` + 相似度判定（最近簇甚至可能已经换了一个）。
+ *
+ * **危害等级**：丢的是质心精度（聚类质量退化），不是丢数据——`freq` 用 `freq + 1` 自增本身是原子的。
+ * 触发条件也窄：要两个实例在租约超时窗口内并发处理同一个簇。故重试有限次即可，不必无限重试。
+ *
+ * 定义在本文件而非 repository：它是「质心该不该这样写」这件事的领域词汇，与同文件
+ * `assertSameDim`「探测到不安全的质心写入就抛，绝不产出脏 centroid」是同一条原则。
+ * 真正执行比较的是 SQL 的 WHERE，repository 只负责把「0 行」翻译成这个错误。
+ */
+export class GapCentroidStaleError extends Error {
+  constructor(readonly clusterId: string) {
+    super(`gap cluster ${clusterId} centroid was concurrently modified, retry required`);
+    this.name = "GapCentroidStaleError";
+  }
+}
+
+/**
  * 维度不一致时**抛错**，不静默产出 NaN 或截断向量（peer review 抓出的洞）。
  *
  * 为什么这两个函数抛、而 `cosineSimilarity` 取 0：`cosineSimilarity` 只影响一次**瞬时比较**，

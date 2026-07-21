@@ -26,6 +26,17 @@ const gapsMock = vi.hoisted(() => ({
   createEvalSet: vi.fn(),
   draftGapGold: vi.fn(),
   promoteGapToEvalSet: vi.fn(),
+  // B2b Task 10：[补知识库] 挂的三步向导。
+  // ⚠️ 这个 `vi.mock` 是**整模块替换**（工厂没有 spread 真模块），所以向导用到的每个
+  // 函数都必须在这里列出来——漏一个不是「那个调用返回 undefined」，而是
+  // `getKnowledgeBases is not a function` 直接把渲染打挂，报错还指向 useEffect 内部。
+  getGapFillDraft: vi.fn(),
+  draftGapFill: vi.fn(),
+  cancelGapFill: vi.fn(),
+  submitGapFill: vi.fn(),
+  getKnowledgeBases: vi.fn(),
+  getApplications: vi.fn(),
+  getApplicationDetail: vi.fn(),
 }));
 
 vi.mock("../../api/client", () => gapsMock);
@@ -48,6 +59,9 @@ function cluster(patch: Partial<GapCluster> = {}): GapCluster {
     avgQuality: 41,
     followUpRatio: 0,
     enteredEvalSetAt: null,
+    recurred: false,
+    fillPreScore: null,
+    verifiedScore: null,
     firstSeenAt: "2026-07-01T00:00:00.000Z",
     lastSeenAt: "2026-07-18T00:00:00.000Z",
     ...patch,
@@ -102,6 +116,10 @@ const locationText = () => screen.getByTestId("location").textContent;
 beforeEach(() => {
   vi.clearAllMocks();
   gapsMock.getGapItems.mockResolvedValue([]);
+  // 向导一打开就并发拉这三份下拉数据；不给默认值，每条测试都要自己 mock 才不炸。
+  gapsMock.getKnowledgeBases.mockResolvedValue([]);
+  gapsMock.getApplications.mockResolvedValue([]);
+  gapsMock.getGapFillDraft.mockResolvedValue(null);
 });
 
 describe("屏5 问题池", () => {
@@ -239,12 +257,102 @@ describe("屏5 问题池", () => {
     await waitFor(() => expect(locationText()).toContain(`fromGap=${cluster().id}`));
   });
 
-  it("不渲染尚未接上的 [补知识库]（B2b）", async () => {
-    // 「点了没反应的按钮比没有它更糟」——它还没有真实去处，就不渲染。
+  /**
+   * 这条**取代**了 B2a 的「不渲染尚未接上的 [补知识库]」——那时按钮还没有真实去处，
+   * 「点了没反应的按钮比没有它更糟」。B2b 把去处（三步向导）补上了，于是同一个位置
+   * 的正确断言从「不该在」翻成「该在，且点了要真开向导」。留着旧断言就是拿 B2a 的
+   * 临时状态当永久契约，会把本波的交付判成回归。
+   */
+  it("[补知识库] 打开三步向导（B2b）", async () => {
+    /**
+     * ⚠️ 这条曾经断言的是一个**崩溃的向导**（独立复审用探针实测抓出）。
+     *
+     * `beforeEach` 里 `getGapFillDraft` 被 mock 成 `null`（违反 `GapFillDraftSchema`），
+     * 向导 `load` 里对 `null` 取 `.clusterId` 直接抛 TypeError，屏上实际是两条 alert：
+     * 「Cannot read properties of null」+「该缺口当前状态为『未知』，补库向导不适用」。
+     * 而原来的断言查的是 Steps 的三个标题——它们**无条件渲染**，对 load 成功/失败/崩溃
+     * 一视同仁，什么都证明不了：向导的数据接线整体坏掉，这条测试照样绿。
+     *
+     * 现在返回合法草稿，并断言**只属于成功路径**的东西（第②步的人审表单）。
+     */
     mockGaps([cluster()]);
+    gapsMock.getGapFillDraft.mockResolvedValue({
+      clusterId: cluster().id,
+      status: "reviewing",
+      representativeQuestion: "能开专用发票吗/对公转账",
+      draftQuestion: "能开增值税专用发票吗？",
+      draftAnswer: "可以。请提供开票抬头与税号。",
+      targetKbId: null,
+      targetDocumentId: null,
+    });
     renderPage();
     await screen.findByText("能开专用发票吗/对公转账");
-    expect(screen.queryByRole("button", { name: "补知识库" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "补知识库" }));
+
+    // 按 role 取：抽屉标题与刚点的那个按钮同名，findByText 会两个都命中。
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // 人审表单里的真实内容——只有 load 成功、状态解析正确才会出现。
+    expect(await screen.findByDisplayValue("能开增值税专用发票吗？")).toBeInTheDocument();
+
+    /**
+     * ⚠️ 必须把抽屉关掉再结束，让组件在**静止状态**下卸载。
+     *
+     * 这条测试原来断言的是一个崩溃的向导（见上），改对之后它才真的渲染并跑那三个
+     * 异步 effect（草稿 / 知识库 / 应用）。测试若在它们尚未落定时结束，
+     * React 的调度回调会在 jsdom 拆完之后才执行 ⇒ `ReferenceError: window is not defined`。
+     * 本地（核多）复现不出来，CI（核少、抢占重）上稳定出现——353 条全过但整跑判失败。
+     */
+    fireEvent.click(screen.getByRole("button", { name: /close/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  /**
+   * 以下三条补的是复审指出的**空白验收项**：`cluster()` 工厂把 recurred/fillPreScore/
+   * verifiedScore 写死成 false/null 且没有任何用例覆盖过它们，于是「复发红标」和
+   * 「41→89」这两条明文验收标准一条断言都没有——改坏了套件照样全绿。
+   */
+  it("复发的簇显示红色「复发」标（原型 §17.5 `:631`）", async () => {
+    mockGaps([cluster({ recurred: true })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    // 标题写的是「**红色**复发标」，就得断言红色：这个角标全靠颜色在一屏几十行里
+    // 抓住注意力，掉成默认灰色时文字还在、测试照绿，而它已经不起作用了。
+    const tag = await screen.findByText("复发");
+    expect(tag).toHaveClass("ant-tag-red");
+  });
+
+  it("没复发的簇不显示复发标", async () => {
+    // 与上一条配对：只测「有的时候有」，一个无条件渲染的角标也能通过。
+    mockGaps([cluster({ recurred: false })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    expect(screen.queryByText("复发")).not.toBeInTheDocument();
+  });
+
+  it("已回验的簇在平均质量列显示改善 41→89（原型 §9 `:370`）", async () => {
+    mockGaps([cluster({ status: "verified", fillPreScore: 41, verifiedScore: 89 })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    // 断言的是**两端都在**的那个形态；只显示 89 等于丢掉了「补库确实起作用了」这个信息。
+    expect(await screen.findByText("41→89")).toBeInTheDocument();
+    expect(await screen.findByText("已回验")).toBeInTheDocument();
+  });
+
+  it("根因不是「缺内容」时，[补知识库] 先二次确认而不是直接开向导（原型 `:700`）", async () => {
+    mockGaps([cluster({ rootCause: "retrieval" })]);
+    renderPage();
+    await screen.findByText("能开专用发票吗/对公转账");
+
+    fireEvent.click(screen.getByRole("button", { name: "补知识库" }));
+
+    // 守卫栏要的是「二次确认」而不是「禁用」——分诊是启发式的，人有权推翻它。
+    // 所以断言：确认框出现了，且向导**还没**开。
+    expect(await screen.findByText("当前分诊不是「缺内容」")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("[进评测集] 打开「从坏样本生成」弹窗并锁定为本簇（原型 :634）", async () => {
