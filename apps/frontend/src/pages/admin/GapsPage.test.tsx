@@ -294,6 +294,17 @@ describe("屏5 问题池", () => {
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     // 人审表单里的真实内容——只有 load 成功、状态解析正确才会出现。
     expect(await screen.findByDisplayValue("能开增值税专用发票吗？")).toBeInTheDocument();
+
+    /**
+     * ⚠️ 必须把抽屉关掉再结束，让组件在**静止状态**下卸载。
+     *
+     * 这条测试原来断言的是一个崩溃的向导（见上），改对之后它才真的渲染并跑那三个
+     * 异步 effect（草稿 / 知识库 / 应用）。测试若在它们尚未落定时结束，
+     * React 的调度回调会在 jsdom 拆完之后才执行 ⇒ `ReferenceError: window is not defined`。
+     * 本地（核多）复现不出来，CI（核少、抢占重）上稳定出现——353 条全过但整跑判失败。
+     */
+    fireEvent.click(screen.getByRole("button", { name: /close/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
   /**
