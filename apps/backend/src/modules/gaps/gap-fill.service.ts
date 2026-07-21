@@ -210,31 +210,29 @@ export class GapFillService {
       throw new BadRequestException("知识库重建中，暂不可入库");
     }
 
-    const content = `问：${question}\n答：${answer}\n`;
-    const buffer = Buffer.from(content, "utf8");
-    const [document] = await this.documents.upload(
-      req.targetKbId,
-      [
-        {
-          originalname: `gap-fill-${clusterId}.txt`,
-          buffer,
-          size: buffer.byteLength,
-          mimetype: "text/plain",
-        },
-      ],
-      { autoParse: true },
-    );
-
     /**
-     * 先上传、再迁移状态。顺序不能反：状态先到 `filled` 而上传失败的话，簇会挂在一个
-     * 「已入库」却没有任何文档的态上，回验监听器永远等不到那份文档。
-     * 反过来（上传成功但状态没写成）代价小得多——KB 里多一份未被引用的文档，
-     * 用户重新走一遍向导即可，且那份文档本身是有效内容。
+     * ⛔ **先 CAS 抢占，再上传。顺序不能反**（QA 运行时复现的 P1）。
+     *
+     * 这里原本是反的，注释还论证过「上传成功但状态没写成，代价小得多——用户重新走一遍
+     * 向导即可」。QA 把那个论证证伪了：
+     *  · 并发提交（双击 / 两个标签页）⇒ 两个请求都通过状态守卫、**都真的上传**，
+     *    只有一个 CAS 赢；输的那个收到 409，用户按提示「刷新后重试」⇒ 第三份文档。
+     *  · 并发「驳回」vs「确认入库」⇒ **5 轮 4 中**：簇最终 `pending`（记录是「已驳回」），
+     *    而被驳回的内容已经进了 KB、切片并 embedding 完成、进入检索候选集。
+     * 孤儿文档没有任何行引用（`fill_target_document_id` 只记赢家那份），屏5/向导/回验
+     * 全都看不见它，后端日志一条记录都没有——运维无从发现，只有检索被静静稀释。
+     *
+     * 把 CAS 提到上传之前，第二个请求在**一次网络往返都不发**的情况下就 409。
      *
      * 一并把人审后的 Q/A 覆盖回草稿列：**留档的必须是真正入库的那份内容**，
      * 否则事后追「这个文档是怎么来的」会翻出一份和文档对不上的 LLM 原稿。
+     *
+     * 代价（明知并接受）：CAS 成功后、上传返回前若进程被杀，簇会停在 `filled` 且
+     * `fill_target_document_id` 为 NULL。`verifyCluster` 对这个组合已有处理（记 error
+     * 并走 `verifyIngestFailed` 回 `pending`），但需要有人触发它——这正是 concerns 里
+     * P2-4「filled 兜底扫描」要解决的。用罕见的崩溃窗口换掉稳定复现的并发孤儿，划算。
      */
-    return this.gaps.submitFill(
+    await this.gaps.submitFill(
       clusterId,
       {
         question,
@@ -242,10 +240,59 @@ export class GapFillService {
         targetKbId: req.targetKbId,
         applicationId: req.applicationId,
         configVersionId: req.configVersionId,
-        documentId: document.id,
+        // 文档还不存在——这次调用只为抢占独占权，id 上传后再补。
+        documentId: null,
       },
       now,
     );
+
+    const content = `问：${question}\n答：${answer}\n`;
+    const buffer = Buffer.from(content, "utf8");
+    let document: { id: string };
+    try {
+      [document] = await this.documents.upload(
+        req.targetKbId,
+        [
+          {
+            originalname: `gap-fill-${clusterId}.txt`,
+            buffer,
+            size: buffer.byteLength,
+            mimetype: "text/plain",
+          },
+        ],
+        { autoParse: true },
+      );
+    } catch (error) {
+      /**
+       * 上传失败 ⇒ 把簇放回 `pending`，否则它停在 `filled` 这个**没有用户出口**的态里
+       * （只剩「忽略」），而回验监听器永远等不到一份根本没被创建的文档。
+       * 复用 `verifyIngestFailed` 的语义：它本就是「这次补库的工程失败」，
+       * 且**不打复发标**——不是「缺口又出现新证据」。
+       */
+      await this.gaps.recordVerifyIngestFailed(clusterId, now).catch((e: unknown) => {
+        this.logger.error(`上传失败后回滚也失败：cluster=${clusterId}（${String(e)}）`);
+      });
+      throw error;
+    }
+
+    /**
+     * 登记文档 id。走 `attachFillDocument`（`filled → filled` 自环）而非裸 UPDATE，
+     * 是为了继续吃 CAS——上传那几秒里簇若被别的事件推走，这次补写应当落空。
+     *
+     * 补写失败**不回滚上传**：文档已是有效内容且已在管线里，删掉比留着更糟。
+     * 但必须记 error 让运维看得见——原先这条路径连一行日志都没有，正是 QA 点名的问题。
+     */
+    try {
+      return await this.gaps.attachFillDocument(clusterId, document.id, now);
+    } catch (error) {
+      this.logger.error(
+        `补库文档已上传但登记失败：cluster=${clusterId} doc=${document.id}——` +
+          `该文档已进 KB 但簇不引用它，需人工核对（${
+            error instanceof Error ? error.message : String(error)
+          }）`,
+      );
+      throw error;
+    }
   }
 
   /**

@@ -62,6 +62,14 @@ const TRANSITIONS = {
   /** 人审驳回。同样保留草稿，下次进向导可直接从第②步继续。 */
   cancelReview: { from: ["reviewing"], to: "pending" },
   submitFill: { from: ["reviewing"], to: "filled" },
+  /**
+   * `filled → filled` 自环：上传完成后把文档 id 登记回簇。
+   *
+   * 它存在的唯一理由是**继续吃 CAS**——`applyTransition` 的 `WHERE status = expected`
+   * 保证「补写文档 id」只在簇仍然停在 `filled` 时才生效。若这几秒内它被忽略/被别的
+   * 事件推走，补写落空并抛 409，而不是把一个已经离开 `filled` 的簇悄悄拽回来。
+   */
+  attachFillDocument: { from: ["filled"], to: "filled" },
   verifyPass: { from: ["filled"], to: "verified" },
   /** 回验分数 <80（或判分失败）。副作用置 `recurred_at`——原型 `:706`「open + 复发标」。 */
   verifyFail: { from: ["filled"], to: "pending" },
@@ -331,7 +339,12 @@ export class GapsService {
       targetKbId: string;
       applicationId: string;
       configVersionId: string;
-      documentId: string;
+      /**
+       * **上传之前**调用时为 `null`——此刻文档还不存在，这次调用的目的是用 CAS
+       * 抢占独占权（见 `GapFillService.submitFill` 的顺序说明）。拿到文档 id 后
+       * 再用 `attachFillDocument` 补写。
+       */
+      documentId: string | null;
     },
     now = new Date(),
   ): Promise<GapCluster> {
@@ -342,6 +355,21 @@ export class GapsService {
       fillVerifyApplicationId: target.applicationId,
       fillVerifyConfigVersionId: target.configVersionId,
       fillTargetDocumentId: target.documentId,
+    }));
+  }
+
+  /**
+   * 补写补库文档 id。**不是状态迁移**（簇已经在 `filled`），只是把上传结果登记回去。
+   *
+   * 为什么单独一个方法：`submitFill` 现在跑在**上传之前**（QA 复现的 P1——先传后 CAS
+   * 会让并发提交/并发驳回在 KB 里留下无人引用的孤儿文档），所以文档 id 只能事后补。
+   * 走 `applyTransition("attachFillDocument")` 而非裸 UPDATE，是为了继续吃那套
+   * `filled → filled` 的 CAS：万一在上传的那几秒里簇被别人推走了（例如被忽略），
+   * 这次补写必须落空而不是把一个已经离开 `filled` 的簇拽回来。
+   */
+  async attachFillDocument(id: string, documentId: string, now = new Date()): Promise<GapCluster> {
+    return this.applyTransition(id, "attachFillDocument", now, () => ({
+      fillTargetDocumentId: documentId,
     }));
   }
 

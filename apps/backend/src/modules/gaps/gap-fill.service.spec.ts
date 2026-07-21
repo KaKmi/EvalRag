@@ -1,4 +1,4 @@
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, ConflictException } from "@nestjs/common";
 import type { SubmitFillRequest } from "@codecrush/contracts";
 import { GapFillService } from "./gap-fill.service";
 import type { GapsService } from "./gaps.service";
@@ -40,6 +40,10 @@ function harness(
     kbMissing?: boolean;
     draftQuestion?: string | null;
     draftAnswer?: string | null;
+    /** 非空 ⇒ submitFill 的 CAS 输给一个把簇推到该状态的并发写者（QA 复现的场景）。 */
+    loseCasTo?: string;
+    /** 非空 ⇒ documents.upload 抛这个错，用来验回滚。 */
+    uploadError?: Error;
   } = {},
 ): Harness {
   const uploads: Harness["uploads"] = [];
@@ -85,10 +89,32 @@ function harness(
       status = "reviewing";
       return {} as never;
     },
-    submitFill: async (_id: string, target: { question: string; documentId: string }) => {
+    submitFill: async (_id: string, target: { question: string; documentId: string | null }) => {
       if (status !== "reviewing") throw new BadRequestException("illegal transition");
+      /**
+       * 模拟**真实的 CAS 竞争者**：`options.loseCasTo` 非空时，表示在本次 CAS 落地之前
+       * 另一个请求已经把簇推走了（QA 复现的场景是并发「驳回」）。真实 repository 的
+       * `WHERE status = 'reviewing'` 会影响 0 行，service 据此抛 ConflictException。
+       *
+       * 不这么模拟的话，这条回归测试就是空的——fake 里 status 永远由我们自己顺序改，
+       * 竞争根本不会发生。本波已经吃过好几次「测试看起来在守、实际恒真」的亏。
+       */
+      if (options.loseCasTo) {
+        status = options.loseCasTo;
+        throw new ConflictException("并发冲突：该缺口刚被其他操作改动，请刷新后重试");
+      }
       transitions.push(`submitFill:${target.documentId}:${target.question}`);
       status = "filled";
+      return {} as never;
+    },
+    attachFillDocument: async (_id: string, documentId: string) => {
+      if (status !== "filled") throw new ConflictException("并发冲突");
+      transitions.push(`attachFillDocument:${documentId}`);
+      return {} as never;
+    },
+    recordVerifyIngestFailed: async () => {
+      transitions.push("verifyIngestFailed");
+      status = "pending";
       return {} as never;
     },
   } as unknown as GapsService;
@@ -99,6 +125,7 @@ function harness(
       files: { originalname: string; buffer: Buffer }[],
       opts: { autoParse: boolean },
     ) => {
+      if (options.uploadError) throw options.uploadError;
       uploads.push({
         kbId,
         content: files[0].buffer.toString("utf8"),
@@ -267,14 +294,45 @@ describe("GapFillService.submitFill", () => {
 
     expect(h.uploads[0].content).toBe("问：人审改过的问题\n答：人审改过的答案\n");
     // 并且**覆盖回**草稿列：留档的要与真正入库的那份一致。
-    expect(h.transitions).toEqual([`submitFill:${DOC}:人审改过的问题`]);
+    expect(h.transitions).toEqual(["submitFill:null:人审改过的问题", `attachFillDocument:${DOC}`]);
   });
 
-  it("先上传、再迁移状态——顺序反了会留下「已入库却没有文档」的簇", async () => {
+  /**
+   * ⚠️ 这条**取代**了原来的「先上传、再迁移状态」——那个顺序是错的，运行时 QA 把它证伪了。
+   *
+   * 原注释论证「上传成功但状态没写成，代价小得多，用户重新走一遍向导即可」。
+   * QA 实测：并发「驳回」vs「确认入库」**5 轮 4 中**产生孤儿文档，簇最终 `pending`
+   * （记录是「已驳回」）而被驳回的内容已经进 KB、切片并 embedding、进入检索候选集；
+   * 且这些文档没有任何行引用、后端一行日志都没有。
+   */
+  it("⛔ CAS 输给并发驳回时，**一个字节都不许进 KB**（QA 复现的孤儿文档）", async () => {
+    // loseCasTo:"pending" = 在 CAS 落地前，另一个请求已经把簇驳回了。
+    const h = harness({ status: "reviewing", loseCasTo: "pending" });
+
+    await expect(h.service.submitFill(CLUSTER, submitReq())).rejects.toThrow(ConflictException);
+
+    // 核心断言：抢占失败必须发生在**上传之前**。
+    // 顺序反过来的话这里是 1——那正是 KB 里那 5 份孤儿的来源。
+    expect(h.uploads).toEqual([]);
+  });
+
+  it("CAS 抢占成功后才上传，文档 id 事后补写", async () => {
     const h = harness({ status: "reviewing" });
     await h.service.submitFill(CLUSTER, submitReq());
 
-    // 迁移时带上了真实的 documentId：回验监听器正是按它反查本簇。
-    expect(h.transitions).toEqual([`submitFill:${DOC}:能否开具专用发票`]);
+    // submitFill 先跑且 documentId 为 null（此刻文档还不存在），拿到 id 后再 attach。
+    expect(h.transitions).toEqual(["submitFill:null:能否开具专用发票", `attachFillDocument:${DOC}`]);
+    expect(h.uploads).toHaveLength(1);
+  });
+
+  it("上传失败 ⇒ 簇退回 pending，不留在只剩「忽略」可走的 filled", async () => {
+    // 抢占成功之后上传炸了。不回滚的话簇停在 filled 且没有文档，
+    // 回验监听器永远等不到一份根本没被创建的文档 —— 死态。
+    const h = harness({ status: "reviewing", uploadError: new Error("KB 磁盘满") });
+
+    await expect(h.service.submitFill(CLUSTER, submitReq())).rejects.toThrow("KB 磁盘满");
+
+    expect(h.transitions).toEqual(["submitFill:null:能否开具专用发票", "verifyIngestFailed"]);
+    expect(h.uploads).toEqual([]);
   });
 });
