@@ -51,7 +51,11 @@ const BASELINES = {
   db: { suites: 14, tests: 157, script: "test:db" },
   // infra：B2a Task 5 加 test/gap-pool-isolation.spec.ts（5 条）后 8 suites / 96 tests；
   // Task 6 再加 test/gaps.e2e.spec.ts（10 条 HTTP 全链路）⇒ 9 suites / 106 tests。
-  infra: { suites: 9, tests: 106, script: "test:infra" },
+  // B2b e2e 阶段：gaps.e2e 追加「补知识库向导」6 条（三步走通 / 两条红线 / 取消保留草稿 /
+  // 草拟失败退回 / 非 UUID 400）⇒ **实测** 9 suites / 112 tests。
+  // 其中「跳过人审直接 submit ⇒ 400 且 uploads 为空」已用变异测试验过：
+  // 把 upload 前的状态守卫改成恒假，该条立刻变红——它钉的正是本波唯一的产品红线。
+  infra: { suites: 9, tests: 112, script: "test:infra" },
 };
 
 const [suiteKey, resultFile] = process.argv.slice(2);

@@ -9,6 +9,8 @@ import { applyGlobalConfig } from "../src/app/app-bootstrap";
 import { GapsController } from "../src/modules/gaps/gaps.controller";
 import { GapsRepository } from "../src/modules/gaps/gaps.repository";
 import { GapsService } from "../src/modules/gaps/gaps.service";
+import { GapFillController } from "../src/modules/gaps/gap-fill.controller";
+import { GapFillService } from "../src/modules/gaps/gap-fill.service";
 import { createEvaluationInfraHarness, E2E_EMBED_MODEL_ID } from "./helpers/evaluation-infra";
 import { infraGate } from "./helpers/gated-suite";
 
@@ -209,5 +211,211 @@ describeInfra("B2a 屏5 问题池（HTTP e2e，真 PG）", () => {
     const listed = await request(app.getHttpServer()).get("/api/gaps").expect(200);
     expect(listed.body.items.map((i: { id: string }) => i.id)).toEqual([target]);
     expect(listed.body.items[0].freq).toBe(2);
+  });
+});
+
+/**
+ * B2b「补知识库」向导的 **HTTP 全链路**守护网：controller → Zod → GapFillService →
+ * 真 GapsService/GapsRepository → 真 PG。
+ *
+ * 与 `gap-fill.service.spec.ts` 的分工：那边用假仓库守服务内部的分支逻辑；本文件守的是
+ * **端到端那条路真的接通了、而且红线在真状态机上成立**——七态 CHECK 是数据库约束，
+ * 只有连真 PG 才能证明「service 认为合法的迁移，数据库也认」。
+ *
+ * ⛔ 只连 MIGRATION_TEST_DATABASE_URL（codecrush_mig_test），`resetAndMigrate` 会 DROP SCHEMA。
+ */
+describeInfra("B2b 补知识库向导（HTTP e2e，真 PG）", () => {
+  let app: INestApplication;
+  let harness: Awaited<ReturnType<typeof createEvaluationInfraHarness>>;
+  let repo: GapsRepository;
+  let gaps: GapsService;
+  /** 每次 upload 调用都记一笔——红线断言靠它：**不该入库时，这个数组必须是空的**。 */
+  let uploads: Array<{ kbId: string; content: string }>;
+  let draftReply: string | null;
+
+  beforeAll(async () => {
+    harness = await createEvaluationInfraHarness();
+    await harness.resetAndMigrate();
+    const db = drizzle(harness.pool) as never;
+    repo = new GapsRepository(db);
+
+    const evaluations = {
+      getSettings: async () => ({
+        embeddingModelId: E2E_EMBED_MODEL_ID,
+        judgeModelId: "judge-e2e",
+        judgeVersion: "online-v1",
+      }),
+    };
+    const models = {
+      embedTexts: async (_id: string, texts: string[]) =>
+        texts.map(() => Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0))),
+      // 草拟走的是 `models.chat(...)`，返回 `{ content }`；`draftReply=null` 模拟模型不可用。
+      chat: async () => {
+        if (draftReply === null) throw new Error("草拟模型不可用");
+        return { content: draftReply };
+      },
+    };
+    gaps = new GapsService(repo, evaluations as never, models as never);
+
+    const documents = {
+      upload: async (kbId: string, files: Array<{ buffer: Buffer }>) => {
+        uploads.push({ kbId, content: files[0].buffer.toString("utf8") });
+        return [{ id: randomUUID() }];
+      },
+    };
+    const knowledgeBases = {
+      findById: async (id: string) => ({ id, name: "e2e-kb", status: "ready" }),
+    };
+
+    const fill = new GapFillService(
+      gaps,
+      documents as never,
+      knowledgeBases as never,
+      evaluations as never,
+      models as never,
+    );
+
+    const ref = await Test.createTestingModule({
+      controllers: [GapFillController],
+      providers: [
+        { provide: GapFillService, useValue: fill },
+        { provide: APP_PIPE, useClass: ZodValidationPipe },
+        {
+          provide: APP_GUARD,
+          useValue: {
+            canActivate: (ctx: ExecutionContext) => {
+              ctx.switchToHttp().getRequest().user = { id: "u-e2e", email: ACTOR };
+              return true;
+            },
+          },
+        },
+      ],
+    }).compile();
+    app = ref.createNestApplication();
+    applyGlobalConfig(app);
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await harness.close();
+  });
+
+  beforeEach(() => {
+    uploads = [];
+    draftReply = JSON.stringify({
+      question: "能开增值税专用发票吗？",
+      answer: "可以。请提供开票抬头与税号，（待确认）个工作日内寄出。",
+    });
+  });
+
+  afterEach(async () => {
+    await harness.pool.query("DELETE FROM gap_items");
+    await harness.pool.query("DELETE FROM gap_clusters");
+  });
+
+  /**
+   * 走 `GapsService.addItem` 造簇——本 describe 测的是向导，不是入池，
+   * 但也**不直接写 SQL**：绕过真实建簇路径造出来的行，可能带着现实中不会出现的状态组合。
+   */
+  async function seedCluster(): Promise<string> {
+    const res = await gaps.addItem({
+      question: "能开专用发票吗",
+      source: "manual_trace",
+      sourceTraceId: hex32(),
+    } as never);
+    return res.clusterId;
+  }
+
+  const KB = randomUUID();
+  const APP_ID = randomUUID();
+  const VERSION = randomUUID();
+  const submitBody = {
+    question: "能开增值税专用发票吗？",
+    answer: "可以。抬头与税号发我，3 个工作日内寄出。",
+    targetKbId: KB,
+    applicationId: APP_ID,
+    configVersionId: VERSION,
+    confirmed: true,
+  };
+
+  it("三步走通：pending → draft-fill → reviewing → submit-fill → filled，且内容真的入库", async () => {
+    const id = await seedCluster();
+
+    const drafted = await request(app.getHttpServer())
+      .post(`/api/gaps/${id}/draft-fill`)
+      .expect(200);
+    expect(drafted.body.status).toBe("reviewing");
+
+    const submitted = await request(app.getHttpServer())
+      .post(`/api/gaps/${id}/submit-fill`)
+      .send(submitBody)
+      .expect(200);
+    expect(submitted.body.status).toBe("filled");
+
+    // 合成文档必须是 QaChunker 认得的配对行格式，且内容是**人审后**那份、不是 LLM 原稿。
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0].kbId).toBe(KB);
+    expect(uploads[0].content).toBe(
+      "问：能开增值税专用发票吗？\n答：可以。抬头与税号发我，3 个工作日内寄出。\n",
+    );
+  });
+
+  it("⛔ 红线：跳过人审直接 submit-fill ⇒ 400，且**一个字节都没进知识库**", async () => {
+    // 这是本波唯一的产品红线（原型 `:367`）：LLM 编错答案会污染知识库，
+    // 而且它在忠实度指标上还显示满分——没人审就入库，等于给错答案盖了个可信的章。
+    const id = await seedCluster();
+
+    const res = await request(app.getHttpServer())
+      .post(`/api/gaps/${id}/submit-fill`)
+      .send(submitBody)
+      .expect(400);
+    expect(res.body.message).toContain("pending");
+
+    // 状态码对了还不够——真正要守的是**副作用没有发生**。
+    // 我在实现里就犯过这个错：upload 写在状态检查之前，400 照样返回，文档却已经进去了。
+    expect(uploads).toEqual([]);
+  });
+
+  it("⛔ 红线：confirmed=false ⇒ Zod 400，同样不入库", async () => {
+    const id = await seedCluster();
+    await request(app.getHttpServer()).post(`/api/gaps/${id}/draft-fill`).expect(200);
+
+    await request(app.getHttpServer())
+      .post(`/api/gaps/${id}/submit-fill`)
+      .send({ ...submitBody, confirmed: false })
+      .expect(400);
+
+    expect(uploads).toEqual([]);
+  });
+
+  it("取消补库回 pending 且**保留草稿**（下次打开直接回到第②步）", async () => {
+    const id = await seedCluster();
+    await request(app.getHttpServer()).post(`/api/gaps/${id}/draft-fill`).expect(200);
+
+    const cancelled = await request(app.getHttpServer())
+      .post(`/api/gaps/${id}/cancel-fill`)
+      .expect(200);
+    expect(cancelled.body.status).toBe("pending");
+
+    const draft = await request(app.getHttpServer()).get(`/api/gaps/${id}/fill-draft`).expect(200);
+    // 草稿留着才有「继续补库」这个入口；清掉的话用户得从头再草拟一次。
+    expect(draft.body.draftQuestion).toBe("能开增值税专用发票吗？");
+  });
+
+  it("草拟失败 ⇒ 簇退回 pending（不能卡在 drafting，那是个没有用户出口的态）", async () => {
+    const id = await seedCluster();
+    draftReply = null;
+
+    // 判官调用出错被服务包成 400（「草拟失败：判官模型调用出错」），不是 500。
+    await request(app.getHttpServer()).post(`/api/gaps/${id}/draft-fill`).expect(400);
+
+    const draft = await request(app.getHttpServer()).get(`/api/gaps/${id}/fill-draft`).expect(200);
+    expect(draft.body.status).toBe("pending");
+  });
+
+  it("非 UUID 路径参数是 400 而不是 500", async () => {
+    await request(app.getHttpServer()).get("/api/gaps/not-a-uuid/fill-draft").expect(400);
+    await request(app.getHttpServer()).post("/api/gaps/not-a-uuid/submit-fill").send(submitBody).expect(400);
   });
 });
