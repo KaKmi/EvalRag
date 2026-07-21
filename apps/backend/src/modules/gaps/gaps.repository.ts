@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, desc, eq, gte, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { DRIZZLE } from "../../platform/persistence/drizzle.constants";
 import type { DB, Tx } from "../../platform/persistence/persistence.module";
 import type { GapClusterStatus, GapItemSource, GapRootCause } from "./gap.constants";
@@ -132,6 +132,8 @@ export interface GapCollectorStore {
   listClusterTriageInputs(clusterId: string): Promise<ClusterTriageInput[]>;
   setClusterRootCauseAuto(clusterId: string, cause: GapRootCause, now: Date): Promise<void>;
   countRecentItems(clusterId: string, windowStart: Date): Promise<number>;
+  /** 兜底扫描：停在 `filled` 太久的簇（终态广播疑似丢失）。 */
+  listStuckFilled(before: Date, limit: number): Promise<string[]>;
   /** @returns false = 租约已被别人抢走，本轮什么都没落库（见实现处注释）。 */
   finishCycle(
     workerName: string,
@@ -692,6 +694,28 @@ export class GapsRepository implements GapCollectorStore {
       )
       .limit(1);
     return row;
+  }
+
+  /**
+   * 停在 `filled` 太久的簇——终态广播多半丢了（见 `STUCK_FILLED_AFTER_MS`）。
+   *
+   * 只选 `id`：调用方拿到就直接交给 `verifyCluster`，由它自己重新读全量并判定。
+   * 按 `updated_at` 升序，卡得最久的先处理——它们等得最冤，且最可能已经被用户看见。
+   */
+  async listStuckFilled(before: Date, limit: number): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: gapClusters.id })
+      .from(gapClusters)
+      .where(
+        and(
+          eq(gapClusters.status, "filled"),
+          lt(gapClusters.updatedAt, before),
+          isNull(gapClusters.deletedAt),
+        ),
+      )
+      .orderBy(asc(gapClusters.updatedAt))
+      .limit(limit);
+    return rows.map((r) => r.id);
   }
 
   async listItems(clusterId: string): Promise<GapItemRow[]> {

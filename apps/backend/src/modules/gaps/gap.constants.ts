@@ -131,3 +131,27 @@ export const GAP_COLLECT_CRON = "*/30 * * * *";
  * 「复发功能对新状态失效」不会让任何测试变红。
  */
 export const GAP_TERMINAL_STATUSES = new Set<GapClusterStatus>(["ignored", "verified"]);
+
+/**
+ * `filled` 兜底扫描：停在该态超过这么久的簇，视为「终态广播丢了」，由收集器补触发一次回验。
+ *
+ * **为什么需要**：`filled` 的出口只有系统事件（四条 verify*），唯一入口是
+ * `DocumentChangeNotifier` 的终态广播。worker 若在写完 `documents.status` 之后、
+ * 广播之前被杀/OOM，那次广播永不重放，簇就永久停在一个用户只剩「忽略」可走的态里——
+ * 这次补库的成果和缺口一起被埋掉。`gap-fill.service` 改成「先 CAS 抢占再上传」之后
+ * 又多了一个窗口：抢占成功、上传返回前崩溃，簇会停在 `filled` 且没有文档 id。
+ *
+ * **阈值为什么取这么大**：判据是 `updated_at`，而一次回验（重放 + 判分）实测约 25 秒，
+ * 期间簇一直停在 `filled` 且 `updated_at` 停留在入库那一刻。取小了会在上一次回验
+ * 还没跑完时重复触发——虽然 CAS 会让输的那次落空（不会写坏数据），但白烧一次
+ * 重放和判分的模型调用。15 分钟远大于任何一次正常回验，且小于收集器半小时的周期。
+ */
+export const STUCK_FILLED_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * 单轮兜底扫描最多补触发几个簇。
+ *
+ * 每个都要跑一次完整重放 + 判分（约 25 秒），不设上限的话一次积压能把收集周期
+ * 拖成几十分钟，把它本职的入池工作饿死。剩下的下一轮继续——卡住的簇不会跑掉。
+ */
+export const STUCK_FILLED_SCAN_LIMIT = 5;

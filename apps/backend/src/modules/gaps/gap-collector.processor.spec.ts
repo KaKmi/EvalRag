@@ -2,6 +2,8 @@ import type { PoolCandidate } from "./clickhouse-gaps.repository";
 import {
   GAP_COLLECT_WORKER_NAME,
   RECURRENCE_MIN_ITEMS,
+  STUCK_FILLED_AFTER_MS,
+  STUCK_FILLED_SCAN_LIMIT,
   RECURRENCE_WINDOW_DAYS,
   type GapClusterStatus,
   type GapRootCause,
@@ -48,6 +50,8 @@ interface FakeCluster {
   terminalAt: Date | null;
   /** 非空即屏5 的「复发」红点。由假 `GapsService.reopenRecurred` 置。 */
   recurredAt: Date | null;
+  /** 最后一次写入时刻——`filled` 兜底扫描按它判「卡了多久」。 */
+  updatedAt: Date | null;
 }
 
 interface FakeItem extends GapItemDraft {
@@ -70,6 +74,15 @@ class FakeGapStore implements GapCollectorStore {
   leaseStolen = false;
   failures: string[] = [];
   private seq = 0;
+
+  /** 兜底扫描的数据源。按 `updatedAt` 升序返回停在 `filled` 且早于 `before` 的簇。 */
+  async listStuckFilled(before: Date, limit: number): Promise<string[]> {
+    return this.clusters
+      .filter((c) => c.status === "filled" && c.updatedAt !== null && c.updatedAt < before)
+      .sort((a, b) => (a.updatedAt as Date).getTime() - (b.updatedAt as Date).getTime())
+      .slice(0, limit)
+      .map((c) => c.id);
+  }
 
   async getOrCreateWatermark(_w: string, _now: Date, seedFrom: string): Promise<GapCursorState> {
     if (this.cursor.lastTs === "") this.cursor = { lastTs: seedFrom, lastTraceId: "" };
@@ -214,6 +227,7 @@ class FakeGapStore implements GapCollectorStore {
       deleted: false,
       terminalAt: null,
       recurredAt: null,
+      updatedAt: null,
       ...patch,
     };
     this.clusters.push(cluster);
@@ -269,6 +283,10 @@ function candidate(patch: Partial<PoolCandidate> & { traceId: string }): PoolCan
 interface Harness {
   processor: GapCollectorProcessor;
   store: FakeGapStore;
+  /** 被 `sweepStuckFilled` 补触发回验的簇 id，按顺序。 */
+  verified: string[];
+  /** 设成某个簇 id ⇒ 对它的回验抛错，用来验「一个炸了不影响后面的」。 */
+  failVerifyOn: string | null;
   embedCalls: string[][];
   settingsReads: number;
   evaluationsTouched: string[];
@@ -287,6 +305,8 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     embedCalls,
     settingsReads: 0,
     evaluationsTouched: [],
+    verified: [],
+    failVerifyOn: null,
     processor: undefined as never,
   };
 
@@ -331,6 +351,27 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     },
   };
 
+  /**
+   * 假回验服务：只记录「谁被补触发了」。
+   *
+   * ⚠️ 这个参数**必须传**。加它的那一版忘了改本 harness，第 7 个参数是 `undefined`，
+   * `sweepStuckFilled` 里那句 `this.verification.verifyCluster` 抛
+   * `Cannot read properties of undefined`——而该方法整体自吞异常，于是
+   * **整个兜底扫描是死的，25 个测试照样全绿**。spec 不在 tsconfig 覆盖内，tsc 也看不见。
+   * 本波第 6 次踩「看起来在跑、实际是死的」这一类坑。
+   */
+  const verified: string[] = [];
+  harness.verified = verified;
+  const verification = {
+    verifyCluster: async (clusterId: string) => {
+      if (harness.failVerifyOn === clusterId) throw new Error("判官不可用");
+      verified.push(clusterId);
+      // 复刻真实语义：回验完成后簇离开 filled，下一轮不该再被扫到。
+      const c = store.clusters.find((x) => x.id === clusterId);
+      if (c) c.status = "verified";
+    },
+  };
+
   harness.processor = new GapCollectorProcessor(
     queue as never,
     store,
@@ -338,6 +379,7 @@ function makeHarness(candidates: PoolCandidate[], embeddings: number[][]): Harne
     evaluations as never,
     models as never,
     gaps as never,
+    verification as never,
   );
   return harness;
 }
@@ -783,5 +825,89 @@ describe("GapCollectorProcessor（B2a 收集器：游标 + 租约 + 增量聚类
     expect(store.clusters).toHaveLength(1);
     expect(store.clusters[0].status).toBe("pending");
     expect(store.countRecentItemsCalls).toBe(0);
+  });
+  // ───────────────── B2b 收尾：`filled` 兜底扫描（终态广播丢失） ─────────────────
+  //
+  // `filled` 的出口只有系统事件（四条 verify*），唯一入口是 DocumentChangeNotifier 的
+  // 终态广播。worker 若在写完 documents.status 之后、广播之前被杀，那次广播永不重放，
+  // 簇就永久停在一个用户只剩「忽略」可走的态里——补库的成果和缺口一起被埋掉。
+  describe("filled 兜底扫描", () => {
+    /** 早于 `STUCK_FILLED_AFTER_MS` 阈值，视为卡住。 */
+    const STUCK_AT = new Date(NOW.getTime() - STUCK_FILLED_AFTER_MS - 60_000);
+    /** 刚入库不久，还在正常回验窗口内。 */
+    const FRESH_AT = new Date(NOW.getTime() - 60_000);
+
+    it("卡在 filled 超过阈值 ⇒ 补触发一次回验", async () => {
+      const { processor, store, verified } = makeHarness([], []);
+      const stuck = store.seedCluster({
+        centroid: VEC_A,
+        status: "filled",
+        updatedAt: STUCK_AT,
+      });
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toEqual([stuck.id]);
+    });
+
+    it("刚入库不久的 filled **不动**——那是正常回验窗口，重复触发会白烧一次重放+判分", async () => {
+      // 与上一条配对。只测「卡住的会触发」的话，一个无差别扫全部 filled 的实现也能通过。
+      const { processor, store, verified } = makeHarness([], []);
+      store.seedCluster({ centroid: VEC_A, status: "filled", updatedAt: FRESH_AT });
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toEqual([]);
+    });
+
+    it("非 filled 的簇一律不碰", async () => {
+      const { processor, store, verified } = makeHarness([], []);
+      for (const status of ["pending", "reviewing", "verified", "ignored"]) {
+        store.seedCluster({ centroid: VEC_A, status, updatedAt: STUCK_AT });
+      }
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toEqual([]);
+    });
+
+    it("单轮补触发数量封顶——一次积压不能把入池工作饿死", async () => {
+      const { processor, store, verified } = makeHarness([], []);
+      for (let i = 0; i < STUCK_FILLED_SCAN_LIMIT + 3; i += 1) {
+        store.seedCluster({
+          centroid: VEC_A,
+          status: "filled",
+          // 越早卡住的越靠前，扫描按 updatedAt 升序取。
+          updatedAt: new Date(STUCK_AT.getTime() + i * 1000),
+        });
+      }
+
+      await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(verified).toHaveLength(STUCK_FILLED_SCAN_LIMIT);
+      // 卡得最久的先处理——它们等得最冤，也最可能已经被用户看见。
+      expect(verified[0]).toBe(store.clusters[0].id);
+    });
+
+    it("某个簇回验炸了 ⇒ 后面的照样补触发，且本轮入池不受影响", async () => {
+      /**
+       * 兜底扫描是附加动作。让它冒泡出去的话，一次回验失败会把整轮收集打回失败 ⇒
+       * 游标不推进 ⇒ 下一轮重扫同一页、再以同样方式崩——永久崩溃循环。
+       */
+      const harness = makeHarness([], []);
+      const { processor, store, verified } = harness;
+      const bad = store.seedCluster({ centroid: VEC_A, status: "filled", updatedAt: STUCK_AT });
+      const good = store.seedCluster({
+        centroid: VEC_A,
+        status: "filled",
+        updatedAt: new Date(STUCK_AT.getTime() + 1000),
+      });
+      harness.failVerifyOn = bad.id;
+
+      const result = await processor.processCycle(GAP_COLLECT_WORKER_NAME, NOW);
+
+      expect(result.status).toBe("healthy");
+      expect(verified).toEqual([good.id]);
+    });
   });
 });

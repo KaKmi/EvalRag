@@ -17,12 +17,15 @@ import {
   GAP_COLLECT_LAG_BUFFER_MS,
   GAP_COLLECT_LEASE_MS,
   GAP_COLLECT_WORKER_NAME,
+  STUCK_FILLED_AFTER_MS,
+  STUCK_FILLED_SCAN_LIMIT,
 } from "./gap.constants";
 import { GapCentroidStaleError } from "./gap-clustering";
 import { assignToCluster, checkRecurrence, recomputeRootCause } from "./gap-ingest";
 import { clusterKeyOf, detectFollowUp, isRewriteResolved, shouldEnterPool } from "./gap-triage";
 import { GapsRepository, type GapCursorState } from "./gaps.repository";
 import { GapsService } from "./gaps.service";
+import { GapVerificationService } from "./gap-verification.service";
 
 const WorkerPayloadSchema = z.strictObject({ workerName: z.string().min(1).max(100) });
 
@@ -76,6 +79,14 @@ export class GapCollectorProcessor implements OnModuleInit {
     // 不构成循环依赖：`GapsService` 只依赖 GapsRepository / EvaluationsRepository / ModelsService，
     // 三者都不认识本类（`gaps.di-metadata.spec.ts` 守构造参数可解析，`pnpm test` 全量验行为）。
     private readonly gaps: GapsService,
+    /**
+     * 兜底扫描用（`sweepStuckFilled`）。同样必须写**具体类**——上面那段关于
+     * `emitDecoratorMetadata` 的警告对每一个构造参数都成立。
+     *
+     * 不构成循环依赖：`GapVerificationService` 依赖 GapsService / ReplayService /
+     * DocumentsRepository，三者都不认识本类（`gaps.di-metadata.spec.ts` 守构造参数可解析）。
+     */
+    private readonly verification: GapVerificationService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -217,6 +228,15 @@ export class GapCollectorProcessor implements OnModuleInit {
         return { status: "lease_lost", collected, skipped: candidates.length - collected };
       }
 
+      /**
+       * 顺带扫一遍卡住的 `filled` 簇（见 `STUCK_FILLED_AFTER_MS`）。
+       *
+       * 放在**租约之内**：这是个写操作，多实例同时补触发只会互相 CAS 落空、白烧模型调用。
+       * 放在游标推进**之后**：它与入池是两件独立的事，不该因为它失败就让本轮的
+       * 入池成果不落库。
+       */
+      await this.sweepStuckFilled(now);
+
       return {
         status: "healthy",
         collected,
@@ -225,6 +245,41 @@ export class GapCollectorProcessor implements OnModuleInit {
       };
     } finally {
       await this.store.releaseLease(workerName, owner, now);
+    }
+  }
+
+  /**
+   * 补触发那些「终态广播丢了」的回验。
+   *
+   * `filled` 的出口只有系统事件，唯一入口是 `DocumentChangeNotifier` 的终态广播；
+   * worker 若在写完 `documents.status` 之后、广播之前被杀，那次广播永不重放，
+   * 簇就永久停在一个用户只剩「忽略」可走的态里——补库的成果和缺口一起被埋掉。
+   *
+   * **整个方法自吞异常**：兜底扫描是附加动作，它失败绝不该让一次正常的收集轮次报错。
+   * 逐个 try/catch 而不是整体包一层——一个簇的回验炸了不该让后面的都收不到补触发。
+   *
+   * 幂等性由 `verifyCluster` 自己保证（开头判 `status !== "filled"` 直接返回，
+   * 且所有写入走 CAS）：与正常广播撞车时，输的那次落空，不会写坏数据。
+   */
+  private async sweepStuckFilled(now: Date): Promise<void> {
+    try {
+      const stuck = await this.store.listStuckFilled(
+        new Date(now.getTime() - STUCK_FILLED_AFTER_MS),
+        STUCK_FILLED_SCAN_LIMIT,
+      );
+      if (stuck.length === 0) return;
+
+      // 用 warn 而非 debug：走到这里说明有广播真的丢了，运维应当看得见频次。
+      this.logger.warn(`补触发 ${stuck.length} 个卡在 filled 的簇的回验（终态广播疑似丢失）`);
+      for (const clusterId of stuck) {
+        try {
+          await this.verification.verifyCluster(clusterId, now);
+        } catch (error) {
+          this.logger.error(`兜底回验失败：cluster=${clusterId}（${toMessage(error)}）`);
+        }
+      }
+    } catch (error) {
+      this.logger.error(`filled 兜底扫描失败（不影响本轮入池）：${toMessage(error)}`);
     }
   }
 
