@@ -465,6 +465,21 @@ export default function ApplicationsPage() {
       ),
     },
     {
+      title: "运行对话",
+      key: "runChat",
+      width: 100,
+      render: (_: unknown, r: Application) => (
+        <a
+          href={`/chat/${encodeURIComponent(r.slug)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+        >
+          运行对话
+        </a>
+      ),
+    },
+    {
       title: "操作",
       key: "action",
       width: 170,

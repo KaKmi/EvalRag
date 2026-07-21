@@ -6,6 +6,8 @@ import {
   ExperimentOutlined,
   FileSearchOutlined,
   FundOutlined,
+  IssuesCloseOutlined,
+  ProfileOutlined,
   RobotOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
@@ -29,8 +31,8 @@ const NAV_ENTRIES: NavEntry[] = [
   { kind: "item", key: "/admin/traces", label: "Trace 追踪", icon: <FileSearchOutlined /> },
   { kind: "group", label: "数据飞轮" },
   { kind: "item", key: "/admin/quality", label: "答案质量", icon: <FundOutlined /> },
-  { kind: "item", key: "/admin/gaps", label: "知识缺口" },
-  { kind: "item", key: "/admin/eval/sets", label: "评测集" },
+  { kind: "item", key: "/admin/gaps", label: "知识缺口", icon: <IssuesCloseOutlined /> },
+  { kind: "item", key: "/admin/eval/sets", label: "评测集", icon: <ProfileOutlined /> },
   { kind: "item", key: "/admin/eval/runs", label: "效果评测", icon: <FundOutlined /> },
 ];
 
