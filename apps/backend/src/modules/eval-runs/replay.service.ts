@@ -4,6 +4,7 @@ import { ApplicationsService } from "../applications/applications.service";
 import { OrchestrationService } from "../chat/orchestration.service";
 import { EvaluationJudgeService } from "../evaluations/evaluation-judge.service";
 import { EvaluationsRepository } from "../evaluations/evaluations.repository";
+import { SlidingWindowLimiter } from "../../platform/rate-limit/sliding-window-limiter";
 import type { EvaluationContext } from "../evaluations/evaluation.types";
 
 /** 重放即时判分只暴露 3 个基础指标（correctness 无 gold 不调、citation 不进重放面板）。 */
@@ -18,8 +19,9 @@ const REPLAY_EVIDENCE_KEYS = ["faithfulness", "answerRelevancy", "contextPrecisi
 @Injectable()
 export class ReplayService {
   private readonly logger = new Logger(ReplayService.name);
-  private readonly lastReplayAt = new Map<string, number>();
   private static readonly RATE_LIMIT_MS = 60_000;
+  /** 限频（019 Boundary 5：单副本前提）。与 `EvaluationsService` 共用同一份实现。 */
+  private readonly limiter = new SlidingWindowLimiter(ReplayService.RATE_LIMIT_MS);
 
   constructor(
     private readonly orchestration: OrchestrationService,
@@ -28,19 +30,6 @@ export class ReplayService {
     private readonly evaluations: EvaluationsRepository,
   ) {}
 
-  /**
-   * 清掉已过限频窗口的键——它们对判定不再有任何影响，留着纯属占内存。
-   *
-   * B2b 之后这不再是「顺手做的卫生」：自动回验每次用一个**全新**的合成 trace id 调本方法
-   * （见 `GapVerificationService`——限频是防用户狂点的，不该拦系统动作），
-   * 那些键**保证不会被第二次读到**。不清理的话，一个长期运行的进程里这张表只增不减。
-   */
-  private sweepExpired(now: number): void {
-    for (const [key, at] of this.lastReplayAt) {
-      if (now - at >= ReplayService.RATE_LIMIT_MS) this.lastReplayAt.delete(key);
-    }
-  }
-
   async *stream(
     req: ReplayRequest,
     actor: string,
@@ -48,12 +37,10 @@ export class ReplayService {
   ): AsyncGenerator<ChatStreamEvent | ReplayScoresEvent> {
     // 1) 限频（§19.2 逐字）。
     const now = Date.now();
-    const last = this.lastReplayAt.get(req.sourceTraceId);
-    if (last !== undefined && now - last < ReplayService.RATE_LIMIT_MS) {
+    if (this.limiter.isLimited(req.sourceTraceId, now)) {
       throw new HttpException("操作过于频繁，请 1 分钟后再试", 429);
     }
-    this.sweepExpired(now);
-    this.lastReplayAt.set(req.sourceTraceId, now);
+    this.limiter.record(req.sourceTraceId, now);
 
     // 2) 解析版本（停用/不存在 → 422，§19.1）。
     let cfg;
