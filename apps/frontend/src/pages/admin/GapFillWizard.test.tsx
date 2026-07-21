@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GapFillDraft } from "@codecrush/contracts";
@@ -85,11 +85,24 @@ function renderWizardRaw(clusterId: string) {
   };
 }
 
-/** 把第②步填到「只差勾确认」的状态。 */
+/**
+ * 把第②步填到「只差勾确认」的状态。
+ *
+ * 「回验应用」的选项要等 `getApplicationDetail` 回来拿到 production 指针才可选——
+ * 在那之前 antd 渲染的是 Tooltip 包的 `<span>`、不会把 `title` 设成应用名，
+ * 所以 `findByTitle` 的隐式重试**恰好**等的就是这一刻。
+ *
+ * ⚠️ 别把它改写成「显式等待 option 不带 disabled class」——试过，更糟：
+ * `findByTitle` 返回的节点未必有 `.ant-select-item` 祖先，`closest()` 得到 `null` 时
+ * `expect(null).not.toHaveClass()` 直接抛错，waitFor 便一路重试到 15s 超时。
+ * 改完从「8 次全量跑红 1 次」变成「4 次全跑全红」。等待意图确实藏在 antd 的渲染细节里，
+ * 但在找到既显式又正确的写法之前，隐式重试是更稳的那个。见 §复审 P2 的偶发红说明。
+ */
 async function fillForm() {
   await screen.findByDisplayValue("能开增值税专用发票吗？");
   fireEvent.mouseDown(screen.getByRole("combobox", { name: "目标知识库" }));
   fireEvent.click(await screen.findByTitle("客服知识库"));
+
   fireEvent.mouseDown(screen.getByRole("combobox", { name: "回验应用" }));
   fireEvent.click(await screen.findByTitle("客服机器人"));
 }
@@ -218,19 +231,86 @@ describe("补知识库向导", () => {
   });
 
   it("内容被服务端草稿覆盖时，「我已核对」必须跟着作废", async () => {
-    // 人只确认过他当时看见的那一份。换了内容还留着勾，等于替用户认可了他没读过的文本。
-    api.getGapFillDraft.mockResolvedValue(
-      draft({ status: "pending", draftQuestion: null, draftAnswer: null }),
-    );
-    api.draftGapFill.mockResolvedValue({});
-    renderWizard();
-
-    fireEvent.click(await screen.findByRole("button", { name: /草拟/ }));
-
-    // 草拟完成 → load(preserveEdits=false) 覆盖内容，复选框必须是未勾的。
+    /**
+     * ⚠️ 这条的**第一版是空测**，第三轮复审用变异测试证明了：删掉 `load` 里的
+     * `setConfirmed(false)` 它照样绿。原因是它从 `pending` 起步，复选框自始至终
+     * 没被勾过（open effect 早已置 false），`not.toBeChecked()` 恒真，与被测的那行
+     * 毫无因果。教训：断言「某状态为假」时，必须先让它真过一次，否则测的是初始值。
+     *
+     * 现在的构造：reviewing 态勾上确认 → 关掉再打开（触发 preserveEdits=false 的 load）
+     * → 内容被服务端草稿重新覆盖，确认必须作废。
+     */
     api.getGapFillDraft.mockResolvedValue(draft());
+    const { rerender } = renderWizardRaw(CLUSTER);
+    await screen.findByDisplayValue("能开增值税专用发票吗？");
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("checkbox")).toBeChecked();
+
+    rerender(false, CLUSTER);
+    rerender(true, CLUSTER);
+
     await screen.findByDisplayValue("能开增值税专用发票吗？");
     expect(screen.getByRole("checkbox")).not.toBeChecked();
+  });
+
+  /**
+   * 第三轮复审的两条 P1——复审员用探针实测复现了「簇 A 的问答被提交进簇 B」。
+   * 本组件在 GapsPage 里是**单实例常驻**（open/clusterId 切换，不卸载重建），
+   * 所以 state 必然跨簇存活，这两条在生产可达，不是测试构造出来的。
+   */
+  it("⛔ 换簇后 load 失败 → 绝不能拿上一个簇的问答去提交", async () => {
+    api.getGapFillDraft.mockResolvedValue(draft());
+    const { rerender } = renderWizardRaw(CLUSTER);
+    await fillForm();
+    fireEvent.click(screen.getByRole("checkbox"));
+
+    // 换到簇 B，且 B 的草稿拉取失败。
+    const other = "55555555-5555-4555-8555-555555555555";
+    api.getGapFillDraft.mockRejectedValue(new Error("网络抖动"));
+    rerender(false, CLUSTER);
+    rerender(true, other);
+
+    await screen.findByText("网络抖动");
+    // 簇 A 的内容必须已经不在屏上，确认入库也不该可点——否则 A 的问答会写进 B 的知识库。
+    expect(screen.queryByDisplayValue("能开增值税专用发票吗？")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认入库" })).not.toBeInTheDocument();
+    expect(api.submitGapFill).not.toHaveBeenCalled();
+  });
+
+  it("⛔ 陈旧响应：慢的簇 A 响应回来时，不得覆盖已渲染的簇 B", async () => {
+    const other = "55555555-5555-4555-8555-555555555555";
+    let releaseA: (v: unknown) => void = () => {};
+    api.getGapFillDraft.mockReturnValueOnce(
+      new Promise((res) => {
+        releaseA = res;
+      }),
+    );
+    const { rerender } = renderWizardRaw(CLUSTER);
+
+    // A 还挂着就切到 B，B 立刻返回。
+    api.getGapFillDraft.mockResolvedValue(
+      draft({ clusterId: other, draftQuestion: "B 的问题", draftAnswer: "B 的答案" }),
+    );
+    rerender(false, CLUSTER);
+    rerender(true, other);
+    await screen.findByDisplayValue("B 的问题");
+
+    /**
+     * 这时 A 的响应才落地——必须被丢弃。
+     *
+     * ⚠️ 必须用 `act` 把 A 的 `.then` 连续体**跑完**再断言。第一版直接 `releaseA()` 后
+     * `waitFor(B 的值还在)`，而那个 waitFor 首次检查就通过了（B 的值本来就在），
+     * 根本没等到 A 的 setState——于是这条测试在**修复前的代码上照样绿**，是空测。
+     * 「断言某事没发生」时，必须先确保那件事已经有机会发生。
+     */
+    await act(async () => {
+      releaseA(draft());
+      await Promise.resolve();
+    });
+
+    expect(screen.getByLabelText("补库问题")).toHaveValue("B 的问题");
+    expect(screen.queryByDisplayValue("能开增值税专用发票吗？")).not.toBeInTheDocument();
   });
 
   it("草拟失败要**出声**——错误不能被随后的 load 抹掉", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -101,12 +101,32 @@ export default function GapFillWizard({
    *    同时把 `confirmed` 清掉：换了内容，之前那次确认自然作废。
    *  · `preserveEdits: true`（提交失败后）——只刷新状态，用户的编辑一个字都不能动。
    */
+  /** 始终指向**当前**渲染的簇——异步连续体用它判断自己是否已经过期（见 `load`）。 */
+  const currentClusterRef = useRef(clusterId);
+  useEffect(() => {
+    currentClusterRef.current = clusterId;
+  }, [clusterId]);
+
   const load = useCallback(
     async (opts: { preserveEdits?: boolean } = {}) => {
       if (!clusterId) return;
       setLoading(true);
       try {
         const next = await getGapFillDraft(clusterId);
+        /**
+         * ⛔ 陈旧响应守卫（第三轮复审 P1-2，复审员用延迟 mock 实测复现）。
+         *
+         * `load` 是闭包，`await` 期间用户可能已经切到**另一个**簇了。慢的簇 A 响应
+         * 后落地，会把已经渲染好的簇 B 内容整个覆盖掉——用户核对的是 A 的答案，
+         * 入库到的是 B。
+         *
+         * ⚠️ 必须比 `currentClusterRef.current`，**不能**比闭包里的 `clusterId`：
+         * 那个值在 A 的闭包里恒等于 A，`next.clusterId` 也是 A，守卫永远成立、
+         * 等于没写。第一版就是这么写的，靠一条同样有缺陷的测试「验证」通过——
+         * 直到把测试修对（用 act 跑完 A 的连续体）才暴露出来。ref 存的是**当前**
+         * 渲染的簇，与闭包无关，这才是「我还是不是用户正在看的那个簇」的真实答案。
+         */
+        if (next.clusterId !== currentClusterRef.current) return;
         setDraft(next);
         if (!opts.preserveEdits) {
           setQuestion(next.draftQuestion ?? "");
@@ -130,9 +150,21 @@ export default function GapFillWizard({
     if (!open) return;
     setConfirmed(false);
     setErr(null);
-    // `appId` 也要清：`load()` 只重置来自草稿的字段（question/answer/kbId），
-    // 而回验应用是纯本地选择。`destroyOnHidden` 销毁的是 Drawer 的子树、不是本组件的
-    // state，所以不清的话，换一个簇打开会带着上一个簇选的应用，且毫无提示。
+    /**
+     * ⛔ 打开时必须把**上一个簇的内容清干净**（第三轮复审 P1-1，实测可复现）。
+     *
+     * 本组件在 `GapsPage` 里是**单实例常驻**（靠 `open`/`clusterId` 切换，不是卸载重建），
+     * 所以 state 必然跨簇存活。原先只清 `confirmed`/`err`/`appId`，内容字段留着——
+     * 于是「关掉簇 A，打开簇 B，而 B 的 fill-draft 请求失败」这条路径上，
+     * 屏幕显示的是**簇 A 的问答**、报错 Alert 同时挂着、「确认入库」还可点，
+     * 提交出去就是把 A 的内容写进 B 的知识库并触发对 B 的回验。
+     *
+     * `appId` 同理：它是纯本地选择，`load()` 根本不碰。
+     */
+    setDraft(null);
+    setQuestion("");
+    setAnswer("");
+    setKbId(undefined);
     setAppId(undefined);
     void load();
   }, [open, load]);
@@ -166,7 +198,16 @@ export default function GapFillWizard({
       .catch(() => setApps([]));
   }, [open]);
 
-  const status = draft?.status;
+  /**
+   * ⛔ `draft` 必须与**当前**簇同源，否则视为「没有草稿」。
+   *
+   * 第三轮复审的两条 P1 同源：本组件单实例常驻，`draft` 会跨簇存活。open effect 已经
+   * 在打开时清了内容，`load` 也丢弃了陈旧响应——这里是第三道，把「渲染哪一屏」这个
+   * 决策本身也锁死在同源前提上。三道都指向同一件事：**用户核对的内容，必须就是
+   * 即将入库到这个簇的内容**。少任何一道，都存在一条路径让 A 的问答进 B 的知识库。
+   */
+  const draftFresh = draft?.clusterId === clusterId;
+  const status = draftFresh ? draft?.status : undefined;
 
   /** 第①步：请求草拟。失败时后端已把簇退回 `pending`，所以这里允许原地重试。 */
   const runDraft = async () => {
@@ -255,13 +296,28 @@ export default function GapFillWizard({
     }
   };
 
-  /** 原型 §17.5 `:633` 的三态：①草拟中 ②人审编辑 ③入库中。 */
-  const stepIndex = status === "reviewing" ? 1 : status === "filled" ? 2 : 0;
+  /**
+   * 原型 §17.5 `:633` 的三态：①草拟中 ②人审编辑 ③入库中。
+   *
+   * `verified`/`ignored`/`routed_retrieval` 走的是「向导不适用」兜底 Alert，
+   * 此时不能再高亮第①步——那会和 Alert 说的话自相矛盾（复审 P3）。`-1` = 不高亮任何步。
+   */
+  const WIZARD_STATES = ["pending", "drafting", "reviewing", "filled"];
+  const stepIndex =
+    status === "reviewing" ? 1 : status === "filled" ? 2 : status && WIZARD_STATES.includes(status) ? 0 : -1;
 
   return (
     <Drawer
       open={open}
-      title="补知识库"
+      /*
+        标题带上代表问题：核对一份答案却看不到它要回答的原始问题本就不合理，
+        而且这是内容串簇时用户**唯一**能察觉异常的锚点（复审 P3，纵深防御）。
+      */
+      title={
+        draftFresh && draft?.representativeQuestion
+          ? `补知识库 — ${draft.representativeQuestion}`
+          : "补知识库"
+      }
       width={720}
       onClose={onClose}
       destroyOnHidden
@@ -304,7 +360,12 @@ export default function GapFillWizard({
             message="LLM 先起一份候选问答，你审阅并修改后才会入库"
             description="草稿只依据模型自身的常识，**不掌握**你们的内部资料——具体数字、期限、金额一律会写成「（待确认）」，请在下一步逐条核实。"
           />
-          {drafting ? (
+          {/*
+            `drafting`（本地）只反映**本客户端**的在途请求。后端 status 也是 `drafting`
+            时说明别的标签页/同事已经在草拟了——那时渲染一个可点的「开始草拟」，
+            点下去只会拿到 400。两个来源都要认（复审 P3）。
+          */}
+          {drafting || status === "drafting" ? (
             <Space>
               <Spin size="small" />
               <Text type="secondary">正在草拟…（约 10 秒）</Text>
