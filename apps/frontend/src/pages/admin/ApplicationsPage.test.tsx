@@ -231,6 +231,17 @@ describe("应用列表页", () => {
     fireEvent.click(await screen.findByText("售后助手"));
     await waitFor(() => expect(mocked.getApplicationDetail).toHaveBeenCalledWith("app1"));
   });
+
+  it("运行对话列跳转 /chat/:slug 新页面打开，且不触发行点击导航", async () => {
+    renderRoutes("/admin/applications");
+    const link = await screen.findByRole("link", { name: "运行对话" });
+    expect(link).toHaveAttribute("href", "/chat/aftersale-bot");
+    expect(link).toHaveAttribute("target", "_blank");
+    // 初次加载会为每行拉一次详情以补齐「绑定知识库/生成模型」列，先记基线再点击比对增量
+    const callsBeforeClick = mocked.getApplicationDetail.mock.calls.length;
+    fireEvent.click(link);
+    expect(mocked.getApplicationDetail.mock.calls.length).toBe(callsBeforeClick);
+  });
 });
 
 describe("新建应用抽屉", () => {
