@@ -30,6 +30,14 @@ RAGForge 是一个用于搭建、发布和持续优化 RAG 问答应用的平台
 </tr>
 </table>
 
+## 产品质量闭环
+
+<p align="center">
+  <img src="docs/design/assets/ragforge-quality-loop-sketch.jpg" alt="RAGForge 产品质量闭环" width="720"/>
+</p>
+
+从配置到发布，再从真实问题回到知识与版本——核心不是一次答对，而是让系统持续变好。
+
 ## 系统架构
 
 ![RAGForge 系统架构](docs/design/assets/ragforge-architecture.svg)
