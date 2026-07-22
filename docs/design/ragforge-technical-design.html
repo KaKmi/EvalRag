@@ -1,0 +1,614 @@
+<meta charset="utf-8">
+<title>RAGForge 完整技术设计</title>
+<style>
+:root{
+  --navy:#1E2761; --navy-soft:#2B3A7A; --ink:#1a1f36; --body:#33384d; --muted:#6b7280;
+  --accent:#F2782D; --accent-soft:#fff3ea; --line:#e5e8f0; --bg:#f7f8fc; --card:#ffffff;
+  --code-bg:#0d1428; --code-ink:#d6e0f5; --ok:#2f9e6f; --warn:#c2410c; --warn-bg:#fff7ed;
+  --blue:#2f6fdb; --violet:#7c5cff; --sidebar-w:280px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--body);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  font-size:15px;line-height:1.72;-webkit-font-smoothing:antialiased}
+code,pre,.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace}
+.layout{display:flex}
+nav.side{position:fixed;top:0;left:0;width:var(--sidebar-w);height:100vh;overflow-y:auto;background:var(--navy);color:#c7d2f0;padding:0 0 40px}
+nav.side .brand{padding:22px 24px 16px;position:sticky;top:0;background:var(--navy);z-index:2;border-bottom:1px solid rgba(255,255,255,.08)}
+nav.side .brand .logo{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;background:var(--accent);border-radius:8px;color:#fff;font-weight:800;font-size:15px;vertical-align:middle}
+nav.side .brand b{color:#fff;font-size:17px;margin-left:9px;letter-spacing:.5px}
+nav.side .brand div.sub{color:#8fa0d0;font-size:11.5px;margin-top:8px;line-height:1.5}
+nav.side a{display:block;color:#b9c5e8;text-decoration:none;padding:6px 24px;font-size:13px;border-left:2px solid transparent}
+nav.side a:hover{color:#fff;background:rgba(255,255,255,.05)}
+nav.side a.h1{margin-top:14px;font-weight:700;color:#e8eefc;font-size:13.5px}
+nav.side a.h2{padding-left:38px;font-size:12.5px;color:#93a3cf}
+nav.side a .n{color:var(--accent);font-weight:700;margin-right:7px;font-size:11px}
+main{margin-left:var(--sidebar-w);flex:1;min-width:0;max-width:calc(100% - var(--sidebar-w))}
+.wrap{max-width:960px;margin:0 auto;padding:0 40px}
+.cover{background:linear-gradient(135deg,#1a2258 0%,#232f6e 55%,#161d45 100%);color:#fff;padding:70px 0 60px;border-bottom:4px solid var(--accent)}
+.cover .kicker{color:var(--accent);font-weight:700;letter-spacing:3px;font-size:13px;text-transform:uppercase}
+.cover h1{font-size:44px;margin:14px 0 6px;font-weight:800;letter-spacing:1px}
+.cover .lead{font-size:18px;color:#cdd8f5;max-width:680px;margin:12px 0 26px}
+.cover .facts{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}
+.cover .fact{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:12px 18px;min-width:140px}
+.cover .fact b{display:block;font-size:22px;color:#fff}
+.cover .fact span{font-size:12px;color:#a9b7e4}
+.cover .note{margin-top:26px;font-size:12.5px;color:#8fa0d0;max-width:720px;border-top:1px solid rgba(255,255,255,.1);padding-top:16px}
+section.doc{padding:52px 0 8px;border-bottom:1px solid var(--line)}
+section.doc>.wrap>h2{font-size:30px;color:var(--ink);margin:0 0 4px;font-weight:800;scroll-margin-top:20px}
+section.doc>.wrap>h2 .num{color:var(--accent);font-weight:800;margin-right:12px}
+.sec-lead{font-size:16px;color:var(--muted);margin:0 0 26px;max-width:760px}
+h3{font-size:20px;color:var(--ink);margin:36px 0 12px;font-weight:700;padding-top:6px;scroll-margin-top:20px}
+h4{font-size:16px;color:var(--navy);margin:24px 0 10px;font-weight:700}
+p{margin:11px 0}
+.tag{display:inline-block;background:var(--accent-soft);color:var(--warn);border:1px solid #f6d3b8;border-radius:5px;padding:1px 8px;font-size:11.5px;font-weight:600;margin-right:6px}
+.file{font-family:Consolas,monospace;font-size:12.5px;background:#eef1f9;color:#3a4a7a;border-radius:4px;padding:1px 7px;border:1px solid #dde3f2;white-space:nowrap}
+.callout{border-radius:10px;padding:16px 20px;margin:18px 0;border:1px solid var(--line);background:var(--card)}
+.callout.why{background:#f3f8ff;border-color:#cfe0fb}
+.callout.why b{color:var(--blue)}
+.callout.warn{background:var(--warn-bg);border-color:#fcd9b6}
+.callout.warn b{color:var(--warn)}
+.callout .h{font-weight:700;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.callout .dot{width:8px;height:8px;border-radius:50%;background:var(--accent)}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th{background:#f0f3fb;color:var(--navy);text-align:left;padding:9px 13px;font-weight:700;font-size:12.5px;border-bottom:2px solid var(--line)}
+td{padding:8px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td code{background:#eef1f9;padding:1px 5px;border-radius:3px;font-size:12px;color:#3a4a7a}
+pre{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:16px 18px;overflow-x:auto;font-size:12.5px;line-height:1.6;margin:16px 0;border:1px solid #1e2a4a}
+pre .c{color:#7488b8} pre .k{color:#ff9e6d} pre .s{color:#8fd6a0} pre .fn{color:#7fb8ff}
+p code,li code{background:#eef1f9;padding:1px 6px;border-radius:4px;font-size:12.5px;color:#c0392b;border:1px solid #e4e9f5}
+ol.flow{list-style:none;counter-reset:step;padding:0;margin:18px 0}
+ol.flow>li{counter-increment:step;position:relative;padding:0 0 18px 46px;margin:0}
+ol.flow>li::before{content:counter(step);position:absolute;left:0;top:0;width:30px;height:30px;background:var(--navy);color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
+ol.flow>li::after{content:"";position:absolute;left:14px;top:32px;bottom:2px;width:2px;background:var(--line)}
+ol.flow>li:last-child::after{display:none}
+ol.flow>li .st{font-weight:700;color:var(--ink)}
+ol.flow>li p{margin:4px 0 0}
+.grid{display:grid;gap:14px;margin:18px 0}
+.grid.g2{grid-template-columns:1fr 1fr}
+.grid.g3{grid-template-columns:1fr 1fr 1fr}
+.mcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.mcard .t{font-weight:700;color:var(--navy);font-size:15px;margin-bottom:4px}
+.mcard .d{font-size:13px;color:var(--muted)}
+.figure{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;margin:22px 0;overflow-x:auto}
+.figure .cap{font-size:12.5px;color:var(--muted);margin-top:12px;text-align:center}
+.figure svg{display:block;margin:0 auto;max-width:100%}
+ul.tight{margin:10px 0;padding-left:22px}
+ul.tight li{margin:5px 0}
+.kv{font-size:13.5px}
+.pill{display:inline-block;background:#eef4ff;color:var(--blue);border:1px solid #d3e2fb;border-radius:20px;padding:2px 11px;font-size:12px;margin:2px 4px 2px 0}
+.pill.o{background:var(--accent-soft);color:var(--warn);border-color:#f6d3b8}
+@media (max-width:1100px){nav.side{display:none}main{margin-left:0;max-width:100%}.grid.g3,.grid.g2{grid-template-columns:1fr}}
+</style>
+
+<div class="layout">
+<nav class="side">
+  <div class="brand"><span class="logo">CC</span><b>RAGForge</b><div class="sub">完整技术设计 · 基于代码<br>Generated 2026-07-22</div></div>
+  <a class="h1" href="#overview"><span class="n">00</span>系统概览</a>
+  <a class="h1" href="#arch"><span class="n">01</span>系统架构</a>
+  <a class="h1" href="#dataflow"><span class="n">02</span>核心数据流</a>
+  <a class="h1" href="#platform"><span class="n">03</span>平台底座 + Telemetry</a>
+  <a class="h1" href="#models"><span class="n">04</span>模型接入 + 结构化内核</a>
+  <a class="h1" href="#ingestion"><span class="n">05</span>知识入库管线</a>
+  <a class="h1" href="#retrieval"><span class="n">06</span>检索 + RAG 编排</a>
+  <a class="h1" href="#applications"><span class="n">07</span>应用管理与发布</a>
+  <a class="h1" href="#observability"><span class="n">08</span>可观测与 Trace 读模型</a>
+  <a class="h1" href="#flywheel"><span class="n">09</span>评测飞轮</a>
+  <a class="h1" href="#appendix"><span class="n">10</span>附录</a>
+</nav>
+<main>
+<header class="cover"><div class="wrap">
+  <div class="kicker">Technical Design · Code is the single source of truth</div>
+  <h1>RAGForge 完整技术设计</h1>
+  <p class="lead">一个把「一次问答」拆成可配置、可追踪、可优化流水线的通用 RAG 平台。本文自底向上讲清每个子系统的职责、数据结构、关键函数与详细流程走向。</p>
+  <div class="facts">
+    <div class="fact"><b>NestJS</b><span>模块化单体 · 自研薄编排</span></div>
+    <div class="fact"><b>PG + pgvector</b><span>控制面 + 向量/关键词同表</span></div>
+    <div class="fact"><b>OTLP → ClickHouse</b><span>标准可观测 · 埋点不进关键路径</span></div>
+    <div class="fact"><b>19 业务模块</b><span>~22k 行非测试代码</span></div>
+  </div>
+  <p class="note">本文由 7 路并行代码调查汇总而成，所有结论均以实际源码（<span class="mono">file:line</span>、函数签名、SQL）为准，设计文档（docs/design/001–021）仅作对照。文中「代码与文档偏离点」是调查发现的实现与设计文档不一致处，已在附录汇总。</p>
+</div></header>
+
+<section class="doc" id="overview"><div class="wrap">
+  <h2><span class="num">00</span>系统概览</h2>
+  <p class="sec-lead">RAGForge 是一个通用 RAG 平台（课程问答只是示例 mock 数据）。它把一次问答拆成可配置、可追踪、可优化的流水线，并用一套「质量飞轮」把线上问答的坏样本持续变成下一轮优化的输入。</p>
+  <h3>一句话架构</h3>
+  <p>前端（React+antd）只经 <span class="file">@codecrush/contracts</span> 的 Zod 契约调后端 REST/SSE；后端（NestJS 模块化单体）把外部依赖全藏在端口背后（<code>ModelProviderPort</code> / <code>RetrieverPort</code> / <code>BlobStore</code> / <code>Queue</code>），控制面落 Postgres+pgvector 单库，问答链路每一步发一条标准 OTLP span，经 Collector 落 ClickHouse，读侧只经自有 VIEW 防腐层访问。</p>
+  <div class="figure">
+    <svg viewBox="0 0 900 150" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#F2782D"/></marker></defs>
+      <g text-anchor="middle" font-size="13" font-weight="700">
+        <rect x="10" y="45" width="150" height="58" rx="10" fill="#1E2761"/><text x="85" y="70" fill="#fff">① 配置</text><text x="85" y="88" fill="#aebbe4" font-size="10.5" font-weight="400">模型/Prompt/知识库</text>
+        <rect x="195" y="45" width="150" height="58" rx="10" fill="#2B3A7A"/><text x="270" y="70" fill="#fff">② 服务</text><text x="270" y="88" fill="#aebbe4" font-size="10.5" font-weight="400">应用/配置版本/问答</text>
+        <rect x="380" y="45" width="150" height="58" rx="10" fill="#2B3A7A"/><text x="455" y="70" fill="#fff">③ 观测</text><text x="455" y="88" fill="#aebbe4" font-size="10.5" font-weight="400">检索台/Trace/质量</text>
+        <rect x="565" y="45" width="150" height="58" rx="10" fill="#F2782D"/><text x="640" y="70" fill="#fff">④ 飞轮</text><text x="640" y="88" fill="#ffe3cf" font-size="10.5" font-weight="400">缺口/评测集/跑分</text>
+        <rect x="750" y="45" width="140" height="58" rx="10" fill="#fff" stroke="#1E2761" stroke-width="1.5"/><text x="820" y="70" fill="#1E2761">安全上线</text><text x="820" y="88" fill="#6b7280" font-size="10.5" font-weight="400">切指针/回滚</text>
+      </g>
+      <g stroke="#F2782D" stroke-width="2" marker-end="url(#ar)"><line x1="162" y1="74" x2="191" y2="74"/><line x1="347" y1="74" x2="376" y2="74"/><line x1="532" y1="74" x2="561" y2="74"/><line x1="717" y1="74" x2="746" y2="74"/></g>
+      <path d="M 640 108 Q 640 135 455 135 Q 270 135 270 108" fill="none" stroke="#7c5cff" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#ar)"/>
+      <text x="455" y="130" text-anchor="middle" font-size="10.5" fill="#7c5cff">飞轮结论回流下一轮配置</text>
+    </svg>
+    <div class="cap">核心闭环：配置 → 入库 → 问答 → 观测 → 评测优化 → 安全上线，飞轮把④的结论送回①</div>
+  </div>
+  <h3>阅读指南</h3>
+  <ul class="tight">
+    <li><b>§01 系统架构</b> — 五层分层、8 条不变量、模块地图与依赖方向。</li>
+    <li><b>§02 核心数据流</b> — 三条端到端数据流（问答 / 可观测 / 飞轮）的全局视图。</li>
+    <li><b>§03–§09</b> — 七个子系统逐个深入：职责、关键文件、数据结构与表、关键函数、<b>详细流程走向</b>、技术方案、接口依赖。</li>
+    <li><b>§10 附录</b> — REST 端点总表、代码与设计文档偏离点清单。</li>
+  </ul>
+</div></section>
+
+<section class="doc" id="arch"><div class="wrap">
+  <h2><span class="num">01</span>系统架构</h2>
+  <p class="sec-lead">NestJS 模块化单体，一切外部依赖藏在端口/连接串背后，本地 docker-compose ↔ 阿里云托管零改动切换。低 QPS（持续 ≤10 / 突发 ≤50）决定了单实例后端 + 单 Postgres + 单 ClickHouse + 单 Collector 全部够用，不上集群。</p>
+  <div class="figure">
+    <img src="assets/ragforge-architecture.svg" alt="RAGForge 系统架构" style="width:100%">
+    <div class="cap">系统架构总览（源：docs/design/assets/ragforge-architecture.svg）</div>
+  </div>
+  <h3>分层与执行平面</h3>
+  <div class="grid g2">
+    <div class="mcard"><div class="t">接入层</div><div class="d">C 端问答（SSE 流式 + 引用溯源）· 管理控制台（React+antd）· 边缘入口（云上 CDN/ALB/WAF/JWT）</div></div>
+    <div class="mcard"><div class="t">应用平面 · NestJS 模块化单体</div><div class="d">控制面域模块 + <b>RAG 编排主链路</b>（自研薄编排，每阶段一个显式 OTel span）+ 版本化发布。依赖单向无环。</div></div>
+    <div class="mcard"><div class="t">可插拔端口 · Ports &amp; Adapters</div><div class="d">六个接缝：ModelProviderPort · RetrieverPort · Processing Profile · QueuePort · BlobStore · OTLP Exporter。换实现只改 DI 注入。</div></div>
+    <div class="mcard"><div class="t">异步平面 · 全在问答关键路径之外</div><div class="d">入库 Worker · 评测 Judge Worker · 指标汇总 Worker · 问题池收集器。挂了不影响一次问答成功。</div></div>
+    <div class="mcard"><div class="t">数据平面</div><div class="d">PostgreSQL 16 + pgvector（控制面事务 + 向量/关键词同表）· 对象存储 · ClickHouse（Trace 列存，读侧只经 VIEW）</div></div>
+    <div class="mcard"><div class="t">可观测平面 · OTLP 标准链路</div><div class="d">@codecrush/otel SDK → OTel Collector（batch/重试/脱敏/exporter 可插拔）→ ClickHouse + 自有读 VIEW → traces 读模型</div></div>
+  </div>
+  <h4>8 条不可违反的不变量（Invariants）</h4>
+  <table>
+    <tr><th style="width:34px">#</th><th>不变量</th><th>代码落点</th></tr>
+    <tr><td>1</td><td><b>埋点绝不进入问答关键路径</b>：Collector/CH 故障不得导致问答失败或增加可感延迟</td><td>SDK 有界队列丢 span；读侧冷库返回空；脱敏异常被吞</td></tr>
+    <tr><td>2</td><td><b>应用只吐 OTLP，从不直写 ClickHouse</b>；读侧只经自有 VIEW 防腐层</td><td>otel 包零 <code>@clickhouse/client</code> 依赖；traces 只读 VIEW</td></tr>
+    <tr><td>3</td><td><b>一切外部依赖藏在端口背后</b>，本地↔云零改动切换</td><td>ModelProviderPort / RetrieverPort / BlobStore / Queue</td></tr>
+    <tr><td>4</td><td><b>模型 API Key 永不明文回传前端</b>，存储加密</td><td>AES-256-GCM envelope，展示先 decrypt 再 mask</td></tr>
+    <tr><td>5</td><td><code>messages.trace_id</code> 外键必写，每条回答可回溯 trace</td><td>chat 落库写 traceId（逻辑关联 CH）</td></tr>
+    <tr><td>6</td><td><b>模型原始输出不进入编排</b>：结构化节点必经 ContractVersion 校验，失败修复一次再 Fallback</td><td>executeStructured 四道关卡</td></tr>
+    <tr><td>7</td><td><b>生产 Prompt/Contract 不漂移</b>：配置版本固定 PromptVersion，PromptVersion 固定 ContractVersion</td><td>四个 PromptVersion FK 列 + 不可变</td></tr>
+    <tr><td>8</td><td><code>production_config_version_id</code> 是线上配置唯一事实源；停用优先于指针</td><td>casProduction CAS + resolvePublic 四态</td></tr>
+  </table>
+  <h3>模块地图</h3>
+  <p>后端分三层：<code>app/</code>（组合根）→ <code>modules/</code>（19 业务域）→ <code>platform/</code>（8 横切基建）→ <code>packages/</code>（3 共享包）。依赖方向严格 <b>app → modules → platform → packages</b>，同层显式 import、禁止循环。</p>
+  <table>
+    <tr><th>子系统</th><th>模块</th><th>职责</th></tr>
+    <tr><td>配置</td><td><code>models · prompts · node-runtime</code></td><td>模型接入（协议适配）· 不可变 Prompt 版本 · 结构化输出内核</td></tr>
+    <tr><td>知识</td><td><code>knowledge-bases · documents · ingestion · chunks</code></td><td>KB 配置 · 文档生命周期 · 四阶段入库管线（34 文件）· 切片存取</td></tr>
+    <tr><td>服务</td><td><code>applications · chat · conversations · retrieval</code></td><td>不可变配置版本+发布 · RAG 编排+SSE · 会话历史 · 多路召回</td></tr>
+    <tr><td>观测</td><td><code>traces</code>（含 metrics）</td><td>只读 ClickHouse（经 VIEW）· Trace/Session/运行看板读模型</td></tr>
+    <tr><td>飞轮</td><td><code>evaluations · eval-runs · gaps</code></td><td>在线 LLM 裁判 · 离线跑分/版本对比 · 问题池/知识缺口（~10.8k 行）</td></tr>
+    <tr><td>基础</td><td><code>auth · users · health · agents</code>*</td><td>JWT · 用户 · 健康检查 · <span class="tag">legacy</span>M7 旧模型，已被 applications 取代未删除</td></tr>
+  </table>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>技术债：agents 模块并存未清理</b></div>
+    <p><code>agents</code>（M7 旧模型）与 <code>applications</code>（M7b 重写：不可变版本 + production 单指针 CAS + 异步 ReleaseCheck）<b>两套 REST/schema/前端页面并存</b>，仍注册在 <span class="file">app.module.ts</span>。但运行时问答链路走 <code>applications.resolvePublic()</code>，<code>OrchestrationService</code> 完全不注入 <code>AgentsService</code>——agents 是待清理技术债，非在用。</p>
+  </div>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>依赖边界的真实强制力</b></div>
+    <p><span class="file">eslint.config.mjs</span> 用 <code>no-restricted-imports</code> 机械强制 5 条包边界（frontend 禁 import otel、contracts 禁依赖 apps、otel-conventions 零依赖、otel 禁 import contracts/clickhouse、除 3 个聚合根外全仓禁 import gaps）。但<b>跨业务模块的 DAG 没有机械强制</b>，只靠文档 + review + <code>madge --circular</code> 兜底——003 已自我订正，代码验证一致。</p>
+  </div>
+</div></section>
+
+<section class="doc" id="dataflow"><div class="wrap">
+  <h2><span class="num">02</span>核心数据流</h2>
+  <p class="sec-lead">三条端到端数据流构成骨架：<b>问答主链路</b>（提问 → 答案+引用）、<b>可观测数据流</b>（每步 span → Trace/看板）、<b>质量飞轮闭环</b>（坏样本 → 缺口 → 补库 → 回验 → 评测集）。本章给全局视图，细节见后续各章。</p>
+  <h3>数据流一 · 问答主链路（一次 <code>POST /chat</code>）</h3>
+  <p>入口是 <span class="file">chat.controller.ts:41</span> 的 SSE 端点。<code>OrchestrationService.run()</code> 是 <code>AsyncGenerator&lt;ChatStreamEvent&gt;</code>，<code>resolvePublic</code> 故意留在生成器体内（首个 <code>next()</code> 才触发），使「未上线/停用」异常在写 SSE 头<b>之前</b>冒泡成干净 404/403，而非中途断流。</p>
+  <div class="figure">
+    <svg viewBox="0 0 880 330" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Microsoft YaHei',sans-serif" font-size="12">
+      <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#2f6fdb"/></marker><marker id="a2o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#F2782D"/></marker></defs>
+      <rect x="20" y="14" width="840" height="40" rx="8" fill="#1E2761"/><text x="34" y="33" fill="#fff" font-weight="700">rag.pipeline</text><text x="34" y="47" fill="#aebbe4" font-size="10">chain 根 span（手动生命周期，跨 yield 存活）· startManualSpan · traceId 源</text><text x="820" y="38" fill="#8fd6a0" text-anchor="end" font-size="10">codecrush.span.kind=chain</text>
+      <rect x="60" y="72" width="150" height="46" rx="7" fill="#eef4ff" stroke="#2f6fdb"/><text x="135" y="90" text-anchor="middle" font-weight="700" fill="#1a2a5a">① 问题改写</text><text x="135" y="106" text-anchor="middle" fill="#5a6a9a" font-size="10">execute_structured · llm</text>
+      <rect x="230" y="72" width="150" height="46" rx="7" fill="#eef4ff" stroke="#2f6fdb"/><text x="305" y="90" text-anchor="middle" font-weight="700" fill="#1a2a5a">② 意图识别</text><text x="305" y="106" text-anchor="middle" fill="#5a6a9a" font-size="10">enum 硬约束 · llm</text>
+      <rect x="400" y="66" width="230" height="86" rx="7" fill="#f4efff" stroke="#7c5cff"/><text x="515" y="84" text-anchor="middle" font-weight="700" fill="#3a2a6a">③ 多路召回（逐 KB 并行）</text>
+      <rect x="414" y="94" width="90" height="24" rx="5" fill="#fff" stroke="#7c5cff"/><text x="459" y="110" text-anchor="middle" font-size="9.5" fill="#5a4a8a">embedding</text>
+      <rect x="414" y="122" width="90" height="24" rx="5" fill="#fff" stroke="#7c5cff"/><text x="459" y="138" text-anchor="middle" font-size="9.5" fill="#5a4a8a">向量+关键词</text>
+      <rect x="516" y="94" width="100" height="52" rx="5" fill="#fff" stroke="#7c5cff"/><text x="566" y="116" text-anchor="middle" font-size="9.5" fill="#5a4a8a">融合(加权)</text><text x="566" y="132" text-anchor="middle" font-size="9.5" fill="#5a4a8a">可选 rerank</text>
+      <rect x="650" y="72" width="150" height="46" rx="7" fill="#eef4ff" stroke="#2f6fdb"/><text x="725" y="90" text-anchor="middle" font-weight="700" fill="#1a2a5a">④ 生成</text><text x="725" y="106" text-anchor="middle" fill="#5a6a9a" font-size="10">stream_text · SSE 流式</text>
+      <g stroke="#2f6fdb" stroke-width="1.8" marker-end="url(#a2)"><line x1="210" y1="95" x2="228" y2="95"/><line x1="380" y1="95" x2="398" y2="95"/><line x1="630" y1="95" x2="648" y2="95"/></g>
+      <g stroke="#F2782D" stroke-width="1.8" marker-end="url(#a2o)"><line x1="725" y1="120" x2="725" y2="150"/></g>
+      <rect x="60" y="170" width="740" height="56" rx="8" fill="#fff7ef" stroke="#F2782D"/><text x="76" y="190" font-weight="700" fill="#a8460a">SSE 事件流（逐帧 flush）</text><text x="76" y="208" fill="#7a5a3a" font-size="11">citation（引用先吐）→ token…token（逐字）→ done（traceId/confidence/coverage/isFallback）</text><text x="76" y="222" fill="#a06a4a" font-size="10">兜底/超时：out_of_scope · low_similarity · empty_retrieval · chitchat；生成超时发 error 不发 done</text>
+      <rect x="60" y="244" width="740" height="72" rx="8" fill="#f5f7fc" stroke="#c9d3ea"/><text x="76" y="264" font-weight="700" fill="#1E2761">收尾（finally，无论哪条路径都执行）</text><text x="76" y="282" fill="#4a5578" font-size="11">persist：写 conversations+messages(trace_id/confidence/citations) · finalizeChainSignals 写质量布尔到根 span</text><text x="76" y="298" fill="#4a5578" font-size="11">metrics.applyTo(chain) 写累计 token · 级联取消上游流 · chain.end() → 触发 OTLP 导出</text><text x="76" y="312" fill="#8a94b0" font-size="10">所有子 span 经 runInContext(chainCtx) 显式挂父，不依赖跨 yield 后失真的活动上下文</text>
+    </svg>
+    <div class="cap">问答主链路 span 树与事件流（详见 §06）</div>
+  </div>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>关键设计：typed output，不碰模型原始文本</b></div>
+    <p>编排层四节点全部只消费 <code>NodeRuntimeService</code> 产出的 <b>typed output</b>——经 <code>normalizeStructuredOutput → JSON.parse → outputSchema.safeParse → extraValidate</code> 四道关卡、修复一次仍不过就走确定性 <code>fallback()</code>。<code>OrchestrationService</code> 从不 <code>JSON.parse</code> 模型返回。这是 Invariant 6 的落地。</p>
+  </div>
+  <h3>数据流二 · 可观测（每步 span 如何变成 Trace / 看板）</h3>
+  <div class="figure">
+    <svg viewBox="0 0 880 210" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Microsoft YaHei',sans-serif" font-size="11.5">
+      <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#2f9e6f"/></marker></defs>
+      <rect x="14" y="30" width="150" height="70" rx="9" fill="#1E2761"/><text x="89" y="55" text-anchor="middle" fill="#fff" font-weight="700">后端 @codecrush</text><text x="89" y="72" text-anchor="middle" fill="#fff" font-weight="700">/otel SDK</text><text x="89" y="90" text-anchor="middle" fill="#aebbe4" font-size="9.5">withSpan/startManualSpan</text>
+      <rect x="220" y="30" width="150" height="70" rx="9" fill="#2B3A7A"/><text x="295" y="52" text-anchor="middle" fill="#fff" font-weight="700">Redacting</text><text x="295" y="68" text-anchor="middle" fill="#fff" font-weight="700">SpanExporter</text><text x="295" y="86" text-anchor="middle" fill="#aebbe4" font-size="9.5">PII 脱敏 + Batch(500ms)</text>
+      <rect x="426" y="30" width="160" height="70" rx="9" fill="#2B3A7A"/><text x="506" y="52" text-anchor="middle" fill="#fff" font-weight="700">OTel Collector</text><text x="506" y="68" text-anchor="middle" fill="#aebbe4" font-size="9.5">batch 1s/256</text><text x="506" y="84" text-anchor="middle" fill="#aebbe4" font-size="9.5">exporter 可插拔</text>
+      <rect x="642" y="30" width="150" height="70" rx="9" fill="#0b2a33" stroke="#22D3EE"/><text x="717" y="55" text-anchor="middle" fill="#67e8f9" font-weight="700">ClickHouse</text><text x="717" y="72" text-anchor="middle" fill="#a9d9e4" font-size="9.5">otel_traces</text><text x="717" y="88" text-anchor="middle" fill="#a9d9e4" font-size="9.5">导出器建表 · TTL 30d</text>
+      <g stroke="#2f9e6f" stroke-width="2" marker-end="url(#a3)"><line x1="164" y1="65" x2="218" y2="65"/><line x1="370" y1="65" x2="424" y2="65"/><line x1="586" y1="65" x2="640" y2="65"/></g>
+      <text x="191" y="58" text-anchor="middle" font-size="9" fill="#2f9e6f">OTLP/gRPC</text>
+      <rect x="642" y="130" width="150" height="60" rx="9" fill="#fff" stroke="#2f9e6f"/><text x="717" y="152" text-anchor="middle" fill="#1E2761" font-weight="700">自有读 VIEW</text><text x="717" y="169" text-anchor="middle" fill="#5a6a9a" font-size="9.5">codecrush_trace_spans</text><text x="717" y="183" text-anchor="middle" fill="#5a6a9a" font-size="9.5">_traces / _sessions（防腐层）</text>
+      <rect x="360" y="130" width="240" height="60" rx="9" fill="#f5f7fc" stroke="#c9d3ea"/><text x="480" y="152" text-anchor="middle" fill="#1E2761" font-weight="700">traces 模块（只读）</text><text x="480" y="169" text-anchor="middle" fill="#5a6a9a" font-size="9.5">Trace 列表/详情 · Session · 运行看板</text><text x="480" y="183" text-anchor="middle" fill="#8a94b0" font-size="9">懒建 VIEW · 冷库返回空不报错</text>
+      <g stroke="#2f9e6f" stroke-width="2" marker-end="url(#a3)"><line x1="717" y1="100" x2="717" y2="128"/><line x1="640" y1="160" x2="602" y2="160"/></g>
+    </svg>
+    <div class="cap">可观测数据流：应用只吐 OTLP，物理存储归 Collector/CH，读侧只经 VIEW（详见 §08）</div>
+  </div>
+  <p>三层「不进关键路径」防御：① SDK 侧 BatchSpanProcessor 有界队列满则丢 span 不阻塞；② Collector 侧持久队列缓冲下游抖动；③ 读侧 <code>ensureTraceViews()</code> 对冷库直接返回空而非报错。运行看板指标（兜底率/P95）不是查询时全表聚合，而是 <code>codecrush_metrics_1m</code>（AggregatingMergeTree）由增量物化视图预卷积，查询时才 <code>xxxMerge</code> 合并态——P95 的 t-digest 必须跨桶合并后再算分位。</p>
+  <h3>数据流三 · 质量飞轮闭环</h3>
+  <div class="figure">
+    <svg viewBox="0 0 880 250" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Microsoft YaHei',sans-serif" font-size="11.5">
+      <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#7c5cff"/></marker></defs>
+      <rect x="330" y="14" width="220" height="42" rx="9" fill="#1E2761"/><text x="440" y="34" text-anchor="middle" fill="#fff" font-weight="700">真实用户流量（线上问答）</text><text x="440" y="49" text-anchor="middle" fill="#aebbe4" font-size="9.5">每轮 = 一条 rag.pipeline trace</text>
+      <rect x="40" y="90" width="230" height="64" rx="9" fill="#fff" stroke="#2f6fdb"/><text x="155" y="110" text-anchor="middle" fill="#1E2761" font-weight="700">evaluations · 在线质量</text><text x="155" y="127" text-anchor="middle" fill="#5a6a9a" font-size="10">每 15min 抽样 → 三维打分</text><text x="155" y="142" text-anchor="middle" fill="#5a6a9a" font-size="10">rag.eval span → CH 去重聚合</text>
+      <rect x="325" y="90" width="230" height="64" rx="9" fill="#fff7ef" stroke="#F2782D"/><text x="440" y="110" text-anchor="middle" fill="#a8460a" font-weight="700">gaps · 知识缺口</text><text x="440" y="127" text-anchor="middle" fill="#7a5a3a" font-size="10">坏样本 → 聚类成簇 → 分诊</text><text x="440" y="142" text-anchor="middle" fill="#7a5a3a" font-size="10">人审补库（红线）→ 自动回验</text>
+      <rect x="610" y="90" width="230" height="64" rx="9" fill="#f4efff" stroke="#7c5cff"/><text x="725" y="110" text-anchor="middle" fill="#3a2a6a" font-weight="700">eval-runs · 离线评测</text><text x="725" y="127" text-anchor="middle" fill="#5a4a8a" font-size="10">gold 评测集 × 配置版本重放</text><text x="725" y="142" text-anchor="middle" fill="#5a4a8a" font-size="10">综合分 · 版本对比 · 上线软门禁</text>
+      <g stroke="#7c5cff" stroke-width="1.8" marker-end="url(#a4)"><line x1="380" y1="56" x2="200" y2="88"/><line x1="270" y1="122" x2="323" y2="122"/><line x1="555" y1="122" x2="608" y2="122"/></g>
+      <rect x="270" y="196" width="340" height="44" rx="9" fill="#f5f7fc" stroke="#1E2761" stroke-dasharray="4 3"/><text x="440" y="216" text-anchor="middle" fill="#1E2761" font-weight="700">决定要不要上线新配置 → 切 production 指针</text><text x="440" y="231" text-anchor="middle" fill="#6b7280" font-size="9.5">飞轮结论回流到 §07 应用发布</text>
+      <path d="M 725 154 Q 725 218 612 218" fill="none" stroke="#7c5cff" stroke-width="1.6" marker-end="url(#a4)"/>
+      <path d="M 440 154 L 440 194" stroke="#7c5cff" stroke-width="1.6" marker-end="url(#a4)"/>
+      <text x="628" y="185" fill="#7c5cff" font-size="9">gaps 沉淀 gold（跨域事务）</text>
+    </svg>
+    <div class="cap">质量飞轮：evaluations 体检 → gaps 开药方 → eval-runs 回归考试 → 安全上线（详见 §09）</div>
+  </div>
+  <p class="kv">依赖拓扑（<span class="file">eval-runs.module.ts:20</span> 更正过的方向）：<code>gaps</code> 在最上层 → <code>eval-runs</code> 中间层（导出 <code>EvalSetsService</code>+<code>ReplayService</code> 给 gaps）→ <code>evaluations</code> 最底层纯判分。三者<b>都不直接 import <code>traces</code> 模块</b>——各自维护独立 ClickHouse repository 直读共享物化视图，耦合在数据层而非接口层。</p>
+</div></section>
+
+<section class="doc" id="platform"><div class="wrap">
+  <h2><span class="num">03</span>平台底座 + Telemetry SDK</h2>
+  <p class="sec-lead"><code>platform/*</code> 是 NestJS 模块化单体的横切基础设施层（8 子目录），加 3 个共享包构成「应用只吐 OTLP、物理存储归 infra」的可观测分层。这一层不依赖任何 feature module，被 22+ 个域 repository 复用。</p>
+  <h3>关键文件</h3>
+  <table>
+    <tr><th>文件</th><th>职责</th></tr>
+    <tr><td><span class="file">config/config.schema.ts</span></td><td><code>envSchema</code>（Zod）全部环境变量 + 默认值，<code>ConfigModule.forRoot({validate})</code> 启动期 fail-fast</td></tr>
+    <tr><td><span class="file">persistence/persistence.module.ts</span></td><td><code>@Global</code>，<code>DRIZZLE</code> token 工厂，事实上唯一持久化入口（被 22+ repository 注入）</td></tr>
+    <tr><td><span class="file">persistence/pgvector-type.ts</span></td><td><code>vector1024</code> customType + <code>VECTOR_DIMENSION=1024</code>（全平台唯一权威常量）</td></tr>
+    <tr><td><span class="file">queue/pg-boss-queue.adapter.ts</span></td><td><code>PgBossQueueAdapter</code>：<code>publish/subscribe/schedule</code> + <code>ensureQueue</code> 幂等建队</td></tr>
+    <tr><td><span class="file">queue/role-gated-queue.adapter.ts</span></td><td><code>RoleGatedQueueAdapter</code>：按 <code>PROCESS_ROLE</code>(api/worker/all) 门控是否真正消费</td></tr>
+    <tr><td><span class="file">security/encryption.ts</span></td><td>AES-256-GCM envelope 加解密 + 掩码</td></tr>
+    <tr><td><span class="file">packages/otel/src/trace.ts</span></td><td><code>withSpan</code> / <code>startManualSpan</code> / <code>runInContext</code> / <code>forceFlushTelemetry</code></td></tr>
+    <tr><td><span class="file">packages/otel-conventions/src/index.ts</span></td><td>零依赖属性 key 字典：<code>GEN_AI.*</code> / <code>RAG.*</code> / <code>CODECRUSH_SPAN_KIND.*</code></td></tr>
+  </table>
+  <h3>关键函数</h3>
+  <h4>API Key 加密（security/encryption.ts）</h4>
+  <pre><span class="c">// AES-256-GCM，随机 12 字节 IV，主密钥 MODEL_API_KEY_ENCRYPTION_KEY（32 字节 base64）</span>
+<span class="fn">encrypt</span>(plaintext): string   <span class="c">// → v1:${ivB64}:${tagB64}:${ctB64}</span>
+<span class="fn">decrypt</span>(envelope): string    <span class="c">// split 校验 version=="v1"，setAuthTag 后解密</span>
+<span class="fn">maskApiKey</span>(plaintext): string <span class="c">// len&lt;8→"****"；否则 首3+"****"+末4</span></pre>
+  <p>唯一消费方 <span class="file">models.service.ts</span>：创建/更新 encrypt，调用 decrypt，展示前先 decrypt 再 maskApiKey。明文永不出 models 域（Invariant 4）。</p>
+  <h4>OTLP 发射原语（packages/otel/src/trace.ts）</h4>
+  <table>
+    <tr><th>原语</th><th>行为</th></tr>
+    <tr><td><code>withSpan(name, {attributes}, fn)</code></td><td><b>自动生命周期</b>：自动挂到 <code>context.active()</code> 为父，finally 里 end。撑不住跨 yield。</td></tr>
+    <tr><td><code>startManualSpan(name, opts, parentCtx?)</code></td><td><b>手动生命周期</b>：创建但不 end，调用方自行 end。用于跨 async generator yield 边界的根/流式 span。</td></tr>
+    <tr><td><code>runInContext(ctx, fn)</code></td><td>= <code>context.with(ctx, fn)</code>，不新建 span。让下游 <code>withSpan</code> 子 span 显式挂到某父 ctx。</td></tr>
+  </table>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>代码与文档偏离：语义化 API 面不存在</b></div>
+    <p>003 描述的 <code>trace.llm / trace.retrieve / recordUsage</code> 语义封装<b>在代码里不存在</b>（全仓搜索只命中文档本身）。真实 API 面只有上表三个<b>通用</b>原语，「语义」全靠调用方手写 attributes 字面量 + otel-conventions 常量字典。这反而让「otel 包不感知业务」更彻底。</p>
+  </div>
+  <h3>详细流程走向</h3>
+  <h4>流程 A · 应用启动 bootstrap 顺序</h4>
+  <ol class="flow">
+    <li><span class="st">首条 import 就是 tracing</span><p><span class="file">main.ts:3</span> <code>import "./tracing"</code> 先于 reflect-metadata/NestFactory，确保 OTel 自动埋点在任何被 instrument 的 http/pg 模块加载前挂载。</p></li>
+    <li><span class="st">起 telemetry</span><p>读 <code>process.env</code>（此时 DI 容器还不存在）→ parseProcessRole → startNodeTelemetry：OTLPExporter → 套 RedactingSpanExporter → BatchSpanProcessor(500ms) → NodeSDK.start()。</p></li>
+    <li><span class="st">分流</span><p><code>PROCESS_ROLE==="worker"</code> → bootstrapWorker（createApplicationContext 无 HTTP）；否则 bootstrap（NestFactory.create）。同一套 Provider，差异全由 RoleGatedQueueAdapter 门控体现。</p></li>
+    <li><span class="st">配置校验 + 连接池 + 队列</span><p>envSchema.parse 失败即起不来；PersistenceModule 建 pg 连接池；QueueModule.onModuleInit 调 boss.start()。各 Processor.onModuleInit 调 subscribe/schedule——非本角色进程被门控成 no-op。</p></li>
+  </ol>
+  <h4>流程 B · pg-boss 一个 job 从 send 到 work</h4>
+  <ol class="flow">
+    <li><span class="st">publish</span><p>业务先落库改状态，再 <code>queue.publish(JOB, data, {singletonKey, retryLimit:1})</code> → RoleGatedQueueAdapter（恒透传）→ PgBossQueueAdapter → ensureQueue → boss.send。</p></li>
+    <li><span class="st">消费</span><p>Processor.onModuleInit 已 subscribe；本进程角色不在 <code>QUEUE_CONSUMER_ROLES[key]</code> 内则被门控 no-op。pg-boss 把 job created→active，逐条 <code>await handler(job.data)</code>。</p></li>
+    <li><span class="st">终态广播</span><p>handler 完成触发 DocumentChangeNotifier 等 fan-out（入库终态通知蓝绿重建/评测 gold 过期），监听方异常只 warn 不冒泡。</p></li>
+  </ol>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>重要发现：singletonKey 在 standard 策略下不保证幂等</b></div>
+    <p>多处注释写「幂等由 singletonKey 保证」。但追 pg-boss v12.25.1 源码：本仓 6 队列都用 <b>standard</b> 策略，而 <code>singleton_key</code> 唯一索引只在 short/singleton/stately/exclusive/key_strict_fifo 下才建——<b>standard 下两次相同 singletonKey 的 send 会插入两条独立 job 行</b>。真正兜底幂等的是业务表：ingestion 靠 <code>document_processing_runs</code> partial unique；<code>evaluations.repository</code> 注释<b>明确点破了这个坑</b>并改用 <code>eval_manual_score_jobs</code> 的 <code>ON CONFLICT DO UPDATE WHERE</code> 原子占位。pg-boss 实为「异步执行 + 至少一次投递 + cron」传输层，不是分布式锁层。</p>
+  </div>
+  <div class="grid g2">
+    <div class="mcard"><div class="t">为什么 pg-boss 而非 Redis</div><div class="d">不新增服务组件、跑在既有 PG 上、天然持久。代价见上：幂等靠业务表而非 queue。</div></div>
+    <div class="mcard"><div class="t">@Global 的隐藏耦合</div><div class="d">五个 platform 模块标 @Global，但只在被图里某处 imports 过才生效。EventsModule 反其道不用 @Global（测试局部拼装会 DI 失败）。</div></div>
+  </div>
+</div></section>
+
+<section class="doc" id="models"><div class="wrap">
+  <h2><span class="num">04</span>模型接入 + 结构化输出内核</h2>
+  <p class="sec-lead">两个模块：<code>models</code> 把三类模型接入收敛成「协议适配层」（不绑厂商，<code>(type, protocol)</code> 是路由键）；<code>node-runtime</code> 是结构化输出运行时内核，保证「模型原始输出绝不进入编排」。</p>
+  <h3>模型接入 · 协议适配</h3>
+  <p><code>ModelProviderPort</code> 是唯一契约，下游只认「模型类型 + modelId」，协议差异全被适配层吸收：</p>
+  <pre><span class="k">interface</span> <span class="fn">ModelProviderPort</span> {
+  testConnection(config): Promise&lt;TestModelResult&gt;;
+  chat(config, messages, opts?): Promise&lt;ChatResult&gt;;
+  chatStream(config, messages, opts?): AsyncIterable&lt;ChatStreamChunk&gt;;
+  embed(config, texts, opts?): Promise&lt;EmbedResult&gt;;
+  rerank(config, query, documents, topN?, opts?): Promise&lt;RerankResult&gt;;
+}</pre>
+  <p>唯一实现 <code>ProtocolDispatchAdapter</code>（387 行，仅经 <code>MODEL_PROVIDER_PORT</code> token 注入）按 <code>(type, protocol)</code> 查纯函数 request builder 表分发。fetch/超时/密钥擦除/错误归一集中在适配器一处。</p>
+  <table>
+    <tr><th>type</th><th>合法 protocol（PROTOCOLS_BY_TYPE）</th><th>认证</th></tr>
+    <tr><td><code>llm</code></td><td>openai_compat · anthropic · gemini</td><td rowspan="3">openai_compat/cohere/jina/dashscope/self_hosted 用 <b>Bearer</b>；anthropic 用 <b>x-api-key</b>；gemini 用 <b>x-goog-api-key</b> 头（防日志泄漏，不用 ?key=）</td></tr>
+    <tr><td><code>embedding</code></td><td>self_hosted · openai_compat · gemini · cohere · jina</td></tr>
+    <tr><td><code>rerank</code></td><td>self_hosted · openai_compat · cohere · jina · dashscope</td></tr>
+  </table>
+  <p class="kv">各方法独立超时：<code>CHAT=60s</code>、<code>EMBED=60s</code>（批量向量化不能沿用 10s 探针预算，防 worker 卡死）、<code>RERANK=5s</code>（检索路径最紧）。<code>embed()</code> 额外校验维度必须恰好 <b>1024</b>。<code>testConnection</code> 一切失败返回 <code>{ok:false}</code> 不抛（友好提示），其余失败一律 throw。</p>
+  <h3>结构化输出内核 · node-runtime</h3>
+  <p><code>NodeContract&lt;TInput,TOutput,TReserved&gt;</code> 是四个固定节点（rewrite/intent/reply/fallback）各自契约：三个 Zod schema + <code>systemInstructions</code> + <code>fallback()</code> 纯函数 + 可选 <code>extraValidate()</code>。</p>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>ContractVersion / TypedNodeOutput 的代码落地</b></div>
+    <p>这两个文档高频词<b>在代码里没有同名类型</b>：ContractVersion 落地为普通 <code>number</code> 参数 + <code>registry.ts</code> 两级索引，<code>resolve(node, version)</code> 查不到就 <code>throw</code>（拒绝隐式回退到最新版本——这正是「防漂移」的全部机制：没有默认值、没有静默升级）。TypedNodeOutput 对应 <code>ExecuteStructuredResult</code>/<code>StreamTextResult</code>/<code>StreamChunksSummary</code>。</p>
+  </div>
+  <h4>三层内容 → 两条消息（compiler/assemble.ts）</h4>
+  <pre><span class="c">// 三个内容来源拼成两条 ChatMessage</span>
+rendered = renderTemplateStrict(promptBody, stringVars, node)  <span class="c">// 层2：管理员模板渲染</span>
+envelope = { ...input, ...reserved }                           <span class="c">// 层3：运行时数据</span>
+<span class="k">return</span> [
+  { role:<span class="s">"system"</span>, content: `${systemInstructions}\n\n${rendered}` }, <span class="c">// 层1+层2</span>
+  { role:<span class="s">"user"</span>,   content: JSON.stringify(envelope) },              <span class="c">// 层3</span>
+]</pre>
+  <p class="kv"><code>renderTemplateStrict</code> 遇保留/非法字段直接 <code>throw</code>——是保存期静态校验之外的第二道运行时防线。（注：001/003 称「三层」指内容来源，011 称「两层」指消息数，代码实为 3 来源拼 2 消息。）</p>
+  <h4>详细流程 · 一次结构化节点执行（executeStructured）</h4>
+  <ol class="flow">
+    <li><span class="st">解析 Contract + 前置校验</span><p><code>registry.resolve(node, contractVersion)</code> 查不到即终止。<code>inputSchema</code>/<code>reservedDataSchema</code> 任一 safeParse 失败 → 立即 <code>fallback()</code>，<b>不调用模型</b>。</p></li>
+    <li><span class="st">编译 + 首次调模型</span><p><code>assembleMessages</code> 拼两条消息 → <code>models.chat(modelId, messages, {structuredOutput})</code>（schema 来自 <code>z.toJSONSchema(outputSchema)</code>，三协议各自下发：openai response_format、anthropic 强制 tool_choice、gemini responseSchema）。</p></li>
+    <li><span class="st">四道关卡校验</span><p><code>normalizeStructuredOutput</code> 剥 Markdown 围栏 → <code>JSON.parse</code> → <code>outputSchema.safeParse</code>（结构）→ <code>extraValidate</code>（动态值域）。validateSteps 里明确区分两步，驱动前端按阶段渲染图标。</p></li>
+    <li><span class="st">失败 → 修复一次</span><p>追加一条 user 消息「上次哪里错了，请重新输出严格符合 Schema」（<b>不重新渲染管理员模板</b>）→ 第二次调模型，repairRetryCount=1。</p></li>
+    <li><span class="st">仍失败 → 确定性 Fallback</span><p>执行 <code>contract.fallback(input, reserved)</code>（纯函数零 IO）。全流程最多两次模型调用，失败路径永远收敛到可预测的 fallback。</p></li>
+  </ol>
+  <p>reply 节点走 <code>streamTextChunks</code>（真·逐 token）：手动 span 跨 yield 存活；<b>首 token 熔断</b> <code>FIRST_TOKEN_TIMEOUT_MS</code>（默认 <b>15s</b>，非文档说的 30s）用单一 deadline 覆盖「流开始到首个非空 delta」累计窗口（修过「每帧空 delta 重置计时器」bug）；已发 token 后断流保留 <code>partial</code> 不清空；全程无 token 则整段切 fallback。</p>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>NodeRuntimeService 被三处共用</b></div>
+    <p>同一套代码：<code>prompts.service</code>（试运行）、<code>chat/orchestration</code>（在线编排）、<code>applications/release-check</code>（发布门禁真实预演 <code>compileAndSample</code>）——任何一方都不得自行拼 Prompt 或解析模型 JSON。</p>
+  </div>
+</div></section>
+
+<section class="doc" id="ingestion"><div class="wrap">
+  <h2><span class="num">05</span>知识入库管线</h2>
+  <p class="sec-lead">四个模块构成「知识库配置 → 文档生命周期 → 入库处理管线 → 切片存取」。<code>ingestion</code>（34 文件）是全平台最复杂子系统：解析 → 清洗 → Canonical Document → 分块 → 向量化 → 单事务落库。</p>
+  <h3>核心表</h3>
+  <table>
+    <tr><th>表</th><th>关键列</th></tr>
+    <tr><td><code>knowledge_bases</code></td><td><code>embeddingModelId</code>(创建后锁定,FK RESTRICT)· <code>chunkTemplate</code>(general/qa/custom,legacy)· <code>defaultProfileId/Version</code>· <code>activeVersion/buildingVersion</code>(蓝绿双指针)· <code>status</code>(ready/building/failed)</td></tr>
+    <tr><td><code>documents</code></td><td><code>status</code>(pending/queued/processing/failed/ready)· <code>blobKey</code>· <code>parsedText</code>(canonical md)· <code>chunkVersion</code>· <code>profileOverride*</code>· <code>lifecycle jsonb</code></td></tr>
+    <tr><td><code>document_processing_runs</code></td><td>不可变 Run 快照：<code>profileSnapshot jsonb</code>(入队前 structuredClone 冻结)· partial unique <code>WHERE status IN(queued,running)</code>(同文档同时只一条活动 Run)</td></tr>
+    <tr><td><code>chunks</code></td><td><code>embedding vector(1024)</code>(HNSW cosine)· <code>tsv tsvector</code>(GENERATED, cjk_bigram + GIN)· <code>version/seq</code>· unique(docId,version,seq)· index(kbId,version)</td></tr>
+  </table>
+  <h3>四阶段管线（Profile 驱动，端口化）</h3>
+  <table>
+    <tr><th>阶段</th><th>端口 / 实现</th><th>要点</th></tr>
+    <tr><td>解析</td><td>PdfParser(pdf-parse v2)/WordParser(mammoth)/TextParser</td><td>按 DocumentType 分发；pdf 用 result.pages 逐页判空</td></tr>
+    <tr><td>清洗</td><td>MarkdownBasicNormalizer</td><td>逐 block 跑 cleanText，丢弃空 block，重算 blockRanges</td></tr>
+    <tr><td>分块</td><td>General/Qa/Custom Chunker</td><td>见下三种差异</td></tr>
+    <tr><td>向量化</td><td><code>ModelsService.embedTexts</code></td><td>按 batchSize(默认 10) 逐批，密钥解密留 models 域内</td></tr>
+  </table>
+  <div class="grid g3">
+    <div class="mcard"><div class="t">GeneralChunker</div><div class="d">按 <code>#</code>~<code>######</code> 标题层级切段，段内贪心合并至 512 token，超长先 hardSplit。section 记标题路径。</div></div>
+    <div class="mcard"><div class="t">QaChunker</div><div class="d">逐行匹配 <code>问：/答：</code> 配对一对一切片，无匹配退化 General。</div></div>
+    <div class="mcard"><div class="t">CustomChunker（342 行）</div><div class="d">课程/公众号专属：清洗推广语 → 按 <code>##/###</code> 分层 → 表格按行/其余按句 → buildHeader 把《KB》第N课·小节写进正文。</div></div>
+  </div>
+  <h3>详细流程 · 一篇文档的完整生命周期</h3>
+  <ol class="flow">
+    <li><span class="st">上传 → 落 BlobStore（status: pending）</span><p><span class="file">documents.service.ts:139</span>：<b>先对整批做类型白名单 + magic bytes 校验</b>（全部通过才落盘，避免部分提交）→ <code>blobKey = kb/{kbId}/{docId}/original.{type}</code>（服务端拼装防路径注入）→ blobStore.put → insert(pending) → 追加 lifecycle upload。</p></li>
+    <li><span class="st">入队（pending → queued）</span><p><code>createRun</code>：解析有效 Profile（显式&gt;文档覆盖&gt;KB 默认&gt;chunkTemplate 兜底）→ <code>structuredClone(def)</code> <b>冻结</b>快照 → insert(queued) → publish(<code>{processingRunId}</code>, singletonKey=run.id)。</p></li>
+    <li><span class="st">Worker 取出（queued → processing）</span><p><code>processRun</code> 幂等三层判定通过 → running → blobStore.get 取回原始文件 → <code>pipeline.run(ctx)</code>（ctx.snapshot=run.profileSnapshot，唯一行为源，不重读注册表）。</p></li>
+    <li><span class="st">管线四阶段 + 三道质量门</span><p>解析 → assembleCanonical → <b>质量门·解析后</b>(空则 PARSE_EMPTY) → 清洗 → <b>质量门·清洗后</b>(删减比&gt;0.8 CLEAN_SUSPICIOUS；&gt;50MB CANONICAL_TOO_LARGE) → 分块 → <b>质量门·分块后</b>(空/超 8192 token) → mapChunkPages 锚点定位页码 → 逐批 embedTexts → 拼 ChunkDraft[]。</p></li>
+    <li><span class="st">单事务落库（processing → ready）</span><p><code>chunksRepo.replaceVersion(docId, kbId, targetVersion, drafts)</code>：<b>向量已算好</b>，把「删旧+插新」包进单个 PG 事务——检索永远读到全旧或全新，无空窗。→ Run succeeded、doc ready(chunkVersion=targetVersion)。</p></li>
+    <li><span class="st">失败路径（processing → failed）</span><p>任意阶段抛 IngestionError（10 种错误码中文映射）→ Run/doc failed。ready/failed 均为终态。</p></li>
+  </ol>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>重解析幂等的三层机制</b></div>
+    <p>① pg-boss singletonKey（弱，见 §03）；② processRun 内部判定：Run 已 succeeded/failed → 短路，running 且 &lt;15min → 判并发跳过，超时 → 判僵尸重跑；③ DB <code>dpr_active_doc_unique</code> partial unique 兜底。真正原子性靠第②③层。</p>
+  </div>
+  <h3>知识库全量蓝绿重建</h3>
+  <ol class="flow">
+    <li><span class="st">开建</span><p><code>startRebuild</code>：buildingVersion=activeVersion+1、status=building → <b>先把文档 id 落进内存快照 rebuildDocIds，再逐个入队</b>（顺序是死锁修复关键：终态判定只认这份快照，避免重建期新上传的 pending 文档卡死判定）。</p></li>
+    <li><span class="st">逐文档独立入库</span><p>每篇走完整生命周期，目标版本是新 buildingVersion；检索侧此时仍读旧 activeVersion，<b>不空窗</b>。</p></li>
+    <li><span class="st">终态触发切换</span><p>每文档终态回调 onDocumentTerminal，直到快照内全部终态 → <code>finalizeSwitch</code>：① <b>携带前移</b>未被处理文档的切片版本号(防被误清) ② 原子 <code>updateVersions(active=building, building=null, ready)</code> ③ 异步分批 deleteByVersion 清旧版(每批 LIMIT 1000)。</p></li>
+  </ol>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>代码现状：新旧两条路径并存</b></div>
+    <p><code>PROCESSING_PROFILES_ENABLED</code> 默认 <code>true</code>（新路径 createRun/processRun，有不可变快照）。legacy 路径 enqueue/processDocument（执行时现读 kb.chunkTemplate，无冻结快照）代码完整保留，按 payload 有无 processingRunId 分流，两路共用同一 DefaultIngestionPipeline。另：<code>Profile.parser.mode</code>(layout/ocr) 与 <code>chunker.config</code> 已定义但当前管线未消费——M4.1b 占位。</p>
+  </div>
+</div></section>
+
+<section class="doc" id="retrieval"><div class="wrap">
+  <h2><span class="num">06</span>检索 + RAG 编排 + 问答</h2>
+  <p class="sec-lead">产品核心链路。<code>retrieval</code> 是全平台唯一一套检索实现（chat 编排与检索测试台共用同一个 <code>RetrieverPort</code>）；<code>chat</code> 的 <code>OrchestrationService</code> 是自研薄编排内核，用 <code>AsyncGenerator</code> 串起改写→意图→召回→融合→重排→生成，只消费 typed output。</p>
+  <h3>检索 · PgHybridRetriever</h3>
+  <p><code>retrieve(req, observer?, signal?)</code> 把「查询 + 单 KB 参数」变成排序过的 <code>RetrievalHit[]</code>（<code>{chunkId, docId, docName, text, section, vecScore, kwScore?, rerankScore?, finalScore}</code>）。chat 对多 KB 各构造一条请求分别调用。</p>
+  <table>
+    <tr><th>阶段</th><th>实现（chunks.repository.ts）</th></tr>
+    <tr><td>向量召回</td><td>pgvector <code>1 - (embedding &lt;=&gt; query::vector)</code> 相似度，<code>ORDER BY embedding &lt;=&gt; query</code> 命中 HNSW，恒过滤 <code>version = kb.activeVersion</code></td></tr>
+    <tr><td>关键词召回</td><td>中文 <code>cjk_bigram_text</code>（连续字符两两重叠切分）+ <code>to_tsquery</code> 用 <code>|</code>(OR) 拼接 + <code>ts_rank_cd(tsv, tsq, 32)</code> 归一化到 [0,1)</td></tr>
+    <tr><td>融合</td><td><b>加权线性和</b> <code>vecWeight·vec + (1-vecWeight)·kw</code>，<b>不是 RRF</b>（finalScore 契约锁死 [0,1]，RRF 量级不落该区间，免归一优势被抵消）</td></tr>
+    <tr><td>重排</td><td>候选池 <code>min(topK, 80)</code> 送 rerankTexts，成功覆盖 finalScore；try/catch 失败/超时(5s) 打 <code>rag.degraded.rerank</code> + 回调 observer，保留融合分继续</td></tr>
+  </table>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>非对称降级</b></div>
+    <p><code>Promise.allSettled([向量, 关键词])</code>：<b>向量是核心信号，失败硬抛</b>；关键词失败仅降级纯向量、打标、回调 observer。关键：关键词降级时 finalScore 直接取 vecScore <b>不再乘 vecWeight</b>——否则单路分数被无谓腰斩。</p>
+  </div>
+  <h3>意图路由（两级意图表，014）</h3>
+  <p>意图节点 outputSchema 是 <code>z.enum(INTENT_OUTPUT_KEYS)</code>——三协议在解码层把 enum 当硬约束，模型物理上选不出闭集外的值。<code>availableIntents</code> 恒注入全表，真正路由在编排层：</p>
+  <pre><span class="k">function</span> <span class="fn">resolveRetrievalKbIds</span>(intent, cfg, kbRows) {
+  <span class="k">if</span> (intent === CHAT)    <span class="k">return</span> [];        <span class="c">// 闲聊：不检索</span>
+  <span class="k">if</span> (intent === UNKNOWN) <span class="k">return</span> cfg.kbIds;  <span class="c">// 无法归类：全量召回</span>
+  <span class="k">const</span> matched = kbRows.filter(k =&gt; k.intentKey === intent || k.intentKey == null);
+  <span class="k">return</span> matched.length ? matched.map(k=&gt;k.id) : cfg.kbIds;  <span class="c">// 绑定∪通配，空则回退全量</span>
+}</pre>
+  <h3>详细流程 · 一次完整问答（span 级）</h3>
+  <ol class="flow">
+    <li><span class="st">入口 + 解析配置</span><p><span class="file">chat.controller.ts:41</span> 注册断连回调 → run() 首个 next() 触发 <code>resolvePublic(agentId)</code>（异常在写 SSE 头前冒泡成 404/403）→ buildResolvedConfig 四节点并行取 promptBody/contractVersion/modelId。</p></li>
+    <li><span class="st">建根 span</span><p><code>startManualSpan("rag.pipeline", {span.kind:chain, rag.prompt.version_id, rag.preview:false})</code>，写 codecrush.io.input=query、gen_ai.agent.id/name、enduser.id。</p></li>
+    <li><span class="st">问题改写（span: execute_structured, llm）</span><p>executeNode(rewrite) → executeStructured，产出 <code>{rewrittenQuery, keywords}</code>，spanEnrich 写回 rag.rewrite.query。</p></li>
+    <li><span class="st">意图识别（span: execute_structured, llm）</span><p>enum 硬约束分类，spanEnrich 写 rag.intent/rag.route.kb_names。若 intent=CHAT → 短路不检索，直接兜底分支。</p></li>
+    <li><span class="st">多路召回（span: retrieval.retrieve × N KB）</span><p>resolveRetrievalKbIds 算目标 KB → 逐 KB 并行 <code>Promise.all(retrieval.test)</code>，每个内部套 retrieval.embedding + 可选 retrieval.rerank 子 span → mergeHits 按 chunkId 去重、全局 finalScore 降序取 topN。</p></li>
+    <li><span class="st">兜底判定</span><p><code>threshold = rerankEnabled ? rerankThreshold : 0.2</code>；空召回 → empty_retrieval；<code>topScore &lt; threshold</code> → low_similarity，转兜底。</p></li>
+    <li><span class="st">组装上下文 + 生成（span: stream_text, llm）</span><p>先 <code>yield citation</code>（引用先于正文，供右栏渲染）→ streamTextChunks("reply", ..., {retrievalContext, citations}, chainCtx) 逐 delta <code>yield token</code>。超时发 error 不发 done；契约校验失败降级 fallback 文本。</p></li>
+    <li><span class="st">派生指标 + 落库 + 收尾</span><p>buildResult 用正文 <code>[n]</code> 角标反查算 confidence(被引用分数最大值)/coverage(full/partial) → persist 写 conversations+messages(traceId/citations) → <code>yield done</code> → finally 写质量布尔 + metrics.applyTo(chain) + chain.end()。</p></li>
+  </ol>
+  <p class="kv"><b>span 树</b>：<code>rag.pipeline</code>(chain) ─ execute_structured(rewrite) ─ execute_structured(intent) ─ retrieval.retrieve×N（内含 embedding+rerank）─ stream_text(reply/fallback)。全部经 runInContext(chainCtx) 显式挂父。</p>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>同一份编排代码，三种调用</b></div>
+    <p><code>runWithConfig</code> 被复用：线上 run()（persist:true）、离线批评测 runForEvaluation()（persist:false + evalRunId 打标 + 硬超时）、单条重放 runForReplay()。eval-runs / gaps 的重放走的<b>都是这份代码</b>，只是收尾回调不同——保证「评测重放 = 生产路径」。</p>
+  </div>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>多 KB 合并的已知精度代价</b></div>
+    <p>mergeHits 把不同 KB 各自的 finalScore 直接全局排序——若某些 KB 命中经 rerank、另一些因 rerank 超时降级(finalScore=融合分)，两种量纲被当同一把尺子排序，标定有偏差。设计选择是「记录偏差 + confidence 仅在全体 KB 走同一路径时可信」，而非现在解决。</p>
+  </div>
+</div></section>
+
+<section class="doc" id="applications"><div class="wrap">
+  <h2><span class="num">07</span>应用管理与发布</h2>
+  <p class="sec-lead">「发布纪律」的唯一承载体。应用 = 一份完整 RAG 运行配置的容器；配置内容是不可变追加的版本；<code>production_config_version_id</code> 单指针是「线上跑哪个版本」的唯一事实源，一切上线/回滚/下线都是对这一列的受门禁 CAS。</p>
+  <h3>核心表</h3>
+  <table>
+    <tr><th>表</th><th>关键列</th></tr>
+    <tr><td><code>applications</code></td><td><code>slug</code>(创建后不可变)· <code>enabled</code>· <code>evalGateEnabled</code>· <code>productionConfigVersionId</code>(<b>裸列无 FK</b>,归属靠 CAS 的 EXISTS 守卫)· <code>deletedAt</code></td></tr>
+    <tr><td><code>application_config_versions</code></td><td>四节点 <code>prompt*VersionId</code>(FK RESTRICT)· 四节点 <code>*ModelId</code>+<code>rerankModelId</code>· <code>nodeParams/retrievalParams/fallbackParams jsonb</code>· <b>无 update 方法</b>（不可变靠「没有写路径」保证）</td></tr>
+    <tr><td><code>application_config_version_tags</code></td><td>自定义标签· 复合 FK(configVersionId,appId) 保证标签指向版本必属同应用· production/v 是保留字不作为行存在</td></tr>
+    <tr><td><code>application_release_checks</code></td><td><code>configFingerprint</code>· <code>status</code>(queued/running/passed/failed/expired)· <code>issues jsonb</code>· <code>expiresAt</code>(通过后 15min 短期 artifact)</td></tr>
+  </table>
+  <h3>三态解析 · resolvePublic</h3>
+  <pre><span class="fn">resolvePublic</span>(idOrSlug) {
+  findVisibleAppByIdOrSlug(idOrSlug)   <span class="c">// deleted/missing → 404</span>
+  <span class="k">if</span> (!enabled) <span class="k">throw</span> 403         <span class="c">// 停用优先于「未上线」</span>
+  <span class="k">if</span> (!productionConfigVersionId) <span class="k">throw</span> 404  <span class="c">// 未上线</span>
+  <span class="k">return</span> buildResolvedConfig(app, productionConfigVersionId, preview=<span class="k">false</span>)
+}
+<span class="c">// 拒绝顺序严格：deleted → disabled → production missing → resolved</span>
+<span class="c">// findVisibleAppByIdOrSlug 先按 UUID 正则短路（避免非 UUID 撞 PG 22P02 冒泡成 500）再退 slug</span></pre>
+  <p class="kv">另两个变体：<code>resolveByTag</code>（管理员标签预览）、<code>resolveForTest</code>（指定任意版本）。<code>config_fingerprint</code> = 四节点 prompt/model + rerank + 三组 params + KB 集合（含 intentKey）规范化排序后 sha256；<code>providerRevision</code> 用 <code>deploymentId ?? name</code> 做身份，避免「仅改展示名」造成假 409。</p>
+  <h3>详细流程 · 从新建到上线</h3>
+  <ol class="flow">
+    <li><span class="st">新建应用 → v1（未上线）</span><p>create → validate(config)（KB embedding 一致 / 四节点 model 类型启用 + PromptVersion node 匹配）→ createApplicationWithV1 单事务插 applications(productionConfigVersionId:null) + v1 + KB 关联。</p></li>
+    <li><span class="st">编辑草稿 → 保存为新版本</span><p>编辑态<b>只在前端</b>；createVersion 取 max(version)+1 插新行，<b>从不触碰 production 指针</b>——这正是「新版本默认未上线」的机制来源。</p></li>
+    <li><span class="st">发起 ReleaseCheck（静态门禁 → 异步预演）</span><p>startReleaseCheck → staticGate 7 项（≥1 KB embedding 一致 / 四 PromptVersion 编译无错 + ContractVersion 受支持 / 四模型类型正确 / rerank 合法 / 值域边界），失败 422 <b>不建行不入队</b>；通过 → computeFingerprint → insert(queued) → publish(RELEASE_CHECK_JOB)。</p></li>
+    <li><span class="st">Worker 真实预演</span><p>ReleaseCheckProcessor 幂等/僵尸判定 → 若 samplingEnabled（默认关）对四节点 <code>compileAndSample</code>（用与生产完全相同的 NodeRuntime）；无论是否采样都跑 collectEvalGateIssues（评测软门禁，issue 强制降级 warning，永不阻断）→ hasBlockingIssue（排除法 <code>severity!=="warning"</code>）判 passed(expiresAt=now+15min)/failed。</p></li>
+    <li><span class="st">上线 = 切指针（四连校验 + CAS）</span><p>publishProduction 四连校验：check 归属 → status=passed → 未过期 → <b>重算 fingerprint 匹配</b>（依赖变了就 409）→ casProduction 一条 SQL 同时做 CAS + EXISTS 归属守卫（指针无 FK 的唯一补偿）+ 软删排除，0 行时区分 409(并发)/400(不属于该应用)。</p></li>
+    <li><span class="st">C 端解析 + 回滚</span><p>此后 resolvePublic 立即读到新指针（无缓存直读表）。<b>回滚</b>无独立方法——对历史版本重走 ReleaseCheck+publish，旧版本若引用了此后被禁用的模型会重新失败，杜绝「曾上线即免检」。</p></li>
+  </ol>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>依赖反转，保持单向</b></div>
+    <p><code>eval-runs</code> 在自己的 onModuleInit 里把回调注册进 applications（registerEvalGateProvider 单值 / registerDeletionGuard 数组），使 applications <b>完全不 import eval-runs</b>，编译期依赖方向单向。评测软门禁的「软」是机器保证：collectEvalGateIssues 强制把任何 issue 降级 warning，纵深防御做在消费方而非信任生产方。</p>
+  </div>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>代码与文档偏离</b></div>
+    <p>009 头仍标 not-implemented（实际已交付）；旧 agents 模块未删并存；production 指针仍无复合 FK（只有 CAS EXISTS 守卫）；tryVersionChat 按版本对话测试端点仍是硬编码桩；resolveForTest 不检查 enabled（停用应优先的唯一例外）。</p>
+  </div>
+</div></section>
+
+<section class="doc" id="observability"><div class="wrap">
+  <h2><span class="num">08</span>可观测与 Trace 读模型</h2>
+  <p class="sec-lead">应用侧只发 OTLP，Collector 落 ClickHouse 标准表 <code>otel_traces</code>，<code>traces</code> 模块经自有只读 VIEW 把裸 span 还原成 Session→Trace→Observation 三层读模型。指标汇总（metrics）与 trace 读模型同居 <code>TracesModule</code>——<b>没有独立的 dashboard/metrics 模块</b>。</p>
+  <h3>三层防腐 VIEW（infra/clickhouse/views/）</h3>
+  <table>
+    <tr><th>VIEW / 表</th><th>作用</th></tr>
+    <tr><td><code>codecrush_trace_spans</code></td><td>flatten 每 span 一行；列名规范化；kind 优先取 <code>SpanAttributes['codecrush.span.kind']</code> 否则退回原生 SpanKind</td></tr>
+    <tr><td><code>codecrush_traces</code></td><td>按 root chain span 聚合；根判据 <code>span.kind='chain'</code>（不能用 ParentSpanId=''，因 HttpInstrumentation 给每请求加了 POST 父 span）；token 根值优先、子 span 求和兜底；四质量布尔</td></tr>
+    <tr><td><code>codecrush_sessions</code></td><td>按 session_id 聚合 traces（排除 preview）</td></tr>
+    <tr><td><code>codecrush_metrics_1m</code></td><td><b>AggregatingMergeTree</b> + 增量 MV，只读根 chain span，按分钟桶+应用+模型 xxxState 卷积；存中间态不 finalize（P95 t-digest 须跨桶 merge 后再算分位）</td></tr>
+  </table>
+  <h3>详细流程 · 一条 span 到 Trace 详情</h3>
+  <ol class="flow">
+    <li><span class="st">发出 → 导出</span><p>业务 startManualSpan/withSpan 写 gen_ai.*/rag.*/codecrush.* 属性 → span.end() → BatchSpanProcessor(500ms) → RedactingSpanExporter 脱敏 → OTLP/gRPC 到 Collector。</p></li>
+    <li><span class="st">Collector → CH</span><p>batch(1s/256) → clickhouseexporter 写 otel_traces（create_schema:true 首次自动建表，TTL 30d）。</p></li>
+    <li><span class="st">懒建 VIEW</span><p>后端首次读请求触发 ensureTraceViews()：先 <code>EXISTS TABLE otel_traces</code> 探测，冷库直接返回空（不轮询不报错）；表存在则逐条 command() 建 VIEW，viewsReady 位缓存。</p></li>
+    <li><span class="st">查详情</span><p>GET /traces/:traceId（正则校验 32 位 hex）→ findByTraceId 查 codecrush_trace_spans 拿全部 span → <b>纯 TS 侧</b> buildTraceMeta 聚合头部（不发第二条 CH 查询）→ 前端 traceDetail.ts 纯函数重建 span 树/瀑布/面板（零额外后端请求）。</p></li>
+  </ol>
+  <h3>运行看板指标计算路径</h3>
+  <ol class="flow">
+    <li><span class="st">写侧 delta</span><p>orchestration 在 chain 根 span 结束前写 rag.fallback.used + 四质量布尔 + metrics.applyTo 的 token/model——<b>根 span 自带整条 trace 的汇总值</b>（因多 span 经 batch 分散在不同 INSERT 批次，MV 靠跨行 JOIN 求和在增量下做不干净）。</p></li>
+    <li><span class="st">增量卷积</span><p>codecrush_metrics_1m_mv 每次新行写入即按 <code>span.kind='chain' AND rag.preview!='true'</code> 命中，用 sumState/countState/quantileTDigestState 卷入对应桶。</p></li>
+    <li><span class="st">查询合并 + 下钻</span><p>GET /metrics/overview → queryWindow 执行 sumMerge(fallback_count)/countMerge(qa_count) 得兜底率、quantileTDigestMerge(0.95) 得 P95（合并态查询时才 merge，允许任意时间窗跨桶合并不失真）。点指标 → GET /traces?quick=兜底 精确定位样本 trace。</p></li>
+  </ol>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>代码与文档偏离（两处）</b></div>
+    <p>① 004/015 写「命中引用详情页回 Postgres 取正文」，但代码<b>没有这条回填路径</b>——命中分表落在 span attribute <code>rag.chunk.scores</code>（含就地取的 doc 名，读侧纯 CH 不回 Postgres），chunks.controller 无按 chunkId 取正文的端点，Trace 详情页历史回放只见 doc/section/分数、看不到命中正文；正文只在问答当下的 SSE <code>ChatCitation.text</code> 出现一次不落 CH。② <code>SIGNALS_SELECT</code> 直接 FROM otel_traces 用原始列名，绕开了防腐 VIEW，与同文件 queryStages 经 VIEW 的做法不一致，偏离「读侧只经 VIEW」不变量。</p>
+  </div>
+</div></section>
+
+<section class="doc" id="flywheel"><div class="wrap">
+  <h2><span class="num">09</span>评测飞轮（在线质量 + 离线评测 + 知识缺口）</h2>
+  <p class="sec-lead">三个模块（~11700 行）串成闭环：<code>evaluations</code> 是「体检」、<code>gaps</code> 是「临床开药方」、<code>eval-runs</code> 是「回归考试」。</p>
+  <h3>9.1 在线答案质量 · evaluations</h3>
+  <p>对生产环境真实、非 preview 问答异步抽样（每 15 分钟一轮），独立 LLM Judge 算三维分数（Faithfulness/Answer Relevancy/Context Precision），经 OTLP <code>rag.eval</code> span 写入 ClickHouse 去重聚合。<b>不修改、不等待、不阻塞问答关键路径。</b></p>
+  <h4>详细流程 A · 在线打分</h4>
+  <ol class="flow">
+    <li><span class="st">cron 抢锁</span><p><code>*/15 * * * *</code> → processCycle → tryAcquireLease（条件 UPDATE 单实例互斥）→ 取复合游标 <code>(lastTs, lastTraceId)</code>。</p></li>
+    <li><span class="st">捞候选 + 抽样</span><p>listCandidates(preview=0, 游标之后) → 熔断（连续失败≥5）→ classifyRisk（failed/fallback/no_citations/confidence&lt;0.6=高风险，100% 采样）→ 正常风险走 stableSample（sha256 稳定哈希）+ 日配额衰减。</p></li>
+    <li><span class="st">去重 + 三维打分</span><p>findExisting(traceId, judgeVersion) 命中 → already_scored；否则组装输入（PG 原文 + 前 20 条 chunk 正文）→ 三 evaluator 顺序 await，各自 withJudgeRetry（修复式重试 3 次）。<b>claims 为空 → null 不是 100 分。</b></p></li>
+    <li><span class="st">写 rag.eval span</span><p>成功 emitSuccess（faithfulness 写 <code>?? -1</code> 哨兵）/失败 emitFailure（只含 status=failed，不含分数）→ forceFlushTelemetry。</p></li>
+    <li><span class="st">游标推进 + 落账本</span><p>finishCycle 单事务 upsert <code>eval_candidate_ledger</code> + 更新 <code>eval_watermarks</code>——崩溃则本轮「无事发生」，租约到期后从旧水位重扫。</p></li>
+    <li><span class="st">CH 去重聚合</span><p>codecrush_eval_targets 用 argMaxState 按 <code>(target_trace_id, judge_version)</code> 物理聚合；读查询先 argMaxMerge 去重（<code>nullIf(-1)</code> 还原 NULL）再外层 count/avg——即使 worker 竞态各评一次也不重复计入。</p></li>
+  </ol>
+  <p class="kv"><b>低分样本如何流入知识缺口</b>：不经 evaluations 任何 NestJS 方法——gaps 自建独立 CH repository 直查同一张 codecrush_eval_targets。两者唯一 NestJS 级耦合是 getSettings()（gaps 读 embeddingModelId；<b>在线评测关闸时问题池收集器照样跑</b>）。</p>
+  <h3>9.2 知识缺口 · gaps（七态状态机）</h3>
+  <p>自动收集坏样本 → embedding 相似度增量聚类成缺口簇 → 自动分诊根因 → 人审三步向导补库（<b>无人审不入库是红线</b>）→ 入库后自动回验 → 沉淀为 gold 用例。</p>
+  <div class="figure">
+    <svg viewBox="0 0 860 150" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Microsoft YaHei',sans-serif" font-size="11">
+      <defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#7c5cff"/></marker></defs>
+      <g text-anchor="middle" font-weight="700">
+        <rect x="20" y="55" width="92" height="36" rx="8" fill="#eef4ff" stroke="#2f6fdb"/><text x="66" y="78" fill="#1a2a5a">pending</text>
+        <rect x="150" y="10" width="110" height="34" rx="8" fill="#f5f7fc" stroke="#c9d3ea"/><text x="205" y="32" fill="#5a6a9a" font-size="10">routed_retrieval</text>
+        <rect x="150" y="105" width="110" height="34" rx="8" fill="#f5f7fc" stroke="#c9d3ea"/><text x="205" y="127" fill="#5a6a9a">drafting</text>
+        <rect x="300" y="105" width="110" height="34" rx="8" fill="#fff7ef" stroke="#F2782D"/><text x="355" y="127" fill="#a8460a">reviewing</text>
+        <rect x="450" y="105" width="92" height="34" rx="8" fill="#fff7ef" stroke="#F2782D"/><text x="496" y="127" fill="#a8460a">filled</text>
+        <rect x="450" y="55" width="92" height="36" rx="8" fill="#eafaf1" stroke="#2f9e6f"/><text x="496" y="78" fill="#1a6a4a">verified</text>
+        <rect x="590" y="55" width="92" height="36" rx="8" fill="#f5f7fc" stroke="#c9d3ea"/><text x="636" y="78" fill="#5a6a9a">ignored</text>
+      </g>
+      <g stroke="#7c5cff" stroke-width="1.5" marker-end="url(#a5)" fill="none">
+        <path d="M112 68 L148 30"/><path d="M112 78 L148 118"/><path d="M260 122 L298 122"/><path d="M410 122 L448 122"/><path d="M496 105 L496 93"/><path d="M542 118 Q640 118 636 93"/>
+      </g>
+      <text x="130" y="55" font-size="9" fill="#7c5cff">startDraft</text><text x="430" y="118" font-size="9" fill="#2f9e6f">submitFill(人审红线)</text><text x="500" y="102" font-size="9" fill="#2f9e6f">verifyPass</text>
+    </svg>
+    <div class="cap">gap 七态状态机（TRANSITIONS 常量，15 个转移事件）：reviewing 只能由系统事件 draftReady/resumeDraft 到达</div>
+  </div>
+  <h4>详细流程 C · 飞轮闭环</h4>
+  <ol class="flow">
+    <li><span class="st">收集（cron 每 30min）</span><p>listPoolCandidates(preview=0，四信号 OR：confidence&lt;60 / fallback / no_citations / eval 三分 LEAST&lt;70) → TS 侧复判。</p></li>
+    <li><span class="st">聚类</span><p>聚类键用<b>改写后的问题</b> → findNearestCluster(pgvector 最近邻) → 余弦 ≥0.85 归簇/建簇 → centroid CAS 更新（<code>WHERE freq=expected</code> 冲突重试 3 次）→ 幂等靠 <code>gap_items_source_trace_unique</code> 全局单列唯一（一条 trace 全局只入池一次）。</p></li>
+    <li><span class="st">自动分诊</span><p>triageItem：精确率低+可信度低→missing；精确率低+可信度不低→retrieval；精确率高+忠实度低→generation。簇级 <code>followUpRatio&gt;0.5</code> <b>强制覆写 retrieval 永不 missing</b>（结构性免疫多轮指代追问被误诊为「缺内容」）。只写 root_cause_auto，人工改判写 root_cause_manual（COALESCE 读取，worker 永不覆盖人工）。</p></li>
+    <li><span class="st">补库三步向导</span><p>① draftFill LLM 草拟(drafting→reviewing) ② 人审本地编辑 ③ submitFill(reviewing→filled) → documents.upload 合成 Q&amp;A 文档(autoParse) → attachFillDocument 登记文档 id。</p></li>
+    <li><span class="st">入库后自动回验</span><p>GapVerificationNotifier 订阅 registerTerminal（非 notifyChanged，要覆盖「解析失败」终态）→ replayAndScore（复用 ReplayService，伪造 traceId 绕限频）→ leastOrNull（null-propagating）→ ≥80 verifyPass(verified) / &lt;80 verifyFail(pending+recurred) / null verifyInconclusive(pending 不打复发标)。</p></li>
+    <li><span class="st">沉淀 gold 用例</span><p>promote：resolveQuestion(rewrite_resolved 守卫) → 精确+语义(余弦&gt;0.95)双层去重 → <b>跨域共享事务</b> <code>db.transaction(tx =&gt; { evalSets.createCasesBatchTx(tx); repo.markEnteredEvalSetTx(tx) })</code>（本仓首个跨域共享事务）→ 用例落入 eval-runs 域表(draft)。</p></li>
+  </ol>
+  <div class="callout why"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>无人审不入库红线 · 三层交叉</b></div>
+    <p>① 状态机拓扑：submitFill 的 <code>from:["reviewing"]</code>，而 reviewing 只能由 LLM 草拟成功或恢复草稿到达（不存在跳过人审直接 filled 的边）；② 服务层：submitFill 在调 documents.upload <b>之前</b>显式校验 <code>status==="reviewing"</code>（初版把校验留给下游 CAS 导致 upload 后才报错，已修）；③ upload 调用在代码里只有一个物理调用点。三者任一被绕过都不足以致命，「结构上不可绕过」。</p>
+  </div>
+  <h3>9.3 离线评测 · eval-runs</h3>
+  <p>维护 gold 评测集，对指定应用配置版本发起 run，worker 复用线上编排重放每题（<b>不落会话、不发 rag.eval span、只存 Postgres</b>，与在线读模型物理隔离），4 evaluator 打分产出综合分与逐用例报告，支持两 run 版本对比与上线软门禁。</p>
+  <h4>详细流程 B · 离线 run</h4>
+  <ol class="flow">
+    <li><span class="st">建集/标注 gold</span><p>新建用例即 draft；转 reviewed 时守卫 <code>goldPoints.length===0 → 422</code>（用 <code>req.status ?? row.status</code> 防已 reviewed 用例被清空 gold 仍保 reviewed）。CSV 导入逐行校验。</p></li>
+    <li><span class="st">发起 run</span><p>reapAbandonedRuns（回收僵尸，唯一调用点无独立 cron）→ findActiveRun 命中 409 → 1 小时幂等窗口 409 → 撞 <code>eval_runs_single_active_unique</code>（<b>全局同时最多 1 个活跃 run</b>）→ publish(EVAL_RUN_JOB)。</p></li>
+    <li><span class="st">worker 双层循环</span><p>租约 → 外层 case / 内层 repeat → 断点续跑 → runForEvaluation(cfg, question, {runId, timeoutMs})（复用编排，persist:false，根 span 打 <code>rag.eval.run_id</code> 不发 rag.eval，超时 AbortController 硬中断）。</p></li>
+    <li><span class="st">C-3 守卫 + 打分</span><p>timeout → verdict=timeout；error/空答案 → verdict=unscored（不调判分）；否则 scoreOffline <b>Promise.allSettled 并发 5 evaluator</b>（含 citation），任一 reject/null 记 NULL 绝不记 0。</p></li>
+    <li><span class="st">verdict + 落库</span><p>decideVerdict：4 项(含 correctness)取非 NULL argmin 为 minMetric，但 low/weak/pass 须 3 个 base 指标至少 1 个非 NULL。recordResult 先 UPDATE run(租约守卫，0 行即失租不 INSERT) 后 INSERT 结果行(<b>绝不发 rag.eval span</b>)。</p></li>
+    <li><span class="st">版本对比</span><p>GET /eval/runs/compare?a=&amp;b=：8 指标逐个 delta + significant(|delta|≥3 且两侧样本≥30)；逐 case classifyCase（等级下降或任一共同指标跌≥10 → regressed）。上线软门禁复用同一管线，<b>永远只产 warning，fail-open</b>。</p></li>
+  </ol>
+  <div class="callout warn"><div class="h"><span class="dot"></span><b>已知开放缺口</b></div>
+    <p><code>gap-verification</code> 的 replayAndScore 直接重放 representativeQuestion，<b>没有</b>像 gap-promote 那样做 rewrite_resolved 前置守卫。若簇代表问题恰好固化自带指代的原话，回验会拿带指代的问题重放、检索召不回、误判「复发」。团队已在 promote 路径加了守卫，但未同步到 verify 路径——唯一确认「设计已知、代码尚未修复」的功能性缺口。</p>
+  </div>
+</div></section>
+
+<section class="doc" id="appendix"><div class="wrap">
+  <h2><span class="num">10</span>附录</h2>
+  <h3>REST 端点总表</h3>
+  <p>共 23 个 controller。下表按子系统汇总主要端点（SSE 端点标 <span class="pill o">SSE</span>）。</p>
+  <table>
+    <tr><th>子系统</th><th>主要端点</th></tr>
+    <tr><td>模型</td><td><code>GET/POST/PATCH/DELETE /models</code> · <code>POST /models/:id/test</code>（连通性）</td></tr>
+    <tr><td>知识库/文档/切片</td><td><code>/knowledge-bases</code>(含 <code>POST :id/rebuild</code>) · <code>POST /knowledge-bases/:kbId/documents</code>(批量上传) · <code>POST /documents/:id/parse</code> · <code>GET /documents/:id/{lifecycle,content,processing-runs}</code> · <code>GET /documents/:id/chunks</code> · <code>POST /chunks/batch-delete</code></td></tr>
+    <tr><td>Prompt</td><td><code>/prompts</code> · <code>/prompts/:id/versions</code> · <code>POST …/try-run</code>(试运行) · <code>/prompts/:id/tags</code></td></tr>
+    <tr><td>应用</td><td><code>/applications/**</code> · <code>POST …/release-checks</code> · <code>PUT/DELETE …/production</code>(上线/下线) · <code>GET :idOrSlug/resolve</code></td></tr>
+    <tr><td>问答</td><td><span class="pill o">SSE</span><code>POST /chat</code> · <code>POST /retrieval/test</code> · <code>GET /conversations</code></td></tr>
+    <tr><td>观测</td><td><code>GET /traces</code>(12+ 维筛选) · <code>GET /traces/export</code>(CSV) · <code>GET /traces/sessions[/:id]</code> · <code>GET /traces/:traceId</code> · <code>GET /metrics/overview</code> · <code>GET /metrics/apps/:id</code></td></tr>
+    <tr><td>在线质量</td><td><code>GET /eval/quality/overview</code> · <code>GET /eval/quality/traces/:id</code> · <code>POST …/score</code>(手动) · <code>GET/PUT /eval/quality/settings</code></td></tr>
+    <tr><td>离线评测</td><td><code>/eval/runs</code> · <code>GET /eval/runs/compare?a=&amp;b=</code> · <code>POST /eval/runs/:id/stop</code> · <code>/eval/sets</code>(含 cases/import) · <span class="pill o">SSE</span><code>POST /eval/replay</code></td></tr>
+    <tr><td>知识缺口</td><td><code>/gaps</code>(list/summary/items) · <code>POST /gaps/:id/{ignore,reopen,route-retrieval,split,merge}</code> · <code>PATCH /gaps/:id/root-cause</code> · <code>POST /gaps/:id/{draft-fill,resume-fill,submit-fill}</code> · <code>POST /gaps/{draft-gold,promote}</code></td></tr>
+    <tr><td>基础</td><td><code>POST /auth/login</code> · <code>GET /health</code> · <code>GET /api/docs</code>(Swagger)</td></tr>
+  </table>
+  <h3>代码与设计文档偏离点清单</h3>
+  <p>本文调查中发现的、实现与 <code>docs/design/*</code> 表述不一致之处，均有 file:line 依据。这些是「代码为唯一事实」原则下值得回写文档或立 ADR 的点。</p>
+  <table>
+    <tr><th style="width:120px">子系统</th><th>偏离点</th></tr>
+    <tr><td>Telemetry</td><td>003 描述的 <code>trace.llm/trace.retrieve/recordUsage</code> 语义 API 面不存在，真实只有 <code>withSpan/startManualSpan/runInContext</code> 三个通用原语</td></tr>
+    <tr><td>队列</td><td>多处注释称「singletonKey 保证幂等」，但 standard 策略下 pg-boss <b>不</b>在 singleton_key 建唯一索引，实际靠业务表约束兜底</td></tr>
+    <tr><td>node-runtime</td><td>首 token 熔断默认 <b>15s</b>，非文档/口头说的 30s；全仓无 30000 常量</td></tr>
+    <tr><td>Prompt 组装</td><td>001/003 称「三层」（内容来源），011 称「两层」（消息数），代码实为 3 来源拼 2 消息</td></tr>
+    <tr><td>应用</td><td>009 头仍标 not-implemented（实际已交付）；旧 agents 模块并存未删；production 指针无复合 FK；tryVersionChat 仍是桩；resolveForTest 不检查 enabled</td></tr>
+    <tr><td>可观测</td><td>「命中引用详情页回 Postgres 取正文」的回填路径不存在（正文只在 SSE 出现一次不落 CH）；SIGNALS_SELECT 绕开防腐 VIEW 直查 otel_traces</td></tr>
+    <tr><td>评测飞轮</td><td>scoreOffline 实为 5 evaluator 并发（含 citation）；gap-verification 缺 rewrite_resolved 守卫（唯一「已知未修复」缺口）；reapAbandonedRuns 无独立 cron</td></tr>
+    <tr><td>入库</td><td>新旧两条路径并存（PROCESSING_PROFILES_ENABLED 默认 true）；Profile.parser.mode(layout/ocr) 与 chunker.config 已定义未消费（M4.1b 占位）</td></tr>
+  </table>
+  <div class="callout why" style="margin-top:30px"><div class="h"><span class="dot" style="background:var(--blue)"></span><b>本文档生成方式</b></div>
+    <p>由 7 路并行代码调查 agent（覆盖平台底座 / 模型接入 / 入库 / 检索编排 / 应用发布 / 可观测 / 评测飞轮）读取实际源码后汇总。所有 <span class="file">file:line</span>、函数签名、SQL、表结构均来自真实代码，设计文档仅作对照。行号可能随后续提交漂移，但结构性结论已核实。</p>
+  </div>
+</div></section>
+
+</main>
+</div>
